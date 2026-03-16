@@ -9,7 +9,7 @@ import { io, Socket } from 'socket.io-client';
 export interface ThreatEvent {
   type: 'threat_detected';
   timestamp: string;
-  severity: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
   threat_type: string;
   data: {
     id: number;
