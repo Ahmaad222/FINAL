@@ -1,4 +1,3 @@
-#main.py
 import threading
 
 from monitoring.sniffer import start_monitoring
@@ -13,47 +12,60 @@ def main():
     print("🚀 Starting ZeinaGuard Sensor...")
 
     # --------------------------------
-    # Authenticate sensor
+    # Authenticate
     # --------------------------------
+
     api = APIClient()
+
     token = api.authenticate_sensor()
 
+    if not token:
+        print("❌ Sensor authentication failed")
+        return
+
     # --------------------------------
-    # Start WebSocket
+    # WebSocket
     # --------------------------------
+
     ws = WSClient(token=token)
 
     ws_thread = threading.Thread(
         target=ws.connect_to_server,
         daemon=True
     )
+
     ws_thread.start()
 
     # --------------------------------
     # Threat Manager
     # --------------------------------
+
     threat_manager = ThreatManager()
 
     t1 = threading.Thread(
         target=threat_manager.start,
         daemon=True
     )
+
     t1.start()
 
     # --------------------------------
     # Response Engine
     # --------------------------------
+
     response_engine = ResponseEngine()
 
     t2 = threading.Thread(
         target=response_engine.start,
         daemon=True
     )
+
     t2.start()
 
     # --------------------------------
-    # Start monitoring
+    # Monitoring
     # --------------------------------
+
     start_monitoring()
 
 
