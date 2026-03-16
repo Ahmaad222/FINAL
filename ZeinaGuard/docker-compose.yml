@@ -1,0 +1,115 @@
+version: '3.9'
+
+services:
+  # PostgreSQL with TimescaleDB extension
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: zeinaguard_postgres
+    environment:
+      POSTGRES_USER: zeinaguard_user
+      POSTGRES_PASSWORD: secure_password_change_me
+      POSTGRES_DB: zeinaguard_db
+      POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=timescaledb"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./scripts/init-timescale.sql:/docker-entrypoint-initdb.d/02-timescale.sql
+    networks:
+      - zeinaguard_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zeinaguard_user -d zeinaguard_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for message queue and caching
+  redis:
+    image: redis:7-alpine
+    container_name: zeinaguard_redis
+    command: redis-server --appendonly yes --requirepass redis_password_change_me
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - zeinaguard_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Flask Backend
+  flask-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.flask
+    container_name: zeinaguard_flask
+    environment:
+      FLASK_APP: app.py
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://zeinaguard_user:secure_password_change_me@postgres:5432/zeinaguard_db
+      REDIS_URL: redis://:redis_password_change_me@redis:6379/0
+      JWT_SECRET_KEY: your_jwt_secret_key_change_me
+      FLASK_DEBUG: 1
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend:/app
+    networks:
+      - zeinaguard_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: flask run --host=0.0.0.0
+
+  # Next.js Frontend
+  next-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.nextjs
+    container_name: zeinaguard_nextjs
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - zeinaguard_network
+    depends_on:
+      - flask-backend
+    command: npm run dev
+
+  # PgAdmin for database management (development only)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: zeinaguard_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.com
+      PGADMIN_DEFAULT_PASSWORD: admin_password_change_me
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - zeinaguard_network
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
+  redis_data:
+  pgadmin_data:
+
+networks:
+  zeinaguard_network:
+    driver: bridge
+
