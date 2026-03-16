@@ -1,42 +1,125 @@
 """
-Auth Module for ZeinaGuard Pro - Final Comprehensive Version
-Includes all functions required by app.py and routes.py
+JWT Authentication Module for ZeinaGuard Pro
+Handles user authentication, token generation, and validation
 """
+
 from functools import wraps
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask import request, jsonify, Blueprint
+from flask import request, jsonify
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, 
     get_jwt_identity, get_jwt
 )
+import os
 
-# 1. تعريف الـ Blueprint (مطلوب لـ routes.py)
-auth_bp = Blueprint('auth', __name__)
+# Password hashing configuration
 HASH_METHOD = 'pbkdf2:sha256'
 
-# 2. وظائف التحقق والتشفير
+
 def hash_password(password: str) -> str:
+    """Hash a password using PBKDF2-SHA256"""
     return generate_password_hash(password, method=HASH_METHOD)
 
+
 def verify_password(stored_hash: str, provided_password: str) -> bool:
+    """Verify a password against its hash"""
     return check_password_hash(stored_hash, provided_password)
 
-def authenticate_user(username: str, password: str):
-    user = MOCK_USERS.get(username)
-    if user and verify_password(user['password_hash'], password):
-        return user
-    return None
 
-def get_user_by_id(user_id: int):
-    """الدالة اللي كانت ناقصة ومسببة المشكلة"""
-    for user in MOCK_USERS.values():
-        if user['user_id'] == user_id:
-            return user
-    return None
+class AuthService:
+    """Service for handling authentication operations"""
+    
+    def __init__(self, app=None):
+        self.app = app
+        self.jwt = None
+        if app:
+            self.init_app(app)
+    
+    def init_app(self, app):
+        """Initialize JWT with Flask app"""
+        self.jwt = JWTManager(app)
+        
+        # JWT error handlers
+        @self.jwt.expired_token_loader
+        def expired_token_callback(jwt_header, jwt_data):
+            return jsonify({
+                'error': 'Token has expired',
+                'code': 'token_expired'
+            }), 401
+        
+        @self.jwt.invalid_token_loader
+        def invalid_token_callback(error):
+            return jsonify({
+                'error': 'Invalid token',
+                'code': 'invalid_token'
+            }), 401
+        
+        @self.jwt.unauthorized_loader
+        def missing_token_callback(error):
+            return jsonify({
+                'error': 'Request does not contain an access token',
+                'code': 'authorization_required'
+            }), 401
+    
+    @staticmethod
+    def create_tokens(user_id: int, username: str, email: str, is_admin: bool = False):
+        """
+        Create JWT access token
+        
+        Args:
+            user_id: User's database ID
+            username: User's username
+            email: User's email
+            is_admin: Whether user is admin
+        
+        Returns:
+            Dictionary with access token and expiration
+        """
+        identity = {
+            'user_id': user_id,
+            'username': username,
+            'email': email,
+            'is_admin': is_admin
+        }
+        
+        access_token = create_access_token(
+            identity=identity,
+            expires_delta=timedelta(hours=24)  # 24 hour token lifetime
+        )
+        
+        return {
+            'access_token': access_token,
+            'token_type': 'Bearer',
+            'expires_in': 86400,  # 24 hours in seconds
+            'user': {
+                'id': user_id,
+                'username': username,
+                'email': email,
+                'is_admin': is_admin
+            }
+        }
+    
+    @staticmethod
+    def get_current_user():
+        """Get current authenticated user from JWT"""
+        try:
+            identity = get_jwt_identity()
+            return identity
+        except:
+            return None
+    
+    @staticmethod
+    def get_current_user_id():
+        """Get current user ID from JWT"""
+        identity = get_jwt_identity()
+        if identity:
+            return identity.get('user_id')
+        return None
 
-# 3. الديكوراتورز (Decorators مطلوبين لـ routes.py)
+
 def token_required(f):
+    """Decorator to require JWT token"""
     @wraps(f)
     @jwt_required()
     def decorated_function(*args, **kwargs):
@@ -44,38 +127,21 @@ def token_required(f):
         return f(current_user, *args, **kwargs)
     return decorated_function
 
+
 def admin_required(f):
+    """Decorator to require admin role"""
     @wraps(f)
     @jwt_required()
     def decorated_function(*args, **kwargs):
         current_user = get_jwt_identity()
-        if not current_user or not current_user.get('is_admin'):
+        if not current_user.get('is_admin'):
             return jsonify({'error': 'Admin access required'}), 403
         return f(current_user, *args, **kwargs)
     return decorated_function
 
-# 4. كلاس AuthService (مطلوب لـ app.py)
-class AuthService:
-    def __init__(self, app=None):
-        self.app = app
-        self.jwt = None
-        if app: self.init_app(app)
-    
-    def init_app(self, app):
-        self.jwt = JWTManager(app)
 
-    @staticmethod
-    def create_tokens(user_id, username, email, is_admin=False):
-        identity = {'user_id': user_id, 'username': username, 'email': email, 'is_admin': is_admin}
-        access_token = create_access_token(identity=identity, expires_delta=timedelta(hours=24))
-        return {
-            'access_token': access_token,
-            'token_type': 'Bearer',
-            'expires_in': 86400,
-            'user': {'id': user_id, 'username': username, 'email': email, 'is_admin': is_admin}
-        }
-
-# 5. مستخدمين وهميين (عشان تعرف تعمل Login بـ admin / admin123)
+# In-memory user store (FOR DEVELOPMENT ONLY - use database in production)
+# Matches init_db.py credentials: admin/admin123, analyst/analyst123
 MOCK_USERS = {
     'admin': {
         'user_id': 1,
@@ -83,15 +149,52 @@ MOCK_USERS = {
         'email': 'admin@zeinaguard.local',
         'password_hash': generate_password_hash('admin123', method=HASH_METHOD),
         'is_admin': True,
-        'is_active': True
-    }
+        'is_active': True,
+        'created_at': datetime.now()
+    },
+    'analyst': {
+        'user_id': 2,
+        'username': 'analyst',
+        'email': 'analyst@zeinaguard.local',
+        'password_hash': generate_password_hash('analyst123', method=HASH_METHOD),
+        'is_admin': False,
+        'is_active': True,
+        'created_at': datetime.now()
+    },
+    'monitor': {
+        'user_id': 3,
+        'username': 'monitor',
+        'email': 'monitor@zeinaguard.local',
+        'password_hash': generate_password_hash('monitor123', method=HASH_METHOD),
+        'is_admin': False,
+        'is_active': True,
+        'created_at': datetime.now()
+    },
 }
 
-# 6. مسارات الـ API
-@auth_bp.route('/api/auth/login', methods=['POST'])
-def login():
-    data = request.get_json()
-    if not data: return jsonify({'error': 'Missing JSON'}), 400
-    user = authenticate_user(data.get('username'), data.get('password'))
-    if not user: return jsonify({'error': 'Invalid credentials'}), 401
-    return jsonify(AuthService.create_tokens(user['user_id'], user['username'], user['email'], user['is_admin']))
+
+def authenticate_user(username: str, password: str):
+    """
+    Authenticate user by username and password
+    Returns user data if valid, None otherwise
+    """
+    user = MOCK_USERS.get(username)
+    
+    if not user:
+        return None
+    
+    if not user.get('is_active'):
+        return None
+    
+    if not verify_password(user['password_hash'], password):
+        return None
+    
+    return user
+
+
+def get_user_by_id(user_id: int):
+    """Get user by ID"""
+    for user in MOCK_USERS.values():
+        if user['user_id'] == user_id:
+            return user
+    return None

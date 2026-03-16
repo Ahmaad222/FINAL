@@ -74,13 +74,8 @@ export function useCommandPalette(options: UseCommandPaletteOptions = {}) {
         action: async () => {
           try {
             const response = await fetch(
-              `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/threats/demo/simulate-threat`,
-              {
-                method: 'POST',
-                headers: {
-                  'Authorization': `Bearer ${localStorage.getItem('zeinaguard_access_token')}`,
-                },
-              }
+              `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/threats/demo/simulate-threat`,
+              { method: 'POST' }
             );
             if (response.ok) {
               console.log('[Command] Threat simulated');

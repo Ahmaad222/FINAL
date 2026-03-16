@@ -115,7 +115,7 @@ def get_current_user():
 # ==================== Threat Routes ====================
 
 @threats_bp.route('/', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_threats():
     """Get list of threats with optional filtering"""
     try:
@@ -177,7 +177,7 @@ def get_threats():
 
 
 @threats_bp.route('/<int:threat_id>', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_threat(threat_id):
     """Get threat details"""
     try:
@@ -207,16 +207,16 @@ def get_threat(threat_id):
 
 
 @threats_bp.route('/<int:threat_id>/resolve', methods=['POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def resolve_threat(threat_id):
     """Mark threat as resolved"""
     try:
-        current_user = get_jwt_identity()
+        current_user = get_jwt_identity() or {}
         
         return jsonify({
             'message': 'Threat resolved successfully',
             'threat_id': threat_id,
-            'resolved_by': current_user['username'],
+            'resolved_by': current_user.get('username', 'anonymous'),
             'resolved_at': datetime.now().isoformat()
         }), 200
     
@@ -224,8 +224,26 @@ def resolve_threat(threat_id):
         return jsonify({'error': f'Failed to resolve threat: {str(e)}'}), 500
 
 
+@threats_bp.route('/<int:threat_id>/block', methods=['POST'])
+@jwt_required(optional=True)
+def block_threat(threat_id):
+    """Block/whitelist a threat"""
+    try:
+        data = request.get_json()
+        action = data.get('action', 'block') if data else 'block'
+        
+        return jsonify({
+            'message': 'Threat blocked/whitelisted',
+            'threat_id': threat_id,
+            'action': action,
+            'blocked_at': datetime.now().isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to block threat: {str(e)}'}), 500
+
+
 @threats_bp.route('/demo/simulate-threat', methods=['POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def simulate_threat():
     """
     Demo endpoint to simulate a real-time threat detection
@@ -233,7 +251,7 @@ def simulate_threat():
     This simulates what would happen when the detection engine finds a threat
     """
     try:
-        current_user = get_jwt_identity()
+        current_user = get_jwt_identity() or {}
         
         # Simulate threat data
         threat_data = {
@@ -247,7 +265,7 @@ def simulate_threat():
             'signal_strength': -35,
             'packet_count': 250,
             'is_resolved': False,
-            'detected_by_user': current_user['username'],
+            'detected_by_user': current_user.get('username', 'anonymous'),
             'created_at': datetime.now().isoformat()
         }
         
@@ -267,7 +285,7 @@ def simulate_threat():
 # ==================== Sensor Routes ====================
 
 @sensors_bp.route('/', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_sensors():
     """Get list of sensors"""
     try:
@@ -310,7 +328,7 @@ def get_sensors():
 
 
 @sensors_bp.route('/<int:sensor_id>/health', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_sensor_health(sensor_id):
     """Get sensor health metrics"""
     try:
@@ -334,7 +352,7 @@ def get_sensor_health(sensor_id):
 # ==================== Alert Routes ====================
 
 @alerts_bp.route('/', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_alerts():
     """Get list of alerts"""
     try:
@@ -355,16 +373,16 @@ def get_alerts():
 
 
 @alerts_bp.route('/<int:alert_id>/acknowledge', methods=['POST'])
-@jwt_required()
+@jwt_required(optional=True)
 def acknowledge_alert(alert_id):
     """Acknowledge an alert"""
     try:
-        current_user = get_jwt_identity()
+        current_user = get_jwt_identity() or {}
         
         return jsonify({
             'message': 'Alert acknowledged',
             'alert_id': alert_id,
-            'acknowledged_by': current_user['username'],
+            'acknowledged_by': current_user.get('username', 'anonymous'),
             'acknowledged_at': datetime.now().isoformat()
         }), 200
     
@@ -375,7 +393,7 @@ def acknowledge_alert(alert_id):
 # ==================== Analytics Routes ====================
 
 @analytics_bp.route('/threat-stats', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_threat_stats():
     """Get threat statistics"""
     try:
@@ -402,7 +420,7 @@ def get_threat_stats():
 
 
 @analytics_bp.route('/trends', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_trends():
     """Get historical trend data"""
     try:
@@ -431,7 +449,7 @@ def get_trends():
 # ==================== User Routes ====================
 
 @users_bp.route('/profile', methods=['GET'])
-@jwt_required()
+@jwt_required(optional=True)
 def get_user_profile():
     """Get current user's profile"""
     try:
@@ -453,9 +471,8 @@ def get_user_profile():
 
 def register_blueprints(app):
     """Register all API blueprints"""
-    from routes_auth import auth_bp
-    from routes_threats import threats_bp
     from routes_dashboard import dashboard_bp
+    from routes_topology import topology_bp
     
     app.register_blueprint(auth_bp)
     app.register_blueprint(threats_bp)
@@ -464,3 +481,4 @@ def register_blueprints(app):
     app.register_blueprint(alerts_bp)
     app.register_blueprint(analytics_bp)
     app.register_blueprint(users_bp)
+    app.register_blueprint(topology_bp)

@@ -1,19 +1,15 @@
-Flask>=2.3.3,<3.0.0
-Flask-CORS>=4.0.0
-Flask-JWT-Extended>=4.5.2
-# الثلاثة دول لازم يكونوا بنفس الإصدارات دي عشان يشتغلوا مع بعض
-Flask-SocketIO==5.3.6
-python-socketio==5.11.1
-python-engineio==4.9.1
-# باقي المكتبات
-eventlet>=0.33.3
+Flask==3.0.0
+Flask-CORS==4.0.0
+Flask-JWT-Extended==4.5.2
 Flask-SQLAlchemy==3.1.1
 psycopg2-binary==2.9.9
 sqlalchemy==2.0.23
 python-dotenv==1.0.0
 redis==5.0.1
+python-socketio==5.10.0
+python-engineio==4.9.0
 gunicorn==21.2.0
-Werkzeug>=2.3.7,<3.0.0
+Werkzeug==3.0.0
 scapy==2.5.0
 pyshark==0.6
 cryptography==41.0.7

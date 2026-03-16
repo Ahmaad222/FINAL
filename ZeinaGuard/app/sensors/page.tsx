@@ -1,8 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useAuth } from '@/hooks/use-auth';
-import { apiClient } from '@/lib/api';
+import { useEffect, useState, useCallback } from 'react';
+import { sensorsAPI } from '@/lib/api';
 import { Activity, Wifi, Signal, Clock } from 'lucide-react';
 
 interface Sensor {
@@ -17,30 +16,46 @@ interface Sensor {
   coverage_area: string;
 }
 
+function normalizeSensor(raw: Record<string, unknown>): Sensor {
+  return {
+    id: Number(raw.id) || 0,
+    hostname: String(raw.hostname ?? raw.name ?? ''),
+    location: String(raw.location ?? ''),
+    status: (raw.status as Sensor['status']) ?? 'offline',
+    signal_strength: Number(raw.signal_strength) ?? -70,
+    uptime_percent: Number(raw.uptime_percent) ?? 100,
+    last_seen: String(raw.last_seen ?? raw.last_heartbeat ?? new Date().toISOString()),
+    packet_count: Number(raw.packet_count) ?? 0,
+    coverage_area: String(raw.coverage_area ?? 'N/A'),
+  };
+}
+
 export default function SensorsPage() {
-  const { user, token } = useAuth();
   const [sensors, setSensors] = useState<Sensor[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchSensors = useCallback(async () => {
+    try {
+      setError(null);
+      setLoading(true);
+      const data = await sensorsAPI.getSensors();
+      const list = Array.isArray(data) ? data : [];
+      setSensors(list.map((item: unknown) => normalizeSensor(item as Record<string, unknown>)));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to fetch sensors';
+      setError(msg);
+      setSensors([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    if (!token) return;
-
-    const fetchSensors = async () => {
-      try {
-        setLoading(true);
-        const response = await apiClient.get('/api/sensors', token);
-        setSensors(response.data);
-      } catch (error) {
-        console.error('Failed to fetch sensors:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchSensors();
-    const interval = setInterval(fetchSensors, 5000); // Refresh every 5 seconds
+    const interval = setInterval(fetchSensors, 5000);
     return () => clearInterval(interval);
-  }, [token]);
+  }, [fetchSensors]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -62,10 +77,28 @@ export default function SensorsPage() {
     return 'Poor';
   };
 
-  if (loading) {
+  if (loading && sensors.length === 0) {
     return (
       <div className="min-h-screen bg-slate-900 p-8 flex items-center justify-center">
         <div className="text-slate-300">Loading sensors...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-slate-900 p-8 flex items-center justify-center">
+        <div className="text-center max-w-md">
+          <Wifi className="w-16 h-16 text-amber-500/50 mx-auto mb-4" />
+          <p className="text-slate-300 font-medium mb-2">Unable to load sensors</p>
+          <p className="text-slate-500 text-sm mb-4">{error}</p>
+          <button
+            onClick={() => fetchSensors()}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -173,7 +206,7 @@ export default function SensorsPage() {
           ))}
         </div>
 
-        {sensors.length === 0 && (
+        {sensors.length === 0 && !loading && (
           <div className="text-center py-12">
             <Wifi className="w-16 h-16 text-slate-600 mx-auto mb-4" />
             <p className="text-slate-400 text-lg">No sensors found</p>

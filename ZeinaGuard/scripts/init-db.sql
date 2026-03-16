@@ -227,3 +227,65 @@ INSERT INTO permissions (name, description) VALUES
     ('manage_system', 'System configuration and maintenance'),
     ('view_audit_logs', 'View audit logs')
 ON CONFLICT (name) DO NOTHING;
+
+-- Network Topology Tables (added for topology visualization feature)
+CREATE TABLE IF NOT EXISTS topology_sensors (
+    id SERIAL PRIMARY KEY,
+    sensor_id VARCHAR(100) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    location VARCHAR(255),
+    mac_address VARCHAR(17),
+    is_active BOOLEAN DEFAULT true,
+    last_seen TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS topology_access_points (
+    id SERIAL PRIMARY KEY,
+    ap_id VARCHAR(100) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    ssid VARCHAR(255),
+    mac_address VARCHAR(17),
+    security VARCHAR(50),
+    signal_strength INTEGER,
+    is_shared BOOLEAN DEFAULT false,
+    last_seen TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS topology_stations (
+    id SERIAL PRIMARY KEY,
+    station_id VARCHAR(100) UNIQUE NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    device_type VARCHAR(100),
+    mac_address VARCHAR(17),
+    vendor_info VARCHAR(255),
+    status VARCHAR(50) DEFAULT 'offline',
+    signal_strength INTEGER,
+    is_shared BOOLEAN DEFAULT false,
+    last_seen TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS topology_connections (
+    id SERIAL PRIMARY KEY,
+    source_type VARCHAR(50) NOT NULL,
+    source_id VARCHAR(100) NOT NULL,
+    target_type VARCHAR(50) NOT NULL,
+    target_id VARCHAR(100) NOT NULL,
+    connection_type VARCHAR(50) DEFAULT 'association',
+    signal_strength INTEGER,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_id, target_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_topology_sensors_active ON topology_sensors(is_active);
+CREATE INDEX IF NOT EXISTS idx_topology_aps_shared ON topology_access_points(is_shared);
+CREATE INDEX IF NOT EXISTS idx_topology_stations_shared ON topology_stations(is_shared);
+CREATE INDEX IF NOT EXISTS idx_topology_connections_active ON topology_connections(is_active);
+

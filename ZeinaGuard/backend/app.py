@@ -1,70 +1,128 @@
-from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_jwt_extended import JWTManager
+"""
+ZeinaGuard Pro - Wireless Intrusion Prevention System
+Flask Backend - Detection Engine and API Server
+"""
 
-from auth import auth_bp, AuthService
-from routes_sensors import sensors_bp
-from routes_dashboard import dashboard_bp
+import os
+from datetime import timedelta
+from flask import Flask, jsonify
 from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+from dotenv import load_dotenv
+from auth import AuthService
+from routes import register_blueprints
+from websocket_server import init_socketio
 from models import db
 
+# Load environment variables
+load_dotenv()
+
+# Initialize Flask app
 app = Flask(__name__)
-CORS(app)
-# ---------------------------
-# Database Config
-# ---------------------------
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///zeinaguard.db'
+
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# Configuration
+app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'change-me-in-production')
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
+app.config['JSON_SORT_KEYS'] = False
+
+# Database Configuration
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
+    'DATABASE_URL',
+    'postgresql://zeinaguard_user:secure_password_change_me@localhost:5432/zeinaguard_db'
+)
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['JWT_SECRET_KEY'] = 'your_super_secret_key'
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_size': 10,
+    'pool_recycle': 3600,
+    'pool_pre_ping': True,
+}
 
+# Enable CORS - allow all origins for Replit proxy compatibility
+CORS(app, resources={
+    r"/api/*": {
+        "origins": "*",
+        "methods": ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        "allow_headers": ['Content-Type', 'Authorization']
+    }
+})
+
+# Initialize Database
 db.init_app(app)
-AuthService(app)
 
-# ---------------------------
-# Register Blueprints
-# ---------------------------
-app.register_blueprint(auth_bp)
-app.register_blueprint(sensors_bp)
-app.register_blueprint(dashboard_bp)
+# Initialize JWT
+auth_service = AuthService(app)
 
-# ---------------------------
-# Create DB + Default Sensor
-# ---------------------------
+# Initialize WebSocket (Socket.io)
+socketio = init_socketio(app)
+app.socketio = socketio  # Store reference for broadcasting
+
+# Register API blueprints
+register_blueprints(app)
+
+# Create tables on startup
 with app.app_context():
+    try:
+        db.create_all()
+        print("[DB] Database tables created/verified")
+    except Exception as e:
+        print(f"[DB] Warning: Could not create tables: {e}")
 
-    db.create_all()
+# Health check endpoint
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for Docker healthcheck"""
+    return jsonify({'status': 'healthy', 'service': 'zeinaguard-backend'}), 200
 
-    from models import Sensor
+# Root endpoint
+@app.route('/', methods=['GET'])
+def root():
+    """Root endpoint - API information"""
+    return jsonify({
+        'service': 'ZeinaGuard Pro Backend',
+        'version': '1.0.0',
+        'status': 'running',
+        'environment': os.getenv('FLASK_ENV', 'development'),
+        'endpoints': {
+            'auth': '/api/auth/login',
+            'threats': '/api/threats',
+            'sensors': '/api/sensors',
+            'alerts': '/api/alerts',
+            'analytics': '/api/analytics',
+            'users': '/api/users',
+            'topology': '/api/topology'
+        }
+    }), 200
 
-    sensor = Sensor.query.filter_by(id="sensor1").first()
+# API status endpoint
+@app.route('/api/status', methods=['GET'])
+def api_status():
+    """API status endpoint"""
+    return jsonify({
+        'api': 'operational',
+        'database': 'pending',
+        'redis': 'pending',
+        'detection_engine': 'initializing',
+        'version': '1.0.0'
+    }), 200
 
-    if not sensor:
-        sensor = Sensor(
-            id="sensor1",
-            name="Abuelatta Sensor",
-            location="My Room",
-            is_active=True
-        )
+# Error handlers
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Not found', 'code': 404}), 404
 
-        db.session.add(sensor)
-        db.session.commit()
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({'error': 'Internal server error', 'code': 500}), 500
 
-        print("✅ Sensor created")
-
-    else:
-        print("✅ Sensor already exists")
-
-# ---------------------------
-# Run Server
-# ---------------------------
-if __name__ == "__main__":
-
-    import eventlet
-    import eventlet.wsgi
-
-    print("🚀 ZeinaGuard Backend Running...")
-
-    eventlet.wsgi.server(
-        eventlet.listen(("0.0.0.0", 5000)),
-        app
+if __name__ == '__main__':
+    # Development server with WebSocket support
+    port = int(os.getenv('FLASK_PORT', 8000))
+    socketio.run(
+        app,
+        host='0.0.0.0',
+        port=port,
+        debug=os.getenv('FLASK_DEBUG', 'false').lower() == 'true',
+        allow_unsafe_werkzeug=True
     )

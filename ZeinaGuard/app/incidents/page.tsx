@@ -1,8 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useAuth } from '@/hooks/use-auth';
-import { apiClient } from '@/lib/api';
+import { useEffect, useState, useCallback } from 'react';
+import { incidentsAPI } from '@/lib/api';
 import { AlertTriangle, Clock, CheckCircle, Activity } from 'lucide-react';
 
 interface Incident {
@@ -17,28 +16,40 @@ interface Incident {
 }
 
 export default function IncidentsPage() {
-  const { user, token } = useAuth();
   const [incidents, setIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'open' | 'in_progress' | 'resolved'>('all');
 
+  const fetchIncidents = useCallback(async () => {
+    try {
+      setError(null);
+      setLoading(true);
+      const data = await incidentsAPI.getIncidents();
+      const incidents = Array.isArray(data) ? data : [];
+      const normalized = incidents.map((i: any) => ({
+        id: i.id,
+        title: i.title,
+        description: i.description ?? '',
+        severity: (i.severity?.toLowerCase() || 'medium') as Incident['severity'],
+        status: (i.status?.replace('_', ' ') || 'open') as Incident['status'],
+        created_at: i.created_at,
+        updated_at: i.updated_at ?? i.created_at,
+        assigned_to: i.assigned_to ?? 'Unassigned',
+      }));
+      setIncidents(normalized);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to fetch incidents';
+      setError(msg);
+      setIncidents([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    if (!token) return;
-
-    const fetchIncidents = async () => {
-      try {
-        setLoading(true);
-        const response = await apiClient.get('/api/incidents', token);
-        setIncidents(response.data);
-      } catch (error) {
-        console.error('Failed to fetch incidents:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchIncidents();
-  }, [token]);
+  }, [fetchIncidents]);
 
   const filteredIncidents = incidents.filter((incident) => {
     if (filter === 'all') return true;
@@ -73,10 +84,31 @@ export default function IncidentsPage() {
     }
   };
 
-  if (loading) {
+  if (loading && incidents.length === 0) {
     return (
       <div className="min-h-screen bg-slate-900 p-8 flex items-center justify-center">
         <div className="text-slate-300">Loading incidents...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-slate-900 p-8 flex items-center justify-center">
+        <div className="text-center max-w-md">
+          <AlertTriangle className="w-16 h-16 text-amber-500/50 mx-auto mb-4" />
+          <p className="text-slate-300 font-medium mb-2">Unable to load incidents</p>
+          <p className="text-slate-500 text-sm mb-4">{error}</p>
+          <p className="text-slate-500 text-xs mb-4">
+            Ensure the backend is running (default: http://localhost:5000)
+          </p>
+          <button
+            onClick={() => fetchIncidents()}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -173,7 +205,7 @@ export default function IncidentsPage() {
           ))}
         </div>
 
-        {filteredIncidents.length === 0 && (
+        {filteredIncidents.length === 0 && !loading && (
           <div className="text-center py-12">
             <CheckCircle className="w-16 h-16 text-slate-600 mx-auto mb-4" />
             <p className="text-slate-400 text-lg">

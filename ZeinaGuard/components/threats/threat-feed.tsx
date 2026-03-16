@@ -8,7 +8,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertTriangle, AlertCircle, WifiOff } from 'lucide-react';
 
 interface ThreatItem extends ThreatEvent {
-  id?: string;
+  id?: string; // For React key
 }
 
 export function ThreatFeed() {
@@ -17,56 +17,49 @@ export function ThreatFeed() {
   const [latestThreatTime, setLatestThreatTime] = useState<string | null>(null);
 
   const handleThreatEvent = (event: ThreatEvent) => {
-    if (!event || !event.data) return;
-
+    // Add threat to the list
     const threatItem: ThreatItem = {
       ...event,
-      id: `${event.timestamp}-${Math.random()}`
+      id: `${event.timestamp}-${Math.random()}`,
     };
 
-    setThreats(prev => [threatItem, ...prev].slice(0, 50));
+    // Add to beginning of list (newest first)
+    setThreats((prev) => [threatItem, ...prev].slice(0, 50));
+    
+    // Update latest threat time
+    setLatestThreatTime(event.timestamp);
 
-    if (event.timestamp) {
-      setLatestThreatTime(event.timestamp);
-    }
-
+    // Visual feedback: flash the screen for critical threats
     if (event.severity === 'critical') {
       flashCriticalAlert();
     }
   };
 
   const { isConnected: isSocketConnected } = useSocket({
-    onThreatEvent: handleThreatEvent
+    onThreatEvent: handleThreatEvent,
   });
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      setIsConnected(isSocketConnected());
-    }, 1000);
-
-    return () => clearInterval(interval);
+    setIsConnected(isSocketConnected());
   }, [isSocketConnected]);
 
   const flashCriticalAlert = () => {
+    // Add visual feedback for critical threats
     const body = document.body;
     const originalBg = body.style.backgroundColor;
-
-    body.style.backgroundColor = '#7f1d1d';
-
+    body.style.backgroundColor = '#7f1d1d'; // Red
     setTimeout(() => {
       body.style.backgroundColor = originalBg;
     }, 200);
-
     setTimeout(() => {
       body.style.backgroundColor = '#7f1d1d';
     }, 400);
-
     setTimeout(() => {
       body.style.backgroundColor = originalBg;
     }, 600);
   };
 
-  const getSeverityColor = (severity?: string) => {
+  const getSeverityColor = (severity: string) => {
     switch (severity) {
       case 'critical':
         return 'bg-red-900 text-red-100 border-red-700';
@@ -81,19 +74,17 @@ export function ThreatFeed() {
     }
   };
 
-  const getSeverityIcon = (severity?: string) => {
+  const getSeverityIcon = (severity: string) => {
     if (severity === 'critical' || severity === 'high') {
       return <AlertTriangle className="w-4 h-4" />;
     }
     return <AlertCircle className="w-4 h-4" />;
   };
 
-  const getThreatTypeLabel = (threatType?: string) => {
-    if (!threatType) return "Unknown Threat";
-
+  const getThreatTypeLabel = (threatType: string) => {
     return threatType
       .split('_')
-      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ');
   };
 
@@ -116,7 +107,7 @@ export function ThreatFeed() {
         </CardContent>
       </Card>
 
-      {/* Latest Threat */}
+      {/* Latest Threat Alert */}
       {latestThreatTime && (
         <Alert className="bg-red-900 border-red-700">
           <AlertDescription className="text-red-100">
@@ -125,7 +116,7 @@ export function ThreatFeed() {
         </Alert>
       )}
 
-      {/* Header */}
+      {/* Threat List Header */}
       <Card className="bg-slate-800 border-slate-700">
         <CardHeader>
           <CardTitle className="text-white flex items-center gap-2">
@@ -140,73 +131,51 @@ export function ThreatFeed() {
         </CardHeader>
       </Card>
 
-      {/* Threats List */}
+      {/* Threat Items */}
       <div className="space-y-3">
         {threats.length === 0 ? (
           <Card className="bg-slate-800 border-slate-700">
             <CardContent className="pt-6 text-center text-slate-400">
               <p>No threats detected yet</p>
-              <p className="text-sm mt-2">
-                When threats are detected, they will appear here in real-time
-              </p>
+              <p className="text-sm mt-2">When threats are detected, they will appear here in real-time</p>
             </CardContent>
           </Card>
         ) : (
-          threats.map(threat => {
-            const data = threat.data || {};
-            return (
-              <Card
-                key={threat.id}
-                className={`${getSeverityColor(threat.severity)} border-2`}
-              >
-                <CardContent className="pt-6">
-                  <div className="flex items-start gap-3">
+          threats.map((threat) => (
+            <Card
+              key={threat.id}
+              className={`${getSeverityColor(threat.severity)} border-2`}
+            >
+              <CardContent className="pt-6">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3 flex-1">
                     {getSeverityIcon(threat.severity)}
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-1">
                         <h3 className="font-semibold">
-                          {getThreatTypeLabel(data.threat_type)}
+                          {getThreatTypeLabel(threat.data.threat_type)}
                         </h3>
                         <Badge variant="outline" className="text-xs">
-                          {(threat.severity || "info").toUpperCase()}
+                          {threat.severity.toUpperCase()}
                         </Badge>
                       </div>
-                      <p className="text-sm mb-2">
-                        {data.description || "No description available"}
-                      </p>
+                      <p className="text-sm mb-2">{threat.data.description}</p>
                       <div className="text-xs space-y-1">
-                        <p>Source MAC: {data.source_mac || "-"}</p>
-                        <p>SSID: {data.ssid || "-"}</p>
-                        <p>Signal Strength: {data.signal_strength ?? "-"} dBm</p>
-                        <p>Packets: {data.packet_count ?? "-"}</p>
-                        <p>
-                          Detected: {data.created_at
-                            ? new Date(data.created_at).toLocaleString()
-                            : "-"
-                          }
-                        </p>
+                        <p>Source MAC: {threat.data.source_mac}</p>
+                        <p>SSID: {threat.data.ssid}</p>
+                        <p>Signal Strength: {threat.data.signal_strength} dBm</p>
+                        <p>Packets: {threat.data.packet_count}</p>
+                        <p>Detected: {new Date(threat.data.created_at).toLocaleString()}</p>
                       </div>
                     </div>
                   </div>
-                </CardContent>
-              </Card>
-            );
-          })
+                </div>
+              </CardContent>
+            </Card>
+          ))
         )}
       </div>
 
-      {/* Status Footer */}
-      <Card className="bg-slate-800 border-slate-700">
-        <CardHeader>
-          <CardTitle className="text-white text-sm">Phase 2 Status</CardTitle>
-        </CardHeader>
-        <CardContent className="text-sm text-slate-300 space-y-1">
-          <p>✓ Socket.io WebSocket connection established</p>
-          <p>✓ Real-time threat event broadcasting</p>
-          <p>✓ Threat feed UI with live updates</p>
-          <p>✓ Severity-based color coding and alerts</p>
-        </CardContent>
-      </Card>
     </div>
   );
 }
