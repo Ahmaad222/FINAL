@@ -37,12 +37,7 @@ export function ThreatTimelineChart() {
       try {
         setLoading(true);
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/dashboard/threat-timeline`,
-          {
-            headers: {
-              'Authorization': `Bearer ${localStorage.getItem('zeinaguard_access_token')}`,
-            },
-          }
+          `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/dashboard/threat-timeline`
         );
 
         if (!response.ok) throw new Error('Failed to fetch timeline');

@@ -1,8 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useAuth } from '@/hooks/use-auth';
-import { apiClient } from '@/lib/api';
+import { useEffect, useState, useCallback } from 'react';
+import { alertsAPI } from '@/lib/api';
 import { Bell, AlertTriangle, AlertCircle, CheckCircle, Plus } from 'lucide-react';
 
 interface Alert {
@@ -14,29 +13,42 @@ interface Alert {
   created_at: string;
 }
 
+function normalizeAlert(raw: Record<string, unknown>): Alert {
+  return {
+    id: Number(raw.id) ?? 0,
+    rule_name: String(raw.rule_name ?? raw.message ?? 'Alert'),
+    trigger_condition: String(raw.trigger_condition ?? ''),
+    severity: (raw.severity as Alert['severity']) ?? 'medium',
+    is_active: Boolean(raw.is_active ?? (raw.is_acknowledged !== true)),
+    created_at: String(raw.created_at ?? new Date().toISOString()),
+  };
+}
+
 export default function AlertsPage() {
-  const { user, token } = useAuth();
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showNewRule, setShowNewRule] = useState(false);
 
+  const fetchAlerts = useCallback(async () => {
+    try {
+      setError(null);
+      setLoading(true);
+      const data = await alertsAPI.getAlerts();
+      const list = Array.isArray(data) ? data : [];
+      setAlerts(list.map((item: unknown) => normalizeAlert(item as Record<string, unknown>)));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to fetch alerts';
+      setError(msg);
+      setAlerts([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    if (!token) return;
-
-    const fetchAlerts = async () => {
-      try {
-        setLoading(true);
-        const response = await apiClient.get('/api/alerts', token);
-        setAlerts(response.data);
-      } catch (error) {
-        console.error('Failed to fetch alerts:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     fetchAlerts();
-  }, [token]);
+  }, [fetchAlerts]);
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -64,10 +76,28 @@ export default function AlertsPage() {
     }
   };
 
-  if (loading) {
+  if (loading && alerts.length === 0) {
     return (
       <div className="min-h-screen bg-slate-900 p-8 flex items-center justify-center">
         <div className="text-slate-300">Loading alerts...</div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="min-h-screen bg-slate-900 p-8 flex items-center justify-center">
+        <div className="text-center max-w-md">
+          <Bell className="w-16 h-16 text-amber-500/50 mx-auto mb-4" />
+          <p className="text-slate-300 font-medium mb-2">Unable to load alerts</p>
+          <p className="text-slate-500 text-sm mb-4">{error}</p>
+          <button
+            onClick={() => fetchAlerts()}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm"
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }
@@ -173,7 +203,7 @@ export default function AlertsPage() {
           ))}
         </div>
 
-        {alerts.length === 0 && (
+        {alerts.length === 0 && !loading && (
           <div className="text-center py-12">
             <Bell className="w-16 h-16 text-slate-600 mx-auto mb-4" />
             <p className="text-slate-400 text-lg">No alert rules configured</p>

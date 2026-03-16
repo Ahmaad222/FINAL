@@ -17,14 +17,8 @@ export function ThreatSimulator() {
     try {
       // Call the demo endpoint to simulate a threat
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/threats/demo/simulate-threat`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('zeinaguard_access_token')}`,
-          },
-        }
+        `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/threats/demo/simulate-threat`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' } }
       );
 
       if (!response.ok) {

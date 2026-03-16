@@ -3,7 +3,7 @@
  * Handles all HTTP requests to Flask backend
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '/backend-api';
 
 // Token storage keys
 const ACCESS_TOKEN_KEY = 'zeinaguard_access_token';
@@ -103,9 +103,9 @@ async function apiRequest<T = any>(
   const url = `${API_URL}${endpoint}`;
   const token = getAccessToken();
 
-  const headers: HeadersInit = {
+  const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...options.headers,
+    ...(options.headers as Record<string, string> || {}),
   };
 
   if (token) {
@@ -124,6 +124,9 @@ async function apiRequest<T = any>(
       // Handle 401 - token expired or invalid
       if (response.status === 401) {
         clearAccessToken();
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('zeinaguard:auth-invalid'));
+        }
       }
 
       return {
@@ -272,6 +275,25 @@ export const threatsAPI = {
 
     return response.data;
   },
+
+  /**
+   * Block/whitelist threat
+   */
+  async blockThreat(threatId: number, action: 'block' | 'whitelist' = 'block') {
+    const response = await apiRequest(
+      `/api/threats/${threatId}/block`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ action }),
+      }
+    );
+
+    if (response.error) {
+      throw new Error(response.error);
+    }
+
+    return response.data;
+  },
 };
 
 /**
@@ -280,15 +302,17 @@ export const threatsAPI = {
 export const sensorsAPI = {
   /**
    * Get list of sensors
+   * Backend returns { data: Sensor[], total } - extract the array
    */
   async getSensors() {
-    const response = await apiRequest('/api/sensors');
+    const response = await apiRequest<{ data?: unknown[] }>('/api/sensors');
 
     if (response.error) {
       throw new Error(response.error);
     }
 
-    return response.data;
+    const data = response.data;
+    return Array.isArray(data) ? data : (data?.data ?? []);
   },
 
   /**
@@ -311,15 +335,17 @@ export const sensorsAPI = {
 export const alertsAPI = {
   /**
    * Get list of alerts
+   * Backend returns { data: Alert[] } - extract the array
    */
   async getAlerts() {
-    const response = await apiRequest('/api/alerts');
+    const response = await apiRequest<{ data?: unknown[] }>('/api/alerts');
 
     if (response.error) {
       throw new Error(response.error);
     }
 
-    return response.data;
+    const data = response.data;
+    return Array.isArray(data) ? data : (data?.data ?? []);
   },
 
   /**
@@ -373,6 +399,39 @@ export const analyticsAPI = {
 };
 
 /**
+ * Incidents API calls
+ */
+export const incidentsAPI = {
+  /**
+   * Get list of incidents (from dashboard incident-summary)
+   */
+  async getIncidents() {
+    const response = await apiRequest<{
+      recent?: Array<{
+        id: number;
+        title: string;
+        description?: string;
+        severity: string;
+        status: string;
+        created_at: string;
+        updated_at?: string;
+        assigned_to?: string;
+      }>;
+    }>('/api/dashboard/incident-summary');
+    if (response.error) {
+      throw new Error(response.error);
+    }
+    const recent = response.data?.recent ?? [];
+    return recent.map((i) => ({
+      ...i,
+      description: i.description ?? '',
+      updated_at: i.updated_at ?? i.created_at,
+      status: i.status === 'investigating' ? 'in_progress' : i.status === 'closed' ? 'resolved' : i.status,
+    }));
+  },
+};
+
+/**
  * Users API calls
  */
 export const usersAPI = {
@@ -389,34 +448,3 @@ export const usersAPI = {
     return response.data;
   },
 };
-
-/**
- * Unified API Client
- * Bundles all specialized APIs into a single exported object
- * to satisfy component imports.
- */
-export const apiClient = {
-  // Auth methods
-  ...authAPI,
-  
-  // Threats methods
-  ...threatsAPI,
-  
-  // Sensors methods
-  ...sensorsAPI,
-  
-  // Alerts methods
-  ...alertsAPI,
-  
-  // Analytics methods
-  ...analyticsAPI,
-  
-  // Users methods
-  ...usersAPI,
-  
-  // Generic request method (optional but useful)
-  request: apiRequest
-};
-
-// Export default if needed
-export default apiClient;
