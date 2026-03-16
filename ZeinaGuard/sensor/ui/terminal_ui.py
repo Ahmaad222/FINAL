@@ -16,8 +16,20 @@ lock = threading.Lock()
 # 🎮 Filter state
 current_filter = "ALL"
 
+# ⚡ Attack log
+attack_log = []
+MAX_LOG = 15
 
-# 🔥 Update / Remove
+# ⚡ Attack stats
+attack_stats = {
+    "deauth_count": 0,
+    "clients_kicked": 0,
+    "target_bssid": None,
+    "start_time": time.time()
+}
+
+
+# 🔥 Update / Remove AP
 def update_ap(event_summary):
     with lock:
         event_summary["last_seen"] = time.time()
@@ -29,8 +41,32 @@ def remove_ap(bssid):
         aps_view.pop(bssid, None)
 
 
+# ⚡ Log attack activity
+def log_attack(message, bssid=None):
+
+    with lock:
+        ts = time.strftime("%H:%M:%S")
+
+        attack_log.append(f"[{ts}] {message}")
+
+        if len(attack_log) > MAX_LOG:
+            attack_log.pop(0)
+
+        if bssid:
+            attack_stats["target_bssid"] = bssid
+
+        attack_stats["deauth_count"] += 1
+
+
+# ⚡ Client kicked
+def client_kicked():
+    with lock:
+        attack_stats["clients_kicked"] += 1
+
+
 # 📶 Signal bars
 def get_signal_bars(signal):
+
     if signal is None:
         return "N/A"
 
@@ -46,15 +82,18 @@ def get_signal_bars(signal):
 
 # ⏱ Last seen
 def get_last_seen(ts):
+
     diff = int(time.time() - ts)
 
     if diff < 5:
         return "now"
+
     return f"{diff}s ago"
 
 
 # 🎯 Filter logic
 def apply_filter(aps):
+
     global current_filter
 
     if current_filter == "ALL":
@@ -66,8 +105,9 @@ def apply_filter(aps):
     ]
 
 
-# 📊 Table
+# 📊 AP Table
 def generate_table():
+
     table = Table(
         title=f"📡 ZeinaGuard Monitor | Filter: {current_filter}",
         box=box.ROUNDED,
@@ -83,12 +123,15 @@ def generate_table():
     table.add_column("SCORE", justify="center")
 
     with lock:
+
         aps = list(aps_view.values())
 
-        # 🔥 ترتيب
-        aps = sorted(aps, key=lambda ap: ap.get("score", 0), reverse=True)
+        aps = sorted(
+            aps,
+            key=lambda ap: ap.get("score", 0),
+            reverse=True
+        )
 
-        # 🎮 فلترة
         aps = apply_filter(aps)
 
         for ap in aps:
@@ -98,8 +141,10 @@ def generate_table():
             last_seen = ap.get("last_seen", time.time())
 
             color = "green"
+
             if status == "SUSPICIOUS":
                 color = "yellow"
+
             elif status == "ROGUE":
                 color = "bold white on red"
 
@@ -116,9 +161,11 @@ def generate_table():
     return table
 
 
-# 📊 Summary
+# 📊 Network Summary
 def generate_summary():
+
     with lock:
+
         aps = list(aps_view.values())
 
         total = len(aps)
@@ -134,13 +181,52 @@ def generate_summary():
     )
 
 
+# ⚡ Attack feed
+def generate_attack_panel():
+
+    with lock:
+
+        logs = "\n".join(attack_log[-MAX_LOG:])
+
+    return Panel(
+        logs if logs else "No attack activity yet...",
+        title="⚡ Attack / Packet Activity",
+        border_style="red"
+    )
+
+
+# ⚡ Attack stats panel
+def generate_attack_stats():
+
+    with lock:
+
+        elapsed = max(time.time() - attack_stats["start_time"], 1)
+
+        rate = attack_stats["deauth_count"] / elapsed
+
+        stats = (
+            f"⚡ Deauth/sec : {rate:.2f}\n"
+            f"🎯 Target BSSID : {attack_stats['target_bssid']}\n"
+            f"📴 Clients kicked : {attack_stats['clients_kicked']}"
+        )
+
+    return Panel(
+        stats,
+        title="🔥 Attack Statistics",
+        border_style="bright_red"
+    )
+
+
 # 🧠 Layout
 def generate_layout():
+
     layout = Layout()
 
     layout.split_column(
         Layout(generate_summary(), size=4),
-        Layout(generate_table())
+        Layout(generate_table()),
+        Layout(generate_attack_stats(), size=6),
+        Layout(generate_attack_panel(), size=10)
     )
 
     return layout
@@ -148,31 +234,48 @@ def generate_layout():
 
 # 🎮 Keyboard listener
 def keyboard_listener():
+
     global current_filter
 
     while True:
+
         key = readchar.readkey()
 
         if key.lower() == "a":
             current_filter = "ALL"
+
         elif key.lower() == "r":
             current_filter = "ROGUE"
+
         elif key.lower() == "s":
             current_filter = "SUSPICIOUS"
+
         elif key.lower() == "l":
             current_filter = "LEGIT"
+
         elif key.lower() == "q":
             console.print("\n👋 Exiting...")
             exit(0)
 
 
-# 🚀 Run
+# 🚀 Run UI
 def run_terminal_ui():
-    # شغل keyboard في thread
-    t = threading.Thread(target=keyboard_listener, daemon=True)
+
+    t = threading.Thread(
+        target=keyboard_listener,
+        daemon=True
+    )
+
     t.start()
 
-    with Live(generate_layout(), refresh_per_second=2, console=console) as live:
+    with Live(
+        generate_layout(),
+        refresh_per_second=2,
+        console=console
+    ) as live:
+
         while True:
+
             live.update(generate_layout())
+
             time.sleep(1)
