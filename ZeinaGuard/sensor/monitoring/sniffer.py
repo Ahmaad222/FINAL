@@ -11,13 +11,20 @@ from config import INTERFACE, LOCKED_CHANNEL
 from utils import get_ssid, extract_channel
 from core.event_bus import event_queue
 
-clients_map = {}  # {bssid: set(client_macs)}
+clients_map = {}
+
+# 🔥 State Management
+aps_state = {}  # {bssid: {"last_seen": time, "event": event_data}}
+
+AP_TIMEOUT = 60  # seconds
+
 
 def is_open_network(packet):
     if packet.haslayer(Dot11Beacon):
         cap = packet[Dot11Beacon].cap
         return not cap.privacy
     return False
+
 
 def build_event(packet):
     dot11 = packet[Dot11]
@@ -30,7 +37,6 @@ def build_event(packet):
     clients_count = len(clients_map.get(bssid, set()))
 
     return {
-        # 🚀 التعديل هنا عشان الداتا تتبعت للـ Dashboard بدون مشاكل
         "timestamp": datetime.datetime.now().isoformat(),
         "bssid": bssid,
         "ssid": ssid,
@@ -40,19 +46,34 @@ def build_event(packet):
         "clients": clients_count
     }
 
+
 def handle_packet(packet):
     if not packet.haslayer(Dot11):
         return
 
     dot11 = packet[Dot11]
 
-    # Beacon (Access Point discovery)
+    # ---------------------------
+    # Beacon (AP detection)
+    # ---------------------------
     if packet.haslayer(Dot11Beacon) and dot11.addr2:
+
         event = build_event(packet)
-        print(f"📡 AP Found: {event['ssid']} | {event['bssid']} | CH {event['channel']}")
+        bssid = event["bssid"]
+        now = time.time()
+
+        # تحديث state
+        aps_state[bssid] = {
+            "last_seen": now,
+            "event": event
+        }
+
+        # نبعت دايمًا للـ ThreatManager
         event_queue.put(event)
 
-    # Data frames (Client ↔ AP)
+    # ---------------------------
+    # Data frames (Clients)
+    # ---------------------------
     if dot11.type == 2:
         bssid = dot11.addr3
         src = dot11.addr2
@@ -60,17 +81,36 @@ def handle_packet(packet):
         if bssid and src and bssid != src:
             clients_map.setdefault(bssid, set()).add(src)
 
+
+# 🔥 Cleaner Thread
+def ap_cleaner():
+    while True:
+        now = time.time()
+        removed = []
+
+        for bssid in list(aps_state.keys()):
+            if now - aps_state[bssid]["last_seen"] > AP_TIMEOUT:
+                removed.append(bssid)
+                del aps_state[bssid]
+
+                # نبعت event removal
+                event_queue.put({
+                    "type": "AP_REMOVED",
+                    "bssid": bssid
+                })
+
+        time.sleep(5)
+
+
 def channel_hopper():
     import config
 
     while True:
-        # لو فيه channel مقفول عليه
         if config.LOCKED_CHANNEL is not None:
             os.system(f"iwconfig {INTERFACE} channel {config.LOCKED_CHANNEL}")
             time.sleep(1)
             continue
 
-        # لو مفيش lock نكمل hopping
         for ch in range(1, 14):
             if config.LOCKED_CHANNEL is not None:
                 break
@@ -78,9 +118,9 @@ def channel_hopper():
             os.system(f"iwconfig {INTERFACE} channel {ch}")
             time.sleep(0.4)
 
+
 def start_monitoring():
-    hopper = threading.Thread(target=channel_hopper)
-    hopper.daemon = True
-    hopper.start()
+    threading.Thread(target=channel_hopper, daemon=True).start()
+    threading.Thread(target=ap_cleaner, daemon=True).start()
 
     sniff(iface=INTERFACE, prn=handle_packet, store=False)

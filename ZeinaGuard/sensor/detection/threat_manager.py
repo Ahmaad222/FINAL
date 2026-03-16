@@ -14,10 +14,7 @@ class ThreatManager:
         self.last_status = {}
         self.confirmed_rogues = set()
 
-        # منع التكرار
         self.last_sent = {}
-
-        # cooldown للإرسال
         self.cooldown = 15
 
     def print_event(self, event_summary):
@@ -33,12 +30,33 @@ class ThreatManager:
         print(f"Score     : {event_summary['score']}")
         print("-" * 60)
 
+    def handle_removal(self, bssid):
+
+        print(f"\n❌ AP REMOVED: {bssid}\n")
+
+        # تنظيف
+        self.history.pop(bssid, None)
+        self.last_status.pop(bssid, None)
+        self.last_sent.pop(bssid, None)
+
+        # notify dashboard
+        dashboard_queue.put({
+            "type": "REMOVED",
+            "bssid": bssid
+        })
+
     def start(self):
 
         while True:
 
             event = event_queue.get()
 
+            # 🔥 لو AP اتشال
+            if isinstance(event, dict) and event.get("type") == "AP_REMOVED":
+                self.handle_removal(event["bssid"])
+                continue
+
+            # 🔥 تحليل طبيعي
             event_summary = self.engine.analyze(event)
 
             bssid = event_summary["bssid"]
@@ -47,20 +65,16 @@ class ThreatManager:
             reasons = event_summary["reasons"]
 
             # history
-            if bssid not in self.history:
-                self.history[bssid] = 1
-            else:
-                self.history[bssid] += 1
+            self.history[bssid] = self.history.get(bssid, 0) + 1
 
-            # طباعة عند تغير الحالة
+            # print عند التغيير بس
             if bssid not in self.last_status or self.last_status[bssid] != status:
                 self.print_event(event_summary)
                 self.last_status[bssid] = status
 
-            # --------------------------------
-            # إرسال للداشبورد
-            # --------------------------------
-
+            # --------------------------
+            # Dashboard
+            # --------------------------
             if status in ["SUSPICIOUS", "ROGUE"]:
 
                 threat = {
@@ -73,15 +87,12 @@ class ThreatManager:
                 now = time.time()
 
                 if bssid not in self.last_sent or now - self.last_sent[bssid] > self.cooldown:
-
                     dashboard_queue.put(threat)
-
                     self.last_sent[bssid] = now
 
-            # --------------------------------
+            # --------------------------
             # Rogue confirmation
-            # --------------------------------
-
+            # --------------------------
             if status == "ROGUE" and self.history[bssid] >= 3 and bssid not in self.confirmed_rogues:
 
                 self.confirmed_rogues.add(bssid)
