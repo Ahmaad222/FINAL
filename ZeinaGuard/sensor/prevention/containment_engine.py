@@ -5,8 +5,7 @@ from scapy.all import RadioTap, Dot11, Dot11Deauth, sendp
 from config import DEAUTH_COUNT, DEAUTH_INTERVAL
 
 # 🔥 استيراد تسجيل الهجوم للـ UI
-from terminal_ui import log_attack, client_kicked
-
+from ui.terminal_ui import log_attack, client_kicked
 
 class ContainmentEngine:
 
