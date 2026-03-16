@@ -49,6 +49,7 @@ def handle_packet(packet):
     # Beacon (Access Point discovery)
     if packet.haslayer(Dot11Beacon) and dot11.addr2:
         event = build_event(packet)
+        print(f"📡 AP Found: {event['ssid']} | {event['bssid']} | CH {event['channel']}")
         event_queue.put(event)
 
     # Data frames (Client ↔ AP)

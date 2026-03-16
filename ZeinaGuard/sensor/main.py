@@ -12,29 +12,34 @@ def main():
     print("🚀 Starting ZeinaGuard Sensor...")
 
     # --------------------------------
-    # Authenticate
+    # Try Backend Authentication
     # --------------------------------
 
-    api = APIClient()
+    token = None
+    ws = None
 
-    token = api.authenticate_sensor()
+    try:
+        api = APIClient()
+        token = api.authenticate_sensor()
 
-    if not token:
-        print("❌ Sensor authentication failed")
-        return
+        if token:
+            print("✅ Sensor authenticated with backend")
 
-    # --------------------------------
-    # WebSocket
-    # --------------------------------
+            ws = WSClient(token=token)
 
-    ws = WSClient(token=token)
+            ws_thread = threading.Thread(
+                target=ws.connect_to_server,
+                daemon=True
+            )
 
-    ws_thread = threading.Thread(
-        target=ws.connect_to_server,
-        daemon=True
-    )
+            ws_thread.start()
 
-    ws_thread.start()
+        else:
+            print("⚠️ Backend not available — running in OFFLINE MODE")
+
+    except Exception as e:
+        print("⚠️ Backend connection failed — running OFFLINE")
+        print(e)
 
     # --------------------------------
     # Threat Manager
@@ -63,8 +68,10 @@ def main():
     t2.start()
 
     # --------------------------------
-    # Monitoring
+    # Monitoring (Sniffer)
     # --------------------------------
+
+    print("📡 Starting wireless monitoring...")
 
     start_monitoring()
 
