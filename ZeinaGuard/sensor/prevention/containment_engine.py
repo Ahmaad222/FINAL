@@ -23,7 +23,7 @@ class ContainmentEngine:
         config.LOCKED_CHANNEL = channel
         time.sleep(1)
 
-        attack_duration = 10
+        attack_duration = 60
         start_time = time.time()
 
         # 🔥 تسجيل بداية الهجوم

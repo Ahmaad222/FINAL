@@ -28,17 +28,29 @@ attack_stats = {
     "start_time": time.time()
 }
 
+# 📡 حفظ الإشارة السابقة
+signal_history = {}
+
 
 # 🔥 Update / Remove AP
 def update_ap(event_summary):
     with lock:
+        bssid = event_summary["bssid"]
+        signal = event_summary.get("signal")
+
+        # حفظ الإشارة القديمة
+        if bssid in aps_view:
+            prev_signal = aps_view[bssid].get("signal")
+            signal_history[bssid] = prev_signal
+
         event_summary["last_seen"] = time.time()
-        aps_view[event_summary["bssid"]] = event_summary
+        aps_view[bssid] = event_summary
 
 
 def remove_ap(bssid):
     with lock:
         aps_view.pop(bssid, None)
+        signal_history.pop(bssid, None)
 
 
 # ⚡ Log attack activity
@@ -80,6 +92,38 @@ def get_signal_bars(signal):
         return "▂"
 
 
+# 📏 Distance estimation
+def estimate_distance(signal):
+
+    if signal is None:
+        return "Unknown"
+
+    if signal > -50:
+        return "🔥 1-3m"
+    elif signal > -60:
+        return "🟡 3-7m"
+    elif signal > -70:
+        return "🟠 7-15m"
+    else:
+        return "🔴 15m+"
+
+
+# 📈 Trend detection
+def get_trend(bssid, current_signal):
+
+    prev_signal = signal_history.get(bssid)
+
+    if prev_signal is None or current_signal is None:
+        return "-"
+
+    if current_signal > prev_signal:
+        return "⬇️ Closer"
+    elif current_signal < prev_signal:
+        return "⬆️ Away"
+    else:
+        return "→ Stable"
+
+
 # ⏱ Last seen
 def get_last_seen(ts):
 
@@ -118,6 +162,8 @@ def generate_table():
     table.add_column("BSSID", style="magenta")
     table.add_column("CH", justify="center")
     table.add_column("SIGNAL", justify="center")
+    table.add_column("DISTANCE", justify="center")
+    table.add_column("TREND", justify="center")
     table.add_column("LAST SEEN", justify="center")
     table.add_column("STATUS", justify="center")
     table.add_column("SCORE", justify="center")
@@ -136,6 +182,7 @@ def generate_table():
 
         for ap in aps:
 
+            bssid = ap.get("bssid")
             status = ap.get("classification", "UNKNOWN")
             signal = ap.get("signal")
             last_seen = ap.get("last_seen", time.time())
@@ -144,15 +191,16 @@ def generate_table():
 
             if status == "SUSPICIOUS":
                 color = "yellow"
-
             elif status == "ROGUE":
                 color = "bold white on red"
 
             table.add_row(
                 str(ap.get("ssid")),
-                str(ap.get("bssid")),
+                str(bssid),
                 str(ap.get("channel")),
                 get_signal_bars(signal),
+                estimate_distance(signal),
+                get_trend(bssid, signal),
                 get_last_seen(last_seen),
                 f"[{color}]{status}[/{color}]",
                 str(ap.get("score"))
@@ -185,7 +233,6 @@ def generate_summary():
 def generate_attack_panel():
 
     with lock:
-
         logs = "\n".join(attack_log[-MAX_LOG:])
 
     return Panel(
@@ -201,7 +248,6 @@ def generate_attack_stats():
     with lock:
 
         elapsed = max(time.time() - attack_stats["start_time"], 1)
-
         rate = attack_stats["deauth_count"] / elapsed
 
         stats = (
@@ -243,16 +289,12 @@ def keyboard_listener():
 
         if key.lower() == "a":
             current_filter = "ALL"
-
         elif key.lower() == "r":
             current_filter = "ROGUE"
-
         elif key.lower() == "s":
             current_filter = "SUSPICIOUS"
-
         elif key.lower() == "l":
             current_filter = "LEGIT"
-
         elif key.lower() == "q":
             console.print("\n👋 Exiting...")
             exit(0)
@@ -265,7 +307,6 @@ def run_terminal_ui():
         target=keyboard_listener,
         daemon=True
     )
-
     t.start()
 
     with Live(
@@ -275,7 +316,5 @@ def run_terminal_ui():
     ) as live:
 
         while True:
-
             live.update(generate_layout())
-
             time.sleep(1)
