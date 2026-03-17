@@ -51,6 +51,12 @@ def update_ap(event_summary):
 
             if len(history) > 10:
                 history.pop(0)
+def remove_ap(bssid):
+    with lock:
+        aps_view.pop(bssid, None)
+
+        # 🧹 كمان نمسح history عشان مايبقاش فيه garbage
+        signal_history.pop(bssid, None)
 
 
 # ⚡ Trend calculation
