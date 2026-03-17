@@ -13,20 +13,14 @@ console = Console()
 aps_view = {}
 lock = threading.Lock()
 
-# 🎮 Filter state
 current_filter = "ALL"
-
-# 🎯 Hunt Mode
 hunt_mode = False
 
-# 📡 Signal history for trend
 signal_history = {}
 
-# ⚡ Attack log
 attack_log = []
 MAX_LOG = 15
 
-# ⚡ Attack stats
 attack_stats = {
     "deauth_count": 0,
     "clients_kicked": 0,
@@ -35,31 +29,49 @@ attack_stats = {
 }
 
 
-# 🔥 Update AP
-def update_ap(event_summary):
-    with lock:
-        event_summary["last_seen"] = time.time()
-        aps_view[event_summary["bssid"]] = event_summary
+# --------------------------------------------------
+# UPDATE AP
+# --------------------------------------------------
 
-        # 📊 حفظ تاريخ الإشارة
+def update_ap(event_summary):
+
+    with lock:
+
+        event_summary["last_seen"] = time.time()
         bssid = event_summary["bssid"]
+
+        aps_view[bssid] = event_summary
+
         signal = event_summary.get("signal")
 
         if signal is not None:
+
             history = signal_history.setdefault(bssid, [])
             history.append(signal)
 
             if len(history) > 10:
                 history.pop(0)
+
+
+# --------------------------------------------------
+# REMOVE AP  (حل المشكلة هنا)
+# --------------------------------------------------
+
 def remove_ap(bssid):
+
     with lock:
-        aps_view.pop(bssid, None)
 
-        # 🧹 كمان نمسح history عشان مايبقاش فيه garbage
-        signal_history.pop(bssid, None)
+        if bssid in aps_view:
+            del aps_view[bssid]
+
+        if bssid in signal_history:
+            del signal_history[bssid]
 
 
-# ⚡ Trend calculation
+# --------------------------------------------------
+# TREND
+# --------------------------------------------------
+
 def get_trend(bssid):
 
     history = signal_history.get(bssid, [])
@@ -75,14 +87,17 @@ def get_trend(bssid):
     diff = new_avg - old_avg
 
     if diff > 2:
-        return "📉"   # أقرب
+        return "📉"
     elif diff < -2:
-        return "📈"   # أبعد
+        return "📈"
     else:
-        return "➡️"   # ثابت
+        return "➡️"
 
 
-# 📏 Distance estimation (clean)
+# --------------------------------------------------
+# DISTANCE
+# --------------------------------------------------
+
 def estimate_distance(signal):
 
     if signal is None:
@@ -100,28 +115,10 @@ def estimate_distance(signal):
         return "❌ 20m+"
 
 
-# 🔥 Attack logging
-def log_attack(message, bssid=None):
-    with lock:
-        ts = time.strftime("%H:%M:%S")
+# --------------------------------------------------
+# SIGNAL BARS
+# --------------------------------------------------
 
-        attack_log.append(f"[{ts}] {message}")
-
-        if len(attack_log) > MAX_LOG:
-            attack_log.pop(0)
-
-        if bssid:
-            attack_stats["target_bssid"] = bssid
-
-        attack_stats["deauth_count"] += 1
-
-
-def client_kicked():
-    with lock:
-        attack_stats["clients_kicked"] += 1
-
-
-# 📶 Signal bars
 def get_signal_bars(signal):
 
     if signal is None:
@@ -137,7 +134,10 @@ def get_signal_bars(signal):
         return "▂"
 
 
-# ⏱ Last seen
+# --------------------------------------------------
+# LAST SEEN
+# --------------------------------------------------
+
 def get_last_seen(ts):
 
     diff = int(time.time() - ts)
@@ -145,10 +145,13 @@ def get_last_seen(ts):
     if diff < 5:
         return "now"
 
-    return f"{diff}s ago"
+    return f"{diff}s"
 
 
-# 🎯 Filter logic
+# --------------------------------------------------
+# FILTER
+# --------------------------------------------------
+
 def apply_filter(aps):
 
     if current_filter == "ALL":
@@ -160,7 +163,10 @@ def apply_filter(aps):
     ]
 
 
-# 📊 Table (clean)
+# --------------------------------------------------
+# TABLE
+# --------------------------------------------------
+
 def generate_table():
 
     table = Table(
@@ -169,8 +175,8 @@ def generate_table():
         expand=True
     )
 
-    table.add_column("SSID", style="cyan", no_wrap=True)
-    table.add_column("BSSID", style="magenta")
+    table.add_column("SSID")
+    table.add_column("BSSID")
     table.add_column("CH", justify="center")
     table.add_column("SIGNAL", justify="center")
     table.add_column("LAST SEEN", justify="center")
@@ -215,63 +221,10 @@ def generate_table():
     return table
 
 
-# 🎯 Get strongest rogue
-def get_top_rogue():
+# --------------------------------------------------
+# SUMMARY
+# --------------------------------------------------
 
-    rogues = [
-        ap for ap in aps_view.values()
-        if ap.get("classification") == "ROGUE"
-    ]
-
-    if not rogues:
-        return None
-
-    return max(rogues, key=lambda ap: ap.get("signal", -100))
-
-
-# 🎯 Hunt Mode Panel
-def generate_hunt_panel():
-
-    target = get_top_rogue()
-
-    if not target:
-        return Panel(
-            "❌ No Rogue AP detected",
-            title="🎯 Hunt Mode",
-            border_style="red"
-        )
-
-    signal = target.get("signal")
-    bssid = target.get("bssid")
-    ssid = target.get("ssid")
-
-    distance = estimate_distance(signal)
-    trend = get_trend(bssid)
-
-    direction = "➡️ Move Forward"
-
-    if trend == "📈":
-        direction = "⬅️ Move Back"
-    elif trend == "📉":
-        direction = "➡️ Keep Going"
-
-    content = (
-        f"🎯 Target: {ssid}\n"
-        f"📡 BSSID: {bssid}\n\n"
-        f"📶 Signal: {signal}\n"
-        f"📍 Distance: {distance}\n"
-        f"📊 Trend: {trend}\n\n"
-        f"{direction}"
-    )
-
-    return Panel(
-        content,
-        title="🔥 Rogue Hunt Mode",
-        border_style="bright_red"
-    )
-
-
-# 📊 Summary
 def generate_summary():
 
     with lock:
@@ -291,64 +244,86 @@ def generate_summary():
     )
 
 
-# ⚡ Attack panel
-def generate_attack_panel():
+# --------------------------------------------------
+# HUNT MODE
+# --------------------------------------------------
 
-    with lock:
-        logs = "\n".join(attack_log[-MAX_LOG:])
+def get_top_rogue():
 
-    return Panel(
-        logs if logs else "No attack activity yet...",
-        title="⚡ Attack / Packet Activity",
-        border_style="red"
-    )
+    rogues = [
+        ap for ap in aps_view.values()
+        if ap.get("classification") == "ROGUE"
+    ]
+
+    if not rogues:
+        return None
+
+    return max(rogues, key=lambda ap: ap.get("signal", -100))
 
 
-# ⚡ Attack stats
-def generate_attack_stats():
+def generate_hunt_panel():
 
-    with lock:
+    target = get_top_rogue()
 
-        elapsed = max(time.time() - attack_stats["start_time"], 1)
-        rate = attack_stats["deauth_count"] / elapsed
+    if not target:
 
-        stats = (
-            f"⚡ Deauth/sec : {rate:.2f}\n"
-            f"🎯 Target BSSID : {attack_stats['target_bssid']}\n"
-            f"📴 Clients kicked : {attack_stats['clients_kicked']}"
+        return Panel(
+            "❌ No Rogue AP detected",
+            title="🎯 Hunt Mode",
+            border_style="red"
         )
 
+    signal = target.get("signal")
+    bssid = target.get("bssid")
+    ssid = target.get("ssid")
+
+    distance = estimate_distance(signal)
+    trend = get_trend(bssid)
+
+    content = (
+        f"🎯 Target: {ssid}\n"
+        f"📡 BSSID: {bssid}\n\n"
+        f"📶 Signal: {signal}\n"
+        f"📍 Distance: {distance}\n"
+        f"📊 Trend: {trend}"
+    )
+
     return Panel(
-        stats,
-        title="🔥 Attack Statistics",
+        content,
+        title="🔥 Rogue Hunt Mode",
         border_style="bright_red"
     )
 
 
-# 🧠 Layout
+# --------------------------------------------------
+# LAYOUT
+# --------------------------------------------------
+
 def generate_layout():
 
     layout = Layout()
 
     if hunt_mode:
+
         layout.split_column(
             Layout(generate_summary(), size=4),
-            Layout(generate_hunt_panel()),
-            Layout(generate_attack_stats(), size=6),
-            Layout(generate_attack_panel(), size=10)
+            Layout(generate_hunt_panel())
         )
+
     else:
+
         layout.split_column(
             Layout(generate_summary(), size=4),
-            Layout(generate_table()),
-            Layout(generate_attack_stats(), size=6),
-            Layout(generate_attack_panel(), size=10)
+            Layout(generate_table())
         )
 
     return layout
 
 
-# 🎮 Keyboard
+# --------------------------------------------------
+# KEYBOARD
+# --------------------------------------------------
+
 def keyboard_listener():
 
     global current_filter, hunt_mode
@@ -359,20 +334,29 @@ def keyboard_listener():
 
         if key.lower() == "a":
             current_filter = "ALL"
+
         elif key.lower() == "r":
             current_filter = "ROGUE"
+
         elif key.lower() == "s":
             current_filter = "SUSPICIOUS"
+
         elif key.lower() == "l":
             current_filter = "LEGIT"
+
         elif key.lower() == "h":
             hunt_mode = not hunt_mode
+
         elif key.lower() == "q":
+
             console.print("\n👋 Exiting...")
             exit(0)
 
 
-# 🚀 Run UI
+# --------------------------------------------------
+# RUN UI
+# --------------------------------------------------
+
 def run_terminal_ui():
 
     t = threading.Thread(
@@ -389,5 +373,6 @@ def run_terminal_ui():
     ) as live:
 
         while True:
+
             live.update(generate_layout())
             time.sleep(1)
