@@ -28,7 +28,7 @@ attack_stats = {
     "start_time": time.time()
 }
 
-# 📡 حفظ الإشارة السابقة
+# 📡 Signal history (FIXED)
 signal_history = {}
 
 
@@ -38,10 +38,15 @@ def update_ap(event_summary):
         bssid = event_summary["bssid"]
         signal = event_summary.get("signal")
 
-        # حفظ الإشارة القديمة
-        if bssid in aps_view:
-            prev_signal = aps_view[bssid].get("signal")
-            signal_history[bssid] = prev_signal
+        if bssid not in signal_history:
+            signal_history[bssid] = []
+
+        if signal is not None:
+            signal_history[bssid].append(signal)
+
+            # نخلي آخر 5 قراءات بس
+            if len(signal_history[bssid]) > 5:
+                signal_history[bssid].pop(0)
 
         event_summary["last_seen"] = time.time()
         aps_view[bssid] = event_summary
@@ -92,33 +97,35 @@ def get_signal_bars(signal):
         return "▂"
 
 
-# 📏 Distance estimation
+# 📏 Distance (FIXED & realistic)
 def estimate_distance(signal):
 
     if signal is None:
         return "Unknown"
 
-    if signal > -50:
-        return "🔥 1-3m"
-    elif signal > -60:
-        return "🟡 3-7m"
-    elif signal > -70:
-        return "🟠 7-15m"
+    if signal > -45:
+        return "🔥 Very Close (~1m)"
+    elif signal > -55:
+        return "🟡 Close (~3m)"
+    elif signal > -65:
+        return "🟠 Medium (~7m)"
+    elif signal > -75:
+        return "🔴 Far (~15m)"
     else:
-        return "🔴 15m+"
+        return "❌ Very Far (20m+)"
 
 
-# 📈 Trend detection
-def get_trend(bssid, current_signal):
+# 📈 Trend (FIXED)
+def get_trend(bssid):
 
-    prev_signal = signal_history.get(bssid)
+    history = signal_history.get(bssid, [])
 
-    if prev_signal is None or current_signal is None:
+    if len(history) < 2:
         return "-"
 
-    if current_signal > prev_signal:
+    if history[-1] > history[0]:
         return "⬇️ Closer"
-    elif current_signal < prev_signal:
+    elif history[-1] < history[0]:
         return "⬆️ Away"
     else:
         return "→ Stable"
@@ -200,7 +207,7 @@ def generate_table():
                 str(ap.get("channel")),
                 get_signal_bars(signal),
                 estimate_distance(signal),
-                get_trend(bssid, signal),
+                get_trend(bssid),
                 get_last_seen(last_seen),
                 f"[{color}]{status}[/{color}]",
                 str(ap.get("score"))
