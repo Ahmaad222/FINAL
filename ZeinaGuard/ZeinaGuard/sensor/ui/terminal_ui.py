@@ -11,16 +11,10 @@ import readchar
 console = Console()
 
 aps_view = {}
-signal_history = {}
-
 lock = threading.Lock()
 
 current_filter = "ALL"
 hunt_mode = False
-
-# -------------------------
-# Attack log system
-# -------------------------
 
 attack_log = []
 MAX_LOG = 15
@@ -32,9 +26,11 @@ attack_stats = {
     "start_time": time.time()
 }
 
-# -------------------------
-# AP Update
-# -------------------------
+signal_history = {}
+
+# ----------------------------
+# UPDATE AP
+# ----------------------------
 
 def update_ap(event_summary):
 
@@ -50,7 +46,7 @@ def update_ap(event_summary):
 
             signal_history[bssid].append(signal)
 
-            if len(signal_history[bssid]) > 6:
+            if len(signal_history[bssid]) > 5:
                 signal_history[bssid].pop(0)
 
         event_summary["last_seen"] = time.time()
@@ -65,9 +61,9 @@ def remove_ap(bssid):
         signal_history.pop(bssid, None)
 
 
-# -------------------------
-# Attack logging
-# -------------------------
+# ----------------------------
+# ATTACK LOG
+# ----------------------------
 
 def log_attack(message, bssid=None):
 
@@ -92,9 +88,9 @@ def client_kicked():
         attack_stats["clients_kicked"] += 1
 
 
-# -------------------------
-# Signal bars
-# -------------------------
+# ----------------------------
+# SIGNAL BARS
+# ----------------------------
 
 def get_signal_bars(signal):
 
@@ -111,9 +107,9 @@ def get_signal_bars(signal):
         return "▂"
 
 
-# -------------------------
-# Distance
-# -------------------------
+# ----------------------------
+# DISTANCE
+# ----------------------------
 
 def estimate_distance(signal):
 
@@ -123,18 +119,18 @@ def estimate_distance(signal):
     if signal > -45:
         return "🔥 ~1m"
     elif signal > -55:
-        return "~3m"
+        return "🟡 ~3m"
     elif signal > -65:
-        return "~7m"
+        return "🟠 ~7m"
     elif signal > -75:
-        return "~15m"
+        return "🔴 ~15m"
     else:
-        return "20m+"
+        return "❌ 20m+"
 
 
-# -------------------------
-# Trend
-# -------------------------
+# ----------------------------
+# TREND
+# ----------------------------
 
 def get_trend(bssid):
 
@@ -144,32 +140,16 @@ def get_trend(bssid):
         return "..."
 
     if history[-1] > history[0]:
-        return "Closer"
+        return "⬇️ Closer"
     elif history[-1] < history[0]:
-        return "Away"
+        return "⬆️ Away"
     else:
-        return "Stable"
+        return "→ Stable"
 
 
-# -------------------------
-# Radar Meter
-# -------------------------
-
-def radar_meter(signal):
-
-    if signal is None:
-        return "[----------]"
-
-    level = int((signal + 90) / 4)
-
-    level = max(0, min(level, 10))
-
-    return "[" + "█"*level + "░"*(10-level) + "]"
-
-
-# -------------------------
-# Last seen
-# -------------------------
+# ----------------------------
+# LAST SEEN
+# ----------------------------
 
 def get_last_seen(ts):
 
@@ -178,12 +158,12 @@ def get_last_seen(ts):
     if diff < 5:
         return "now"
 
-    return f"{diff}s"
+    return f"{diff}s ago"
 
 
-# -------------------------
-# Filters
-# -------------------------
+# ----------------------------
+# FILTER
+# ----------------------------
 
 def apply_filter(aps):
 
@@ -196,9 +176,9 @@ def apply_filter(aps):
     ]
 
 
-# -------------------------
-# AP table
-# -------------------------
+# ----------------------------
+# AP TABLE
+# ----------------------------
 
 def generate_table():
 
@@ -238,7 +218,6 @@ def generate_table():
 
             if status == "SUSPICIOUS":
                 color = "yellow"
-
             elif status == "ROGUE":
                 color = "bold white on red"
 
@@ -255,9 +234,9 @@ def generate_table():
     return table
 
 
-# -------------------------
-# Rogue target
-# -------------------------
+# ----------------------------
+# GET TOP ROGUE
+# ----------------------------
 
 def get_top_rogue():
 
@@ -272,9 +251,9 @@ def get_top_rogue():
     return max(rogues, key=lambda ap: ap.get("signal", -100))
 
 
-# -------------------------
-# Rogue tracker
-# -------------------------
+# ----------------------------
+# HUNT PANEL
+# ----------------------------
 
 def generate_hunt_panel():
 
@@ -283,21 +262,29 @@ def generate_hunt_panel():
     if not rogue:
 
         return Panel(
-            "❌ No Rogue detected",
-            title="Rogue Hunt",
+            "❌ No Rogue AP detected",
+            title="🎯 Rogue Hunt Mode",
             border_style="red"
         )
 
+    bssid = rogue["bssid"]
     signal = rogue.get("signal")
-    bssid = rogue.get("bssid")
+
+    distance = estimate_distance(signal)
+    trend = get_trend(bssid)
+
+    direction = "➡️ Move Forward"
+
+    if "Away" in trend:
+        direction = "⬅️ Move Back"
 
     content = (
-        f"🎯 SSID : {rogue['ssid']}\n"
+        f"🎯 Target SSID : {rogue['ssid']}\n"
         f"📡 BSSID : {bssid}\n\n"
-        f"Signal : {signal} dBm\n"
-        f"Radar : {radar_meter(signal)}\n\n"
-        f"Distance : {estimate_distance(signal)}\n"
-        f"Trend : {get_trend(bssid)}"
+        f"📶 Signal : {signal} dBm\n"
+        f"📍 Distance : {distance}\n"
+        f"📊 Trend : {trend}\n\n"
+        f"{direction}"
     )
 
     return Panel(
@@ -307,9 +294,9 @@ def generate_hunt_panel():
     )
 
 
-# -------------------------
-# Summary
-# -------------------------
+# ----------------------------
+# SUMMARY
+# ----------------------------
 
 def generate_summary():
 
@@ -325,14 +312,14 @@ def generate_summary():
     return Panel(
         f"[bold]A[/]ll | [red]R[/]ogue | [yellow]S[/]uspicious | [green]L[/]egit | [cyan]H[/]unt | [bold]Q[/]uit\n"
         f"📊 Total: {total} | 🔴 Rogue: {rogue} | 🟡 Suspicious: {suspicious} | 🟢 Legit: {legit}",
-        title="Controls",
+        title="🎮 Controls",
         border_style="bright_blue"
     )
 
 
-# -------------------------
-# Attack feed
-# -------------------------
+# ----------------------------
+# ATTACK PANEL
+# ----------------------------
 
 def generate_attack_panel():
 
@@ -340,15 +327,15 @@ def generate_attack_panel():
         logs = "\n".join(attack_log[-MAX_LOG:])
 
     return Panel(
-        logs if logs else "No attack activity",
+        logs if logs else "No attack activity yet...",
         title="⚡ Attack Activity",
         border_style="red"
     )
 
 
-# -------------------------
-# Attack stats
-# -------------------------
+# ----------------------------
+# ATTACK STATS
+# ----------------------------
 
 def generate_attack_stats():
 
@@ -359,20 +346,20 @@ def generate_attack_stats():
 
         stats = (
             f"⚡ Deauth/sec : {rate:.2f}\n"
-            f"🎯 Target : {attack_stats['target_bssid']}\n"
+            f"🎯 Target BSSID : {attack_stats['target_bssid']}\n"
             f"📴 Clients kicked : {attack_stats['clients_kicked']}"
         )
 
     return Panel(
         stats,
-        title="Attack Stats",
+        title="🔥 Attack Statistics",
         border_style="bright_red"
     )
 
 
-# -------------------------
-# Layout
-# -------------------------
+# ----------------------------
+# LAYOUT
+# ----------------------------
 
 def generate_layout():
 
@@ -399,9 +386,9 @@ def generate_layout():
     return layout
 
 
-# -------------------------
-# Keyboard
-# -------------------------
+# ----------------------------
+# KEYBOARD
+# ----------------------------
 
 def keyboard_listener():
 
@@ -431,9 +418,9 @@ def keyboard_listener():
             exit(0)
 
 
-# -------------------------
-# Run UI
-# -------------------------
+# ----------------------------
+# RUN UI
+# ----------------------------
 
 def run_terminal_ui():
 
@@ -441,6 +428,7 @@ def run_terminal_ui():
         target=keyboard_listener,
         daemon=True
     )
+
     t.start()
 
     with Live(

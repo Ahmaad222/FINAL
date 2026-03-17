@@ -1,0 +1,30 @@
+# --- Security (ملفات سرية لا ترفع أبداً) ---
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# --- Build Artifacts (ملفات تقيلة بتنتج من التشغيل) ---
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# --- Python / Backend ---
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.pytest_cache/
+
+# --- Docker & Databases (بيانات الداتا بيز الخاصة بجهازك) ---
+postgres_data/
+pgadmin_data/
+redis_data/
+*.log
+
+# --- System Files ---
+.DS_Store
+Thumbs.db

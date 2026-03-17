@@ -1,0 +1,253 @@
+================================================================================
+  ZEINAGUARD PRO - INSTALLATION & RUNNING GUIDE
+================================================================================
+
+STEP 1: PREREQUISITE CHECK
+─────────────────────────────────────────────────────────────────────────────
+
+  ✓ Docker Installed?
+    └─ Run: docker --version
+    └─ If not: sudo apt-get install docker.io docker-compose
+
+  ✓ Port 3000 Available?
+    └─ Run: lsof -i :3000
+    └─ If in use: kill -9 PID
+
+  ✓ At least 4GB RAM?
+    └─ Run: free -h
+    └─ If less: close other apps or increase swap
+
+
+STEP 2: NAVIGATE TO PROJECT
+─────────────────────────────────────────────────────────────────────────────
+
+  $ cd /path/to/G_ADMIN
+  $ pwd                 # Verify you're in the right directory
+  $ ls -la              # Should see docker-compose.yml
+
+
+STEP 3: START EVERYTHING WITH ONE COMMAND
+─────────────────────────────────────────────────────────────────────────────
+
+  $ docker-compose up -d
+
+  What's happening:
+    1. Building Flask backend image          ⏳ 2-3 minutes
+    2. Building Next.js frontend image       ⏳ 3-5 minutes
+    3. Pulling PostgreSQL & Redis images     ⏳ 1-2 minutes
+    4. Creating & starting containers        ⏳ 30-60 seconds
+    5. Initializing database schema          ⏳ 30 seconds
+    
+  Total time: ~5-10 minutes first run
+
+
+STEP 4: WAIT FOR SERVICES TO BE HEALTHY
+─────────────────────────────────────────────────────────────────────────────
+
+  $ docker-compose ps
+
+  You should see:
+  
+    NAME                    STATUS
+    ───────────────────────────────────
+    zeinaguard-backend      Up 2 minutes
+    zeinaguard-frontend     Up 1 minute
+    postgres-tsdb           Up 3 minutes
+    redis-broker            Up 3 minutes
+    pgadmin-web             Up 2 minutes
+
+  If any show "Restarting":
+    └─ Wait 30 seconds and run docker-compose ps again
+    └─ If still failing: docker-compose logs -f [service_name]
+
+
+STEP 5: VERIFY SERVICES ARE RESPONDING
+─────────────────────────────────────────────────────────────────────────────
+
+  $ curl http://localhost:5000/health
+  {"status":"healthy","service":"zeinaguard-backend"}
+
+  $ curl http://localhost:3000
+  (Should return HTML of Next.js app)
+
+
+STEP 6: ACCESS THE DASHBOARD
+─────────────────────────────────────────────────────────────────────────────
+
+  Open your browser and navigate to:
+
+  ┌─────────────────────────────────────────────────────┐
+  │  http://localhost:3000                              │
+  │                                                     │
+  │  Login with:                                        │
+  │  Username: admin                                    │
+  │  Password: admin123                                 │
+  └─────────────────────────────────────────────────────┘
+
+  You should see:
+    ✓ Login form appears
+    ✓ After login: Dashboard with metrics
+    ✓ Sidebar with navigation menu
+    ✓ Real-time threat counter
+
+
+STEP 7: TEST KEY FEATURES
+─────────────────────────────────────────────────────────────────────────────
+
+  ✓ Test Real-Time Threat Feed
+    └─ Go to: http://localhost:3000/threats
+    └─ Click: "Simulate Threat" button
+    └─ Expected: Threat appears in < 500ms (screen turns red)
+
+  ✓ Test Command Palette
+    └─ Press: Ctrl+K (or Cmd+K on Mac)
+    └─ Type: "show threats" or "view sensors"
+    └─ Expected: Commands appear and execute
+
+  ✓ Test Sensor Management
+    └─ Go to: http://localhost:3000/sensors
+    └─ Expected: Sensor list with heartbeat indicators
+
+  ✓ Test Alert Configuration
+    └─ Go to: http://localhost:3000/alerts
+    └─ Expected: Can create and view alert rules
+
+  ✓ Test Database Admin
+    └─ Go to: http://localhost:5050
+    └─ Login: admin@zeinaguard.com / admin123
+    └─ Expected: Can view database tables
+
+
+STEP 8: VIEW LOGS (IF NEEDED)
+─────────────────────────────────────────────────────────────────────────────
+
+  View all logs:
+    $ docker-compose logs -f
+
+  View specific service:
+    $ docker-compose logs -f flask          # Backend
+    $ docker-compose logs -f nextjs         # Frontend
+    $ docker-compose logs -f postgres-tsdb  # Database
+
+  (Press Ctrl+C to stop viewing logs)
+
+
+STEP 9: STOP WHEN DONE
+─────────────────────────────────────────────────────────────────────────────
+
+  Stop all services (data persists):
+    $ docker-compose down
+
+  Stop and DELETE all data:
+    $ docker-compose down -v
+
+  Restart services:
+    $ docker-compose up -d
+
+
+═════════════════════════════════════════════════════════════════════════════
+  QUICK REFERENCE
+═════════════════════════════════════════════════════════════════════════════
+
+  Command                          What it does
+  ───────────────────────────────────────────────────────────────────────────
+  docker-compose up -d             Start everything in background
+  docker-compose ps                Check if all services are running
+  docker-compose logs -f           View all service logs in real-time
+  docker-compose down              Stop all services (keep data)
+  docker-compose down -v           Stop all and delete data
+
+  curl http://localhost:5000/health    Test backend API
+  curl http://localhost:3000           Test frontend
+  docker-compose restart flask         Restart backend service
+
+
+═════════════════════════════════════════════════════════════════════════════
+  TROUBLESHOOTING
+═════════════════════════════════════════════════════════════════════════════
+
+  Problem                Solution
+  ───────────────────────────────────────────────────────────────────────────
+  "Port 3000 in use"      $ kill -9 $(lsof -t -i :3000)
+  
+  "Cannot connect"        $ docker-compose logs -f
+  
+  "Database error"        $ docker-compose down -v
+                          $ docker-compose up -d
+                          (Wait 60 seconds)
+  
+  "WebSocket fails"       $ docker-compose restart
+  
+  "Out of memory"         Increase Docker memory in settings
+
+
+═════════════════════════════════════════════════════════════════════════════
+  WHAT'S RUNNING
+═════════════════════════════════════════════════════════════════════════════
+
+  Service              Port    URL                        Purpose
+  ───────────────────────────────────────────────────────────────────────────
+  Next.js Frontend     3000    http://localhost:3000      Dashboard UI
+  Flask Backend        5000    http://localhost:5000      REST API
+  PostgreSQL           5432    localhost:5432             Database
+  Redis                6379    localhost:6379             Cache/Queue
+  PgAdmin              5050    http://localhost:5050      DB Management
+
+
+═════════════════════════════════════════════════════════════════════════════
+  LOGIN CREDENTIALS
+═════════════════════════════════════════════════════════════════════════════
+
+  Application (http://localhost:3000)
+  ─────────────────────────────────────
+    Username: admin
+    Password: admin123
+
+  PgAdmin (http://localhost:5050)
+  ────────────────────────────────
+    Email: admin@zeinaguard.com
+    Password: admin123
+    
+  Then add connection:
+    Host: postgres-tsdb
+    Port: 5432
+    User: zeinaguard_user
+    Pass: secure_password_change_me
+
+
+═════════════════════════════════════════════════════════════════════════════
+  DOCUMENTATION FILES (READ IN ORDER)
+═════════════════════════════════════════════════════════════════════════════
+
+  1. README_START_HERE.md      ← START HERE (you are reading this)
+  2. GETTING_STARTED.md         TL;DR version (5 minutes)
+  3. QUICK_START_LINUX.md       Linux-specific setup
+  4. SETUP_INSTRUCTIONS.md      Detailed walkthrough
+  5. PROJECT_OVERVIEW.md        Architecture explanation
+  6. COMMANDS_REFERENCE.md      Command cheat sheet
+  
+  Then explore:
+  7. PHASE1_JWT_AUTH.md         Authentication details
+  8. PHASE2_WEBSOCKET.md        Real-time features
+  9. PHASE3_DATABASE.md         Database details
+  10. PHASE4_DASHBOARD.md       UI components
+  11. PHASE5_COMMAND_PALETTE.md Advanced features
+  12. DEPLOYMENT.md             Production deployment
+
+
+═════════════════════════════════════════════════════════════════════════════
+  YOU'RE READY!
+═════════════════════════════════════════════════════════════════════════════
+
+  Your complete ZeinaGuard Pro system is ready to run.
+
+  3 Commands to Get Started:
+
+    cd /path/to/G_ADMIN
+    docker-compose up -d
+    # Open browser to http://localhost:3000
+    # Login: admin / admin123
+
+  That's it! The system is now running. 🚀
+
+═════════════════════════════════════════════════════════════════════════════

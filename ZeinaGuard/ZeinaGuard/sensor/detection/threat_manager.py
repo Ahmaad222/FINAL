@@ -17,50 +17,27 @@ class ThreatManager:
         self.last_sent = {}
         self.cooldown = 15
 
-        # 🔥 UI rate limit
-        self.last_ui_update = {}
-        self.ui_interval = 1.0   # ثانية
-
-    # ---------------------------
-    # Update UI
-    # ---------------------------
-
+    # 🔥 بدل print -> update UI
     def print_event(self, event_summary):
-
-        bssid = event_summary["bssid"]
-        now = time.time()
-
-        # لو أول مرة أو مر وقت كفاية
-        if bssid not in self.last_ui_update or \
-           now - self.last_ui_update[bssid] > self.ui_interval:
-
-            update_ap(event_summary)
-
-            self.last_ui_update[bssid] = now
-
-    # ---------------------------
-    # AP removal
-    # ---------------------------
+        update_ap(event_summary)
 
     def handle_removal(self, bssid):
 
+        # ❌ إزالة من UI
         remove_ap(bssid)
 
         print(f"❌ AP REMOVED: {bssid}")
 
+        # تنظيف
         self.history.pop(bssid, None)
         self.last_status.pop(bssid, None)
         self.last_sent.pop(bssid, None)
-        self.last_ui_update.pop(bssid, None)
 
+        # notify dashboard (بتاع زميلك)
         dashboard_queue.put({
             "type": "REMOVED",
             "bssid": bssid
         })
-
-    # ---------------------------
-    # Main loop
-    # ---------------------------
 
     def start(self):
 
@@ -68,18 +45,12 @@ class ThreatManager:
 
             event = event_queue.get()
 
-            # -----------------------
-            # AP removed
-            # -----------------------
-
+            # 🔥 AP removed
             if isinstance(event, dict) and event.get("type") == "AP_REMOVED":
                 self.handle_removal(event["bssid"])
                 continue
 
-            # -----------------------
-            # Analysis
-            # -----------------------
-
+            # 🔥 تحليل
             event_summary = self.engine.analyze(event)
 
             bssid = event_summary["bssid"]
@@ -87,25 +58,17 @@ class ThreatManager:
             score = event_summary["score"]
             reasons = event_summary["reasons"]
 
-            # -----------------------
-            # History
-            # -----------------------
-
+            # history
             self.history[bssid] = self.history.get(bssid, 0) + 1
 
-            # -----------------------
-            # UI update (rate limited)
-            # -----------------------
+            # update UI عند التغيير بس
+            if bssid not in self.last_status or self.last_status[bssid] != status:
+                self.print_event(event_summary)
+                self.last_status[bssid] = status
 
-            self.print_event(event_summary)
-
-            # حفظ آخر حالة
-            self.last_status[bssid] = status
-
-            # -----------------------
-            # Dashboard
-            # -----------------------
-
+            # --------------------------
+            # Dashboard (زميلك)
+            # --------------------------
             if status in ["SUSPICIOUS", "ROGUE"]:
 
                 threat = {
@@ -118,18 +81,13 @@ class ThreatManager:
                 now = time.time()
 
                 if bssid not in self.last_sent or now - self.last_sent[bssid] > self.cooldown:
-
                     dashboard_queue.put(threat)
-
                     self.last_sent[bssid] = now
 
-            # -----------------------
+            # --------------------------
             # Rogue confirmation
-            # -----------------------
-
-            if status == "ROGUE" and \
-               self.history[bssid] >= 3 and \
-               bssid not in self.confirmed_rogues:
+            # --------------------------
+            if status == "ROGUE" and self.history[bssid] >= 3 and bssid not in self.confirmed_rogues:
 
                 self.confirmed_rogues.add(bssid)
 
