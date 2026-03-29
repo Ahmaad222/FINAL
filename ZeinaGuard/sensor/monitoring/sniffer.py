@@ -21,6 +21,7 @@ aps_state = {}
 
 AP_TIMEOUT = 60 
 START_TIME = time.time()
+FIRST_PACKET = True
 
 def is_open_network(packet):
     if packet.haslayer(Dot11Beacon):
@@ -30,6 +31,11 @@ def is_open_network(packet):
 
 
 def build_event(packet):
+    global FIRST_PACKET
+    if FIRST_PACKET:
+        print("🎯 First WiFi packet captured! Sniffer is working.")
+        FIRST_PACKET = False
+
     dot11 = packet[Dot11]
 
     bssid = dot11.addr2

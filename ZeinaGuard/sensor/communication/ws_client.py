@@ -111,7 +111,7 @@ class WSClient:
                         "score": data.get("score")
                     }
                     self.sio.emit("network_scan", payload)
-                    # print(f"[WebSocket] 📡 Network Data Sent: {payload['ssid']}")
+                    print(f"[WebSocket] 📡 Network Data Sent: {payload['ssid']} ({payload['bssid']})")
                     continue
 
                 # 🛑 Existing Threat Logic

@@ -126,7 +126,7 @@ def init_socketio(app):
     @socketio.on("network_scan")
     def handle_network_scan(payload):
         """Processes enriched network data from sensor."""
-        # print(f"[WebSocket] 📡 Received Scan Data: {payload.get('ssid')}")
+        print(f"[WebSocket] 📡 Received Scan Data: {payload.get('ssid')} from Sensor")
         
         with app.app_context():
             try:
