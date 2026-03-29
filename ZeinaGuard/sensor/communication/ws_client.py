@@ -80,18 +80,42 @@ class WSClient:
 
             try:
 
-                threat = dashboard_queue.get()
+                data = dashboard_queue.get()
 
-                if not threat:
+                if not data:
                     continue
 
                 if not self.sio.connected:
                     continue
 
-                event = threat.get("event", {})
+                # 🚀 Handle Enriched Network Scan Data
+                if data.get("type") == "NETWORK_SCAN":
+                    event = data.get("event", {})
+                    payload = {
+                        "sensor_id": "sensor1",
+                        "ssid": event.get("ssid"),
+                        "bssid": event.get("bssid"),
+                        "channel": event.get("channel"),
+                        "signal": event.get("signal"),
+                        "distance": event.get("distance"),
+                        "auth": event.get("auth"),
+                        "wps": event.get("wps"),
+                        "manufacturer": event.get("manufacturer"),
+                        "uptime": event.get("uptime"),
+                        "raw_beacon": event.get("raw_beacon"),
+                        "timestamp": event.get("timestamp"),
+                        "status": data.get("status"),
+                        "score": data.get("score")
+                    }
+                    self.sio.emit("network_scan", payload)
+                    # print(f"[WebSocket] 📡 Network Data Sent: {payload['ssid']}")
+                    continue
+
+                # 🛑 Existing Threat Logic
+                event = data.get("event", {})
 
                 payload = {
-                    "threat_type": threat.get("status"),
+                    "threat_type": data.get("status"),
                     "ssid": event.get("ssid"),
                     "source_mac": event.get("bssid"),
                     "signal": event.get("signal"),

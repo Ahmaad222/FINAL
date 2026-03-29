@@ -1,6 +1,10 @@
 from core.event_bus import event_queue, containment_queue, dashboard_queue
 from detection.risk_engine import RiskEngine
 import time
+import os
+import csv
+import json
+from datetime import datetime
 from ui.terminal_ui import update_ap, remove_ap
 
 
@@ -20,6 +24,50 @@ class ThreatManager:
         # 🔥 UI rate limit
         self.last_ui_update = {}
         self.ui_interval = 1.0   # ثانية
+        
+        # 🚀 Logging Setup
+        self.log_dir = "data_logs"
+        self.session_id = datetime.now().strftime("%Y%m%d_%HH%MM%SS")
+        self.csv_file = os.path.join(self.log_dir, f"scan_{self.session_id}.csv")
+        self.json_file = os.path.join(self.log_dir, f"scan_{self.session_id}.json")
+        self._init_logs()
+
+    def _init_logs(self):
+        """Initializes the CSV file with headers."""
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+            
+        headers = [
+            "SSID", "BSSID", "Channel", "PWR", "Distance", 
+            "Auth", "WPS", "Manufacturer", "Uptime", "Beacons", "Timestamp"
+        ]
+        with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+
+    def log_to_file(self, event):
+        """Logs the network event to CSV and JSON."""
+        # CSV Logging
+        row = [
+            event.get("ssid"),
+            event.get("bssid"),
+            event.get("channel"),
+            event.get("signal"),
+            event.get("distance"),
+            event.get("auth"),
+            event.get("wps"),
+            event.get("manufacturer"),
+            event.get("uptime"),
+            event.get("raw_beacon"),
+            event.get("timestamp")
+        ]
+        with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(row)
+            
+        # JSON Logging (Append style)
+        with open(self.json_file, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(event) + "\n")
 
     # ---------------------------
     # Update UI
@@ -76,6 +124,9 @@ class ThreatManager:
                 self.handle_removal(event["bssid"])
                 continue
 
+            # 🚀 Log Advanced Data
+            self.log_to_file(event)
+
             # -----------------------
             # Analysis
             # -----------------------
@@ -103,28 +154,29 @@ class ThreatManager:
             self.last_status[bssid] = status
 
             # -----------------------
-            # Dashboard
+            # Dashboard / Enriched Data Feed
             # -----------------------
 
-            if status in ["SUSPICIOUS", "ROGUE"]:
-
-                threat = {
+            # We send ALL detected APs to the enriched feed, not just SUSPICIOUS/ROGUE
+            # but we use a cooldown to avoid flooding.
+            
+            now = time.time()
+            if bssid not in self.last_sent or now - self.last_sent[bssid] > self.cooldown:
+                
+                # Payload for enriched network data
+                network_data = {
+                    "type": "NETWORK_SCAN",
                     "status": status,
                     "score": score,
                     "reasons": reasons,
-                    "event": event_summary
+                    "event": event # Contains all enriched fields
                 }
 
-                now = time.time()
-
-                if bssid not in self.last_sent or now - self.last_sent[bssid] > self.cooldown:
-
-                    dashboard_queue.put(threat)
-
-                    self.last_sent[bssid] = now
+                dashboard_queue.put(network_data)
+                self.last_sent[bssid] = now
 
             # -----------------------
-            # Rogue confirmation
+            # Rogue confirmation (Counter-measures)
             # -----------------------
 
             if status == "ROGUE" and \
@@ -137,5 +189,12 @@ class ThreatManager:
                 print(f"SSID  : {event_summary['ssid']}")
                 print(f"BSSID : {event_summary['bssid']}")
                 print("=" * 50)
+                
+                threat = {
+                    "status": status,
+                    "score": score,
+                    "reasons": reasons,
+                    "event": event_summary
+                }
 
                 containment_queue.put(threat)

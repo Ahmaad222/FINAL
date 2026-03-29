@@ -4,6 +4,41 @@ Flask Backend - Detection Engine and API Server
 """
 
 import os
+import sys
+import subprocess
+import importlib.util
+
+# --------------------------------
+# 📦 Runtime Dependency Checker
+# --------------------------------
+BACKEND_DEPENDENCIES = {
+    "Flask": "flask",
+    "Flask-CORS": "flask_cors",
+    "Flask-JWT-Extended": "flask_jwt_extended",
+    "Flask-SQLAlchemy": "flask_sqlalchemy",
+    "Flask-SocketIO": "flask_socketio",
+    "python-dotenv": "dotenv",
+    "redis": "redis",
+    "psycopg2-binary": "psycopg2",
+    "scapy": "scapy"
+}
+
+def ensure_dependencies():
+    """Checks and installs missing backend dependencies at runtime."""
+    for package, module in BACKEND_DEPENDENCIES.items():
+        if importlib.util.find_spec(module) is None:
+            print(f"Missing dependency: {package} → installing...")
+            try:
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package], 
+                                      stdout=subprocess.DEVNULL, 
+                                      stderr=subprocess.STDOUT)
+            except Exception as e:
+                print(f"❌ Failed to install {package}: {e}")
+                # We don't exit(1) here to allow the app to potentially run if the module 
+                # name mapping was slightly off but the package is actually there.
+
+ensure_dependencies()
+
 from datetime import timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS

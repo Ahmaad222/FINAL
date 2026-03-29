@@ -1,68 +1,45 @@
-import subprocess
-import sys
 import os
+import sys
+import subprocess
+import importlib.util
 
 # --------------------------------
-# 🔍 Check & Install Dependencies
+# 📦 Auto Dependency Handler
 # --------------------------------
-
-REQUIRED_PACKAGES = {
-    "flask": "flask",
-    "flask-socketio": "flask_socketio",
-    "python-socketio": "socketio",
-    "redis": "redis",
-    "requests": "requests",
+DEPENDENCIES = {
     "scapy": "scapy",
+    "python-socketio": "socketio",
+    "websocket-client": "websocket",
+    "requests": "requests",
     "rich": "rich",
-    "readchar": "readchar",
-    "flask-sqlalchemy": "flask_sqlalchemy"
+    "readchar": "readchar"
 }
 
-
-def install_missing_packages():
-    missing = []
-
-    for package, module in REQUIRED_PACKAGES.items():
-        try:
-            __import__(module)
-        except ImportError:
-            missing.append(package)
-
-    if missing:
-        print("⚠️ Missing packages detected:")
-        for pkg in missing:
-            print(f" - {pkg}")
-
-        choice = input("❓ Install missing packages now? (y/n): ").lower()
-
-        if choice == "y":
+def ensure_dependencies():
+    """Checks and installs missing dependencies at runtime."""
+    for package, module in DEPENDENCIES.items():
+        if importlib.util.find_spec(module) is None:
+            print(f"Missing dependency: {package} → installing...")
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
-                print("✅ Packages installed successfully\n")
+                # Use sys.executable to ensure we install to the current environment (venv or system)
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package], 
+                                      stdout=subprocess.DEVNULL, 
+                                      stderr=subprocess.STDOUT)
             except Exception as e:
-                print("❌ Failed to install packages:", e)
+                print(f"❌ Failed to install {package}: {e}")
                 sys.exit(1)
-        else:
-            print("❌ Cannot continue without required packages.")
-            sys.exit(1)
 
-
-install_missing_packages()
+ensure_dependencies()
 
 # --------------------------------
 # ⚠️ Root Check (for scapy)
 # --------------------------------
-if os.geteuid() != 0:
+if os.name != 'nt' and os.geteuid() != 0:
     print("⚠️ Warning: You are not running as root.")
-    print("👉 Scapy may not work correctly.")
+    print("👉 Scapy requires root privileges for raw packet operations.")
     print("👉 Run with: sudo python3 main.py\n")
 
-# --------------------------------
-# باقي imports
-# --------------------------------
-
 import threading
-
 from monitoring.sniffer import start_monitoring
 from detection.threat_manager import ThreatManager
 from prevention.response_engine import ResponseEngine

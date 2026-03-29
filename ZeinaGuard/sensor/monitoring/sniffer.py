@@ -1,23 +1,26 @@
 # monitoring/sniffer.py
 
-from scapy.all import sniff
+from scapy.all import sniff, conf
 from scapy.layers.dot11 import Dot11, Dot11Beacon
 import threading
 import os
+import sys
 import time
 import datetime
 
 from config import INTERFACE, LOCKED_CHANNEL
-from utils import get_ssid, extract_channel
+from utils import (
+    get_ssid, extract_channel, estimate_distance, 
+    get_auth_type, get_wps_info, get_manufacturer, 
+    get_uptime, get_raw_beacon
+)
 from core.event_bus import event_queue
 
 clients_map = {}
+aps_state = {} 
 
-# 🔥 State Management
-aps_state = {}  # {bssid: {"last_seen": time, "event": event_data}}
-
-AP_TIMEOUT = 60  # seconds
-
+AP_TIMEOUT = 60 
+START_TIME = time.time()
 
 def is_open_network(packet):
     if packet.haslayer(Dot11Beacon):
@@ -34,6 +37,15 @@ def build_event(packet):
     channel = extract_channel(packet)
     signal = getattr(packet, "dBm_AntSignal", None)
 
+    # 🚀 Advanced Data Collection
+    distance = estimate_distance(signal)
+    auth = get_auth_type(packet)
+    wps = get_wps_info(packet)
+    manufacturer = get_manufacturer(bssid)
+    uptime = get_uptime(packet)
+    raw_beacon = get_raw_beacon(packet)
+    elapsed_time = round(time.time() - START_TIME, 2)
+
     clients_count = len(clients_map.get(bssid, set()))
 
     return {
@@ -42,6 +54,13 @@ def build_event(packet):
         "ssid": ssid,
         "channel": channel,
         "signal": signal,
+        "distance": distance,
+        "auth": auth,
+        "wps": wps,
+        "manufacturer": manufacturer,
+        "uptime": uptime,
+        "raw_beacon": raw_beacon,
+        "elapsed_time": elapsed_time,
         "encryption": "OPEN" if is_open_network(packet) else "SECURED",
         "clients": clients_count
     }
@@ -53,27 +72,19 @@ def handle_packet(packet):
 
     dot11 = packet[Dot11]
 
-    # ---------------------------
-    # Beacon (AP detection)
-    # ---------------------------
     if packet.haslayer(Dot11Beacon) and dot11.addr2:
 
         event = build_event(packet)
         bssid = event["bssid"]
         now = time.time()
 
-        # تحديث state
         aps_state[bssid] = {
             "last_seen": now,
             "event": event
         }
 
-        # نبعت دايمًا للـ ThreatManager
         event_queue.put(event)
 
-    # ---------------------------
-    # Data frames (Clients)
-    # ---------------------------
     if dot11.type == 2:
         bssid = dot11.addr3
         src = dot11.addr2
@@ -82,7 +93,6 @@ def handle_packet(packet):
             clients_map.setdefault(bssid, set()).add(src)
 
 
-# 🔥 Cleaner Thread
 def ap_cleaner():
     while True:
         now = time.time()
@@ -93,7 +103,6 @@ def ap_cleaner():
                 removed.append(bssid)
                 del aps_state[bssid]
 
-                # نبعت event removal
                 event_queue.put({
                     "type": "AP_REMOVED",
                     "bssid": bssid
@@ -107,7 +116,7 @@ def channel_hopper():
 
     while True:
         if config.LOCKED_CHANNEL is not None:
-            os.system(f"iwconfig {INTERFACE} channel {config.LOCKED_CHANNEL}")
+            os.system(f"iwconfig {INTERFACE} channel {config.LOCKED_CHANNEL} 2>/dev/null")
             time.sleep(1)
             continue
 
@@ -115,12 +124,25 @@ def channel_hopper():
             if config.LOCKED_CHANNEL is not None:
                 break
 
-            os.system(f"iwconfig {INTERFACE} channel {ch}")
+            os.system(f"iwconfig {INTERFACE} channel {ch} 2>/dev/null")
             time.sleep(0.4)
 
 
 def start_monitoring():
+    # 🚀 Pre-flight checks
+    if not os.path.exists(f"/sys/class/net/{INTERFACE}"):
+        print(f"❌ Error: Interface {INTERFACE} not found!")
+        return
+
+    if os.name != 'nt' and os.geteuid() != 0:
+        print("❌ Error: Root privileges required for sniffing!")
+        return
+
     threading.Thread(target=channel_hopper, daemon=True).start()
     threading.Thread(target=ap_cleaner, daemon=True).start()
 
-    sniff(iface=INTERFACE, prn=handle_packet, store=False)
+    print(f"📡 Sniffing on {INTERFACE}...")
+    try:
+        sniff(iface=INTERFACE, prn=handle_packet, store=False)
+    except Exception as e:
+        print(f"❌ Sniffing failed: {e}")

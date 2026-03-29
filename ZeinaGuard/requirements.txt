@@ -1,0 +1,27 @@
+# ZeinaGuard Global Requirements
+
+# Backend (Flask)
+Flask
+Flask-CORS
+Flask-JWT-Extended
+Flask-SQLAlchemy
+Flask-SocketIO
+Werkzeug
+psycopg2-binary
+SQLAlchemy
+python-dotenv
+redis
+gunicorn
+
+# Sensor & Monitoring
+scapy
+rich
+readchar
+requests
+websocket-client
+python-socketio
+python-engineio
+
+# Networking & Security
+pyshark
+cryptography
