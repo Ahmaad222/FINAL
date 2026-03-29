@@ -106,6 +106,7 @@ class WSClient:
                         "manufacturer": event.get("manufacturer"),
                         "uptime": event.get("uptime"),
                         "raw_beacon": event.get("raw_beacon"),
+                        "elapsed_time": event.get("elapsed_time"),
                         "timestamp": event.get("timestamp"),
                         "status": data.get("status"),
                         "score": data.get("score")

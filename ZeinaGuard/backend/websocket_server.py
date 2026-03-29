@@ -154,10 +154,18 @@ def init_socketio(app):
                     "bssid": payload.get("bssid"),
                     "channel": payload.get("channel"),
                     "signal": payload.get("signal"),
+                    "distance": payload.get("distance"),
                     "auth": payload.get("auth"),
+                    "wps": payload.get("wps"),
                     "manufacturer": payload.get("manufacturer"),
+                    "uptime": payload.get("uptime"),
+                    "raw_beacon": payload.get("raw_beacon"),
+                    "elapsed_time": payload.get("elapsed_time"),
+                    "status": payload.get("status"),
+                    "score": payload.get("score"),
                     "last_seen": payload.get("timestamp")
                 }
+
                 
                 # Update if exists, otherwise append
                 found = False
