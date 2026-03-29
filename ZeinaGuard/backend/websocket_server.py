@@ -126,52 +126,60 @@ def init_socketio(app):
     @socketio.on("network_scan")
     def handle_network_scan(payload):
         """Processes enriched network data from sensor."""
-        print(f"[WebSocket] 📡 Received Scan Data: {payload.get('ssid')} from Sensor")
+        sensor_name = payload.get("sensor_id", "sensor1")
+        print(f"[WebSocket] 📡 Received Scan Data: {payload.get('ssid')} from {sensor_name}")
         
         with app.app_context():
             try:
-                from models import NetworkTopology, Sensor
+                from models import NetworkTopology, Sensor, db
                 
-                sensor_name = payload.get("sensor_id", "sensor1")
+                # 🛠️ Find or Auto-Create the sensor
                 sensor = Sensor.query.filter_by(name=sensor_name).first()
-                
-                if sensor:
-                    topology = NetworkTopology.query.filter_by(sensor_id=sensor.id).first()
-                    if not topology:
-                        topology = NetworkTopology(sensor_id=sensor.id, discovered_networks=[], discovered_devices=[])
-                        db.session.add(topology)
-                    
-                    # Update topology with latest scan (Simplified: just append or update)
-                    current_networks = topology.discovered_networks or []
-                    network_info = {
-                        "ssid": payload.get("ssid"),
-                        "bssid": payload.get("bssid"),
-                        "channel": payload.get("channel"),
-                        "signal": payload.get("signal"),
-                        "auth": payload.get("auth"),
-                        "manufacturer": payload.get("manufacturer"),
-                        "last_seen": payload.get("timestamp")
-                    }
-                    
-                    # Check if already exists to update
-                    found = False
-                    for i, net in enumerate(current_networks):
-                        if net.get("bssid") == payload.get("bssid"):
-                            current_networks[i] = network_info
-                            found = True
-                            break
-                    
-                    if not found:
-                        current_networks.append(network_info)
-                    
-                    topology.discovered_networks = current_networks
+                if not sensor:
+                    print(f"[WebSocket] 🆕 Auto-registering new sensor: {sensor_name}")
+                    sensor = Sensor(name=sensor_name, hostname=sensor_name, is_active=True)
+                    db.session.add(sensor)
                     db.session.commit()
+                
+                # 🛠️ Find or Create the topology record for this sensor
+                topology = NetworkTopology.query.filter_by(sensor_id=sensor.id).first()
+                if not topology:
+                    topology = NetworkTopology(sensor_id=sensor.id, discovered_networks=[], discovered_devices=[])
+                    db.session.add(topology)
+                
+                # Update topology with latest scan
+                current_networks = topology.discovered_networks or []
+                network_info = {
+                    "ssid": payload.get("ssid"),
+                    "bssid": payload.get("bssid"),
+                    "channel": payload.get("channel"),
+                    "signal": payload.get("signal"),
+                    "auth": payload.get("auth"),
+                    "manufacturer": payload.get("manufacturer"),
+                    "last_seen": payload.get("timestamp")
+                }
+                
+                # Update if exists, otherwise append
+                found = False
+                for i, net in enumerate(current_networks):
+                    if net.get("bssid") == payload.get("bssid"):
+                        current_networks[i] = network_info
+                        found = True
+                        break
+                
+                if not found:
+                    current_networks.append(network_info)
+                
+                topology.discovered_networks = current_networks
+                db.session.commit()
+                print(f"[WebSocket] ✅ Scan data for '{payload.get('ssid')}' saved to DB.")
                 
                 # Broadcast to UI
                 socketio.emit("new_scan_data", payload)
                 
             except Exception as e:
                 print(f"[WebSocket] ❌ Error processing scan data: {e}")
+                db.session.rollback()
 
     return socketio
 
