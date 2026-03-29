@@ -8,9 +8,9 @@ BACKEND_PORT = 8000
 LOCKED_CHANNEL = None
 
 TRUSTED_APS = {
-    "Orange-RoQa": {
-        "bssid": "1E:3C:D4:2A:3C:1C",
-        "channel": 7 ,
+    "WE_EDF20C": {
+        "bssid": "20:E8:82:ED:F2:0C",
+        "channel": 3 ,
         "encryption": "SECURED" }
 }
 
