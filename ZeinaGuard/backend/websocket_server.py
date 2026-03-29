@@ -185,13 +185,21 @@ def init_socketio(app):
                 # This ensures the user sees ALL data in the database
                 severity_map = {"ROGUE": "HIGH", "SUSPICIOUS": "MEDIUM", "LEGIT": "INFO"}
                 
+                # Create a tidy, professional description string
+                manufacturer = payload.get("manufacturer", "Unknown")
+                distance = f"{payload.get('distance', 0)}m"
+                channel = payload.get("channel", "??")
+                auth = payload.get("auth", "OPEN")
+                
+                tidy_description = f"MFG: {manufacturer:<15} | Dist: {distance:>6} | CH: {channel:>2} | Auth: {auth}"
+
                 history_entry = Threat(
                     threat_type=payload.get("status", "SCAN"),
                     severity=severity_map.get(payload.get("status"), "INFO"),
                     source_mac=payload.get("bssid"),
                     ssid=payload.get("ssid"),
                     detected_by=sensor.id,
-                    description=f"Scan Log: {payload.get('manufacturer')} on CH {payload.get('channel')}"
+                    description=tidy_description
                 )
                 db.session.add(history_entry)
                 
