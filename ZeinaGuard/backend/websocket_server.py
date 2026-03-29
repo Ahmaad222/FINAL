@@ -102,6 +102,7 @@ def init_socketio(app):
 
                 db.session.add(new_threat)
                 db.session.commit()
+                print(f"[WebSocket] ✅ Threat '{payload.get('ssid')}' saved to PostgreSQL database (ID: {new_threat.id})")
 
                 broadcast_data = {
                     "id": new_threat.id,
@@ -179,8 +180,23 @@ def init_socketio(app):
                     current_networks.append(network_info)
                 
                 topology.discovered_networks = current_networks
+                
+                # 🛠️ NEW: Save every individual scan event to the Threat table for history
+                # This ensures the user sees ALL data in the database
+                severity_map = {"ROGUE": "HIGH", "SUSPICIOUS": "MEDIUM", "LEGIT": "INFO"}
+                
+                history_entry = Threat(
+                    threat_type=payload.get("status", "SCAN"),
+                    severity=severity_map.get(payload.get("status"), "INFO"),
+                    source_mac=payload.get("bssid"),
+                    ssid=payload.get("ssid"),
+                    detected_by=sensor.id,
+                    description=f"Scan Log: {payload.get('manufacturer')} on CH {payload.get('channel')}"
+                )
+                db.session.add(history_entry)
+                
                 db.session.commit()
-                print(f"[WebSocket] ✅ Scan data for '{payload.get('ssid')}' saved to DB.")
+                print(f"[WebSocket] ✅ Full scan data for '{payload.get('ssid')}' logged to history.")
                 
                 # Broadcast to UI
                 socketio.emit("new_scan_data", payload)
