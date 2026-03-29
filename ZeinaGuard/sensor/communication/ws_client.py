@@ -7,9 +7,9 @@ from core.event_bus import dashboard_queue
 
 class WSClient:
 
-    def __init__(self, backend_url="http://192.168.201.130:8000", token=None):
+    def __init__(self, backend_url=None, token=None):
 
-        self.backend_url = backend_url
+        self.backend_url = backend_url or "http://192.168.201.130:8000"
         self.token = token
 
         self.sio = socketio.Client(
@@ -26,7 +26,7 @@ class WSClient:
 
         @self.sio.event
         def connect():
-            print("[WebSocket] 🟢 Connected to Backend")
+            print(f"[WebSocket] 🟢 Connected to Backend at {self.backend_url}")
 
             self.sio.emit("sensor_register", {
                 "sensor_id": "sensor1"
@@ -50,29 +50,32 @@ class WSClient:
             print("[WebSocket] ❌ Cannot start WS without token")
             return
 
-        try:
+        while True:
+            try:
+                print(f"[WebSocket] Connecting to {self.backend_url}...")
 
-            print("[WebSocket] Connecting to server...")
+                self.sio.connect(
+                    self.backend_url,
+                    headers={
+                        "Authorization": f"Bearer {self.token}"
+                    },
+                    transports=["websocket"]
+                )
 
-            self.sio.connect(
-                self.backend_url,
-                headers={
-                    "Authorization": f"Bearer {self.token}"
-                },
-                transports=["websocket"]
-            )
+                self.is_running = True
 
-            self.is_running = True
+                threading.Thread(
+                    target=self._threat_listener,
+                    daemon=True
+                ).start()
 
-            threading.Thread(
-                target=self._threat_listener,
-                daemon=True
-            ).start()
+                self.sio.wait()
+                break # If wait finishes gracefully, break loop
 
-            self.sio.wait()
-
-        except Exception as e:
-            print(f"[WebSocket] ❌ Connection Error: {e}")
+            except Exception as e:
+                print(f"[WebSocket] ❌ Connection Error: {e}")
+                print("[WebSocket] 🔄 Retrying in 5 seconds...")
+                time.sleep(5)
 
     def _threat_listener(self):
 

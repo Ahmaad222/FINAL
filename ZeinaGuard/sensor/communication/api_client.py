@@ -2,10 +2,10 @@ import requests
 
 
 class APIClient:
-    def __init__(self):
+    def __init__(self, backend_url=None):
 
-        # Backend URL
-        self.backend_url = "http://192.168.201.130:8000"
+        # Backend URL - Use provided URL or fallback to internal default
+        self.backend_url = backend_url or "http://192.168.201.130:8000"
 
         # Credentials
         self.username = "admin"

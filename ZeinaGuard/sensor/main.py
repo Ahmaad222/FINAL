@@ -50,9 +50,32 @@ from communication.api_client import APIClient
 from ui.terminal_ui import run_terminal_ui
 
 
+import config # Import config first to allow runtime modification
+
 def main():
+    # --------------------------------
+    # 🛠️ Command Line Arguments (Interface)
+    # --------------------------------
+    if len(sys.argv) > 1:
+        provided_iface = sys.argv[1]
+        print(f"🔧 Using CLI provided interface: {provided_iface}")
+        config.INTERFACE = provided_iface
+    else:
+        print(f"ℹ️ No interface provided via CLI, using config default: {config.INTERFACE}")
+
+    # Validate interface
+    if os.name != 'nt' and not os.path.exists(f"/sys/class/net/{config.INTERFACE}"):
+        print(f"❌ Error: Interface '{config.INTERFACE}' not found on this system!")
+        sys.exit(1)
 
     print("🚀 Starting ZeinaGuard Sensor...")
+
+    # --------------------------------
+    # 🌐 Dynamic Backend Resolution
+    # --------------------------------
+    backend_host = os.getenv("ZEINAGUARD_BACKEND", config.BACKEND_HOST)
+    backend_port = config.BACKEND_PORT
+    backend_url = f"http://{backend_host}:{backend_port}"
 
     # --------------------------------
     # Try Backend Authentication
@@ -60,28 +83,41 @@ def main():
 
     token = None
     ws = None
+    
+    max_auth_retries = 2
+    for attempt in range(max_auth_retries + 1):
+        try:
+            api = APIClient(backend_url=backend_url)
+            token = api.authenticate_sensor()
 
-    try:
-        api = APIClient()
-        token = api.authenticate_sensor()
+            if token:
+                print(f"✅ Sensor authenticated with backend at {backend_url}")
+                ws = WSClient(backend_url=backend_url, token=token)
 
-        if token:
-            print("✅ Sensor authenticated with backend")
+                ws_thread = threading.Thread(
+                    target=ws.connect_to_server,
+                    daemon=True
+                )
+                ws_thread.start()
+                break # Success!
 
-            ws = WSClient(token=token)
+            else:
+                if attempt < max_auth_retries:
+                    print(f"⚠️ Connection to {backend_url} failed.")
+                    new_ip = input("👉 Enter Backend Server IP (or press Enter to retry): ").strip()
+                    if new_ip:
+                        backend_url = f"http://{new_ip}:{backend_port}"
+                else:
+                    print("⚠️ Running in OFFLINE MODE after multiple failed attempts.")
 
-            ws_thread = threading.Thread(
-                target=ws.connect_to_server,
-                daemon=True
-            )
-            ws_thread.start()
-
-        else:
-            print("⚠️ Backend not available — running in OFFLINE MODE")
-
-    except Exception as e:
-        print("⚠️ Backend connection failed — running OFFLINE")
-        print(e)
+        except Exception as e:
+            print(f"⚠️ Connection failed: {e}")
+            if attempt < max_auth_retries:
+                new_ip = input("👉 Enter Backend Server IP: ").strip()
+                if new_ip:
+                    backend_url = f"http://{new_ip}:{backend_port}"
+            else:
+                print("⚠️ Running in OFFLINE MODE")
 
     # --------------------------------
     # 🔥 Terminal UI Thread

@@ -1,6 +1,9 @@
 # config.py
 
+# Default values - can be overridden by CLI or runtime logic
 INTERFACE = "wlx002e2dc0346b"
+BACKEND_HOST = "192.168.201.130"
+BACKEND_PORT = 8000
 
 LOCKED_CHANNEL = None
 
