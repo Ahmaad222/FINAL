@@ -18,7 +18,7 @@ COPY package.json pnpm-lock.yaml ./
 # --frozen-lockfile: Ensures deterministic builds
 # --network-timeout: Prevents build failures on slow networks
 # --prefer-offline: Uses cache whenever possible
-RUN pnpm install --frozen-lockfile --network-timeout 100000
+RUN pnpm install --frozen-lockfile --network-timeout 100000 --prefer-offline
 
 # Copy application code
 COPY . .
@@ -29,6 +29,5 @@ RUN pnpm run build
 # Expose Next.js default port (matches package.json start script)
 EXPOSE 5000
 
-# Run in development mode to allow real-time changes if volumes are mounted,
-# or start the production build if no volumes are present.
-CMD ["pnpm", "run", "dev"]
+# Run in production mode
+CMD ["pnpm", "start"]

@@ -96,6 +96,16 @@ app.socketio = socketio  # Store reference for broadcasting
 # Register API blueprints
 register_blueprints(app)
 
+# Health check endpoint for Docker healthcheck
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for Docker healthcheck"""
+    return jsonify({
+        'status': 'healthy', 
+        'service': 'zeinaguard-backend',
+        'version': '1.0.0'
+    }), 200
+
 # Create tables on startup
 with app.app_context():
     try:
@@ -103,12 +113,6 @@ with app.app_context():
         print("[DB] Database tables created/verified")
     except Exception as e:
         print(f"[DB] Warning: Could not create tables: {e}")
-
-# Health check endpoint
-@app.route('/health', methods=['GET'])
-def health():
-    """Health check endpoint for Docker healthcheck"""
-    return jsonify({'status': 'healthy', 'service': 'zeinaguard-backend'}), 200
 
 # Root endpoint
 @app.route('/', methods=['GET'])
@@ -153,7 +157,7 @@ def internal_error(error):
 
 if __name__ == '__main__':
     # Development server with WebSocket support
-    port = int(os.getenv('FLASK_PORT', 8000))
+    port = int(os.getenv('FLASK_PORT', 5000))
     socketio.run(
         app,
         host='0.0.0.0',

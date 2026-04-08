@@ -1,6 +1,7 @@
-scapy
-python-socketio
-websocket-client
-requests
-rich
-readchar
+scapy==2.5.0
+python-socketio==5.10.0
+websocket-client==1.6.4
+requests==2.31.0
+rich==13.7.0
+readchar==4.0.5
+python-dotenv==1.0.0

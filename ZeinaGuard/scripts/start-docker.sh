@@ -24,8 +24,8 @@ readonly WHITE='\033[1;37m'
 readonly UNDERLINE='\033[4m'
 
 # --- Configuration Constants ---
-readonly MAX_RETRIES=30
-readonly RETRY_INTERVAL=2
+readonly MAX_RETRIES=45
+readonly RETRY_INTERVAL=3
 readonly PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 readonly ENV_FILE="${PROJECT_ROOT}/.env"
 readonly ENV_EXAMPLE="${PROJECT_ROOT}/.env.example"
@@ -99,15 +99,17 @@ setup_environment() {
         log_success "Environment file (.env) detected."
     fi
 
-    # Load environment variables for the health check functions
-    source "$ENV_FILE"
+    # Load environment variables
+    set -a
+    [ -f "$ENV_FILE" ] && . "$ENV_FILE"
+    set +a
 }
 
 validate_docker() {
     log_step "2" "Docker Infrastructure Check"
     
     if ! docker info > /dev/null 2>&1; then
-        log_error "Docker daemon is not running."
+        log_error "Docker daemon is not running. Please start Docker Desktop/Daemon."
         exit 1
     fi
     log_success "Docker daemon is healthy."
@@ -137,17 +139,30 @@ start_services() {
         $COMPOSE down -v --remove-orphans
     fi
 
-    log_info "Building and starting ZeinaGuard containers..."
+    log_info "Building and starting ZeinaGuard containers (this may take a few minutes)..."
     
-    # Increase Docker BuildKit timeout/robustness for slow networks
+    # Enable BuildKit for faster, more reliable builds
     export DOCKER_BUILDKIT=1
     export COMPOSE_DOCKER_CLI_BUILD=1
 
-    if ! $COMPOSE up -d --build --remove-orphans; then
-        log_error "Deployment failed. Check 'docker compose logs' for details."
-        exit 1
-    fi
-    log_success "All services are up in detached mode."
+    # Attempt build with retries to handle transient network issues
+    local build_retries=0
+    local max_build_retries=2
+    while [[ $build_retries -le $max_build_retries ]]; do
+        if $COMPOSE up -d --build --remove-orphans; then
+            log_success "All services are up and running."
+            return 0
+        else
+            build_retries=$((build_retries + 1))
+            if [[ $build_retries -le $max_build_retries ]]; then
+                log_warning "Build failed. Retrying ($build_retries/$max_build_retries)..."
+                sleep 5
+            else
+                log_error "Deployment failed after multiple attempts. Check logs with 'docker compose logs'."
+                exit 1
+            fi
+        fi
+    done
 }
 
 check_health() {
@@ -165,7 +180,10 @@ check_health() {
         echo -n "."
         sleep $RETRY_INTERVAL
     done
-    [[ $retries -eq $MAX_RETRIES ]] && { log_error "Database timeout."; exit 1; }
+    if [[ $retries -eq $MAX_RETRIES ]]; then
+        log_error "Database timeout."
+        exit 1
+    fi
 
     # --- API Layer ---
     log_info "Verifying API Layer (Flask + Gunicorn)..."
@@ -179,14 +197,24 @@ check_health() {
         echo -n "."
         sleep $RETRY_INTERVAL
     done
-    [[ $retries -eq $MAX_RETRIES ]] && log_warning "API health check inconclusive (may still be booting)."
+    if [[ $retries -eq $MAX_RETRIES ]]; then
+        log_warning "API health check inconclusive (may still be booting or initializing database)."
+    fi
 
     # --- Frontend Layer ---
     log_info "Verifying Frontend Layer (Next.js)..."
-    if curl -sfS --max-time 5 "$FRONTEND_URL" > /dev/null 2>&1; then
-        log_success "Frontend Dashboard is live."
-    else
-        log_warning "Frontend check timed out (check: $COMPOSE logs next-frontend)."
+    retries=0
+    while [[ $retries -lt 20 ]]; do
+        if curl -sfS --max-time 2 "$FRONTEND_URL" > /dev/null 2>&1; then
+            log_success "Frontend Dashboard is live."
+            break
+        fi
+        ((retries++))
+        echo -n "."
+        sleep 2
+    done
+    if [[ $retries -eq 20 ]]; then
+        log_warning "Frontend check timed out. It might still be starting."
     fi
 }
 

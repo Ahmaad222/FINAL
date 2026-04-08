@@ -17,7 +17,6 @@ services:
     networks:
       - zeinaguard_network
     healthcheck:
-      # Ensures database is accepting connections before dependent services start
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-zeinaguard_user} -d ${DB_NAME:-zeinaguard_db}"]
       interval: 5s
       timeout: 5s
@@ -36,7 +35,6 @@ services:
     networks:
       - zeinaguard_network
     healthcheck:
-      # Verifies Redis is alive and authenticated
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password_change_me}", "ping"]
       interval: 5s
       timeout: 5s
@@ -60,7 +58,7 @@ services:
     ports:
       - "5000:5000"
     volumes:
-      - ./backend:/app:ro  # Read-only mount for code updates without rebuild
+      - ./backend:/app:ro
     networks:
       - zeinaguard_network
     depends_on:
@@ -69,7 +67,6 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      # Internal health check to confirm Flask application is responsive
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
       timeout: 5s
@@ -77,45 +74,15 @@ services:
       start_period: 15s
     restart: unless-stopped
 
-<<<<<<< HEAD
   # Next.js Frontend: Enterprise security dashboard
-=======
-  # Sensor Service
-  zeinaguard-sensor:
-    build:
-      context: .
-      dockerfile: Dockerfile.sensor
-    container_name: zeinaguard_sensor
-    privileged: true
-    network_mode: host
-    environment:
-      ZEINAGUARD_BACKEND: localhost
-      ZEINAGUARD_PORT: 5000
-      SENSOR_INTERFACE: wlan0  # Change to your interface
-      ENABLE_CONTAINMENT: "True"
-    depends_on:
-      flask-backend:
-        condition: service_healthy
-    restart: unless-stopped
-
-  # Next.js Frontend (host:3000 -> container:5000, Next.js dev listens on 5000)
->>>>>>> f7c9ae9ffba41872a3f3deb481c2d4978803a478
   next-frontend:
     build:
       context: .
       dockerfile: Dockerfile.nextjs
     container_name: zeinaguard_nextjs
     environment:
-<<<<<<< HEAD
-      # Relative path for client-side API calls
-      NEXT_PUBLIC_API_URL: /backend-api
-      # WebSocket endpoint must be absolute for the browser
-      NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
-      # Internal address for server-side Next.js rewrites
-=======
       NEXT_PUBLIC_API_URL: /backend-api
       NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
->>>>>>> f7c9ae9ffba41872a3f3deb481c2d4978803a478
       BACKEND_URL: http://flask-backend:5000
     ports:
       - "3000:5000"
@@ -137,11 +104,8 @@ services:
       dockerfile: Dockerfile.sensor
     container_name: zeinaguard_sensor
     privileged: true
-    # 'host' network is CRITICAL for Scapy to access physical WiFi interfaces (wlan0, etc.)
     network_mode: host
     environment:
-      # Since we are in 'host' mode, 'localhost' points to the host machine
-      # where flask-backend maps port 5000.
       ZEINAGUARD_BACKEND: localhost
       ZEINAGUARD_PORT: 5000
       SENSOR_INTERFACE: ${SENSOR_INTERFACE:-wlan0}
