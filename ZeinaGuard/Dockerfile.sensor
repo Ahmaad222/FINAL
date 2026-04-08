@@ -1,0 +1,28 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for packet analysis
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpcap-dev \
+    tcpdump \
+    iw \
+    net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY sensor/requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy sensor code
+COPY sensor/ .
+
+# Since we need root for scapy, we'll run as root
+# (Default for Docker unless specified otherwise)
+
+# Run sensor
+# Use python -u for unbuffered output to see logs in docker compose
+CMD ["python", "-u", "main.py"]
