@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import importlib.util
+import time
 
 # --------------------------------
 # 📦 Auto Dependency Handler
@@ -21,7 +22,6 @@ def ensure_dependencies():
         if importlib.util.find_spec(module) is None:
             print(f"Missing dependency: {package} → installing...")
             try:
-                # Use sys.executable to ensure we install to the current environment (venv or system)
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package], 
                                       stdout=subprocess.DEVNULL, 
                                       stderr=subprocess.STDOUT)
@@ -47,8 +47,7 @@ from communication.ws_client import WSClient
 from communication.api_client import APIClient
 
 # 🔥 Terminal UI
-from ui.terminal_ui import run_terminal_ui
-
+# from ui.terminal_ui import run_terminal_ui # Disable UI in Docker to avoid TTY issues
 
 import config # Import config first to allow runtime modification
 
@@ -61,31 +60,31 @@ def main():
         print(f"🔧 Using CLI provided interface: {provided_iface}")
         config.INTERFACE = provided_iface
     else:
-        print(f"ℹ️ No interface provided via CLI, using config default: {config.INTERFACE}")
+        print(f"ℹ️ Using interface: {config.INTERFACE}")
 
-    # Validate interface
+    # Validate interface (only if not in a container or if requested)
     if os.name != 'nt' and not os.path.exists(f"/sys/class/net/{config.INTERFACE}"):
-        print(f"❌ Error: Interface '{config.INTERFACE}' not found on this system!")
-        sys.exit(1)
+        print(f"⚠️ Warning: Interface '{config.INTERFACE}' not found. Sniffing may fail.")
 
     print("🚀 Starting ZeinaGuard Sensor...")
 
     # --------------------------------
     # 🌐 Dynamic Backend Resolution
     # --------------------------------
-    backend_host = os.getenv("ZEINAGUARD_BACKEND", config.BACKEND_HOST)
+    backend_host = config.BACKEND_HOST
     backend_port = config.BACKEND_PORT
     backend_url = f"http://{backend_host}:{backend_port}"
 
+    print(f"📡 Backend Target: {backend_url}")
+
     # --------------------------------
-    # Try Backend Authentication
+    # Try Backend Authentication (with infinite retry for Docker)
     # --------------------------------
 
     token = None
     ws = None
     
-    max_auth_retries = 2
-    for attempt in range(max_auth_retries + 1):
+    while token is None:
         try:
             api = APIClient(backend_url=backend_url)
             token = api.authenticate_sensor()
@@ -100,34 +99,22 @@ def main():
                 )
                 ws_thread.start()
                 break # Success!
-
             else:
-                if attempt < max_auth_retries:
-                    print(f"⚠️ Connection to {backend_url} failed.")
-                    new_ip = input("👉 Enter Backend Server IP (or press Enter to retry): ").strip()
-                    if new_ip:
-                        backend_url = f"http://{new_ip}:{backend_port}"
-                else:
-                    print("⚠️ Running in OFFLINE MODE after multiple failed attempts.")
+                print(f"⚠️ Authentication failed. Retrying in 10 seconds...")
+                time.sleep(10)
 
         except Exception as e:
-            print(f"⚠️ Connection failed: {e}")
-            if attempt < max_auth_retries:
-                new_ip = input("👉 Enter Backend Server IP: ").strip()
-                if new_ip:
-                    backend_url = f"http://{new_ip}:{backend_port}"
-            else:
-                print("⚠️ Running in OFFLINE MODE")
+            print(f"⚠️ Connection failed: {e}. Retrying in 10 seconds...")
+            time.sleep(10)
 
     # --------------------------------
-    # 🔥 Terminal UI Thread
+    # 🔥 Terminal UI Thread (Disabled in Docker)
     # --------------------------------
-
-    ui_thread = threading.Thread(
-        target=run_terminal_ui,
-        daemon=True
-    )
-    ui_thread.start()
+    # ui_thread = threading.Thread(
+    #     target=run_terminal_ui,
+    #     daemon=True
+    # )
+    # ui_thread.start()
 
     # --------------------------------
     # Threat Manager
@@ -159,7 +146,17 @@ def main():
 
     print("📡 Starting wireless monitoring...")
 
-    start_monitoring()
+    # We use a try-except here because scapy might crash if interface is invalid
+    try:
+        start_monitoring()
+    except KeyboardInterrupt:
+        print("Stopping sensor...")
+        sys.exit(0)
+    except Exception as e:
+        print(f"❌ Fatal Sniffer Error: {e}")
+        # Keep alive for other threads if needed, or exit
+        while True:
+            time.sleep(1)
 
 
 if __name__ == "__main__":

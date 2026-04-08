@@ -8,14 +8,17 @@ WORKDIR /app
 # - libpcap-dev: Required for Scapy packet processing
 # - tcpdump: Required for raw network monitoring
 # - gcc: Required for compiling some Python C-extensions
+# - iw / net-tools: Required for network interface management
 RUN apt-get update && apt-get install -y \
     gcc \
     libpcap-dev \
     tcpdump \
+    iw \
+    net-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency definition first for caching efficiency
-COPY backend/requirements.txt .
+COPY sensor/requirements.txt .
 
 # Install dependencies with production optimizations:
 # --no-cache-dir: Reduces image size
@@ -23,12 +26,9 @@ COPY backend/requirements.txt .
 # --retries: Automatic recovery from transient network errors
 RUN pip install --no-cache-dir --default-timeout=100 --retries 5 -r requirements.txt
 
-# Copy backend source code
-COPY backend/ .
+# Copy sensor source code
+COPY sensor/ .
 
-# Expose backend port (standard for this app)
-EXPOSE 5000
-
-# Start Flask with Gunicorn for production-grade concurrency
-# -k gevent/eventlet could be used but standard gunicorn is reliable for this scale
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--worker-class", "eventlet", "--workers", "1", "app:app"]
+# Run sensor with unbuffered output for logging
+# (Root privileges are provided by 'privileged: true' in docker-compose.yml)
+CMD ["python", "-u", "main.py"]

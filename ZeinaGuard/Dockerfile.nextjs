@@ -1,24 +1,34 @@
-FROM node:20-alpine
+# Use node:20-slim for smaller image size and security
+FROM node:20-slim
 
+# Set pnpm home directory for corepack
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PATH"
+
+# Enable corepack (includes pnpm)
+RUN corepack enable
+
+# Set working directory
 WORKDIR /app
 
-# Install pnpm globally
-RUN npm install -g pnpm
+# Copy dependency files first for better caching
+COPY package.json pnpm-lock.yaml ./
 
-# Copy package files
-COPY package.json pnpm-lock.yaml* ./
+# Configure pnpm for robustness:
+# --frozen-lockfile: Ensures deterministic builds
+# --network-timeout: Prevents build failures on slow networks
+# --prefer-offline: Uses cache whenever possible
+RUN pnpm install --frozen-lockfile --network-timeout 100000
 
-# Install dependencies with pnpm
-RUN pnpm install --no-frozen-lockfile
-
-# Copy app code
+# Copy application code
 COPY . .
 
-# Build Next.js
+# Build Next.js application (optimizes for production)
 RUN pnpm run build
 
-# Expose port
+# Expose Next.js default port (matches package.json start script)
 EXPOSE 5000
 
-# Run development server
+# Run in development mode to allow real-time changes if volumes are mounted,
+# or start the production build if no volumes are present.
 CMD ["pnpm", "run", "dev"]

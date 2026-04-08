@@ -5,16 +5,56 @@ import { useSocket, ThreatEvent } from '@/hooks/use-socket';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { AlertTriangle, AlertCircle, WifiOff } from 'lucide-react';
+import { AlertTriangle, AlertCircle, WifiOff, Loader2 } from 'lucide-react';
 
 interface ThreatItem extends ThreatEvent {
-  id?: string; // For React key
+  id: string | number;
 }
 
 export function ThreatFeed() {
   const [threats, setThreats] = useState<ThreatItem[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [latestThreatTime, setLatestThreatTime] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // Fetch initial threats from database
+  const fetchInitialThreats = async () => {
+    try {
+      setLoading(true);
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
+      const response = await fetch(`${apiUrl}/api/threats/`);
+      
+      if (response.ok) {
+        const result = await response.json();
+        if (result.success && Array.isArray(result.data)) {
+          // Map DB threats to the format expected by the feed
+          const mappedThreats = result.data.map((t: any) => ({
+            id: t.id,
+            timestamp: t.created_at,
+            severity: t.severity,
+            data: {
+              threat_type: t.threat_type,
+              description: t.description,
+              source_mac: t.source_mac,
+              ssid: t.ssid,
+              signal_strength: t.signal_strength || -70,
+              packet_count: t.packet_count || 0,
+              created_at: t.created_at
+            }
+          }));
+          setThreats(mappedThreats);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch initial threats:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchInitialThreats();
+  }, []);
 
   const handleThreatEvent = (event: ThreatEvent) => {
     // Add threat to the list
@@ -44,7 +84,6 @@ export function ThreatFeed() {
   }, [isSocketConnected]);
 
   const flashCriticalAlert = () => {
-    // Add visual feedback for critical threats
     const body = document.body;
     const originalBg = body.style.backgroundColor;
     body.style.backgroundColor = '#7f1d1d'; // Red
@@ -60,7 +99,7 @@ export function ThreatFeed() {
   };
 
   const getSeverityColor = (severity: string) => {
-    switch (severity) {
+    switch (severity.toLowerCase()) {
       case 'critical':
         return 'bg-red-900 text-red-100 border-red-700';
       case 'high':
@@ -75,7 +114,8 @@ export function ThreatFeed() {
   };
 
   const getSeverityIcon = (severity: string) => {
-    if (severity === 'critical' || severity === 'high') {
+    const s = severity.toLowerCase();
+    if (s === 'critical' || s === 'high') {
       return <AlertTriangle className="w-4 h-4" />;
     }
     return <AlertCircle className="w-4 h-4" />;
@@ -120,20 +160,27 @@ export function ThreatFeed() {
       <Card className="bg-slate-800 border-slate-700">
         <CardHeader>
           <CardTitle className="text-white flex items-center gap-2">
-            <span>Real-Time Threat Feed</span>
+            <span>Security Threat Feed</span>
             <Badge variant="outline" className="ml-auto bg-slate-700 text-slate-100">
-              {threats.length} threats
+              {threats.length} total
             </Badge>
           </CardTitle>
           <CardDescription className="text-slate-400">
-            Live threat events streaming via WebSocket
+            Monitoring wireless infrastructure for anomalies
           </CardDescription>
         </CardHeader>
       </Card>
 
       {/* Threat Items */}
       <div className="space-y-3">
-        {threats.length === 0 ? (
+        {loading ? (
+          <Card className="bg-slate-800 border-slate-700">
+            <CardContent className="pt-6 text-center text-slate-400 flex flex-col items-center gap-2">
+              <Loader2 className="w-8 h-8 animate-spin" />
+              <p>Loading threat history...</p>
+            </CardContent>
+          </Card>
+        ) : threats.length === 0 ? (
           <Card className="bg-slate-800 border-slate-700">
             <CardContent className="pt-6 text-center text-slate-400">
               <p>No threats detected yet</p>

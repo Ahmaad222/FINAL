@@ -1,31 +1,54 @@
 """
 JWT Authentication Module for ZeinaGuard Pro
-Handles user authentication, token generation, and validation
+Handles user authentication, token generation, and validation using SQLAlchemy models
 """
 
 from functools import wraps
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
-from flask import request, jsonify
+from flask import request, jsonify, Blueprint
 from flask_jwt_extended import (
     JWTManager, create_access_token, jwt_required, 
     get_jwt_identity, get_jwt
 )
+from models import db, User
 import os
 
 # Password hashing configuration
 HASH_METHOD = 'pbkdf2:sha256'
 
+# Define Blueprint for Auth routes
+auth_bp = Blueprint('auth', __name__, url_prefix='/api/auth')
 
 def hash_password(password: str) -> str:
     """Hash a password using PBKDF2-SHA256"""
     return generate_password_hash(password, method=HASH_METHOD)
 
-
 def verify_password(stored_hash: str, provided_password: str) -> bool:
     """Verify a password against its hash"""
     return check_password_hash(stored_hash, provided_password)
 
+def authenticate_user(username: str, password: str):
+    """
+    Authenticate user by username and password using the database
+    Returns user object if valid, None otherwise
+    """
+    user = User.query.filter_by(username=username).first()
+    
+    if not user:
+        return None
+    
+    if not user.is_active:
+        return None
+    
+    if not verify_password(user.password_hash, password):
+        return None
+    
+    return user
+
+def get_user_by_id(user_id: int):
+    """Get user by ID from the database"""
+    return User.query.get(user_id)
 
 class AuthService:
     """Service for handling authentication operations"""
@@ -64,18 +87,7 @@ class AuthService:
     
     @staticmethod
     def create_tokens(user_id: int, username: str, email: str, is_admin: bool = False):
-        """
-        Create JWT access token
-        
-        Args:
-            user_id: User's database ID
-            username: User's username
-            email: User's email
-            is_admin: Whether user is admin
-        
-        Returns:
-            Dictionary with access token and expiration
-        """
+        """Create JWT access token and return user info"""
         identity = {
             'user_id': user_id,
             'username': username,
@@ -85,13 +97,13 @@ class AuthService:
         
         access_token = create_access_token(
             identity=identity,
-            expires_delta=timedelta(hours=24)  # 24 hour token lifetime
+            expires_delta=timedelta(hours=24)
         )
         
         return {
             'access_token': access_token,
             'token_type': 'Bearer',
-            'expires_in': 86400,  # 24 hours in seconds
+            'expires_in': 86400,
             'user': {
                 'id': user_id,
                 'username': username,
@@ -99,24 +111,6 @@ class AuthService:
                 'is_admin': is_admin
             }
         }
-    
-    @staticmethod
-    def get_current_user():
-        """Get current authenticated user from JWT"""
-        try:
-            identity = get_jwt_identity()
-            return identity
-        except:
-            return None
-    
-    @staticmethod
-    def get_current_user_id():
-        """Get current user ID from JWT"""
-        identity = get_jwt_identity()
-        if identity:
-            return identity.get('user_id')
-        return None
-
 
 def token_required(f):
     """Decorator to require JWT token"""
@@ -126,7 +120,6 @@ def token_required(f):
         current_user = get_jwt_identity()
         return f(current_user, *args, **kwargs)
     return decorated_function
-
 
 def admin_required(f):
     """Decorator to require admin role"""
@@ -139,62 +132,43 @@ def admin_required(f):
         return f(current_user, *args, **kwargs)
     return decorated_function
 
+# --- Auth Routes ---
 
-# In-memory user store (FOR DEVELOPMENT ONLY - use database in production)
-# Matches init_db.py credentials: admin/admin123, analyst/analyst123
-MOCK_USERS = {
-    'admin': {
-        'user_id': 1,
-        'username': 'admin',
-        'email': 'admin@zeinaguard.local',
-        'password_hash': generate_password_hash('admin123', method=HASH_METHOD),
-        'is_admin': True,
-        'is_active': True,
-        'created_at': datetime.now()
-    },
-    'analyst': {
-        'user_id': 2,
-        'username': 'analyst',
-        'email': 'analyst@zeinaguard.local',
-        'password_hash': generate_password_hash('analyst123', method=HASH_METHOD),
-        'is_admin': False,
-        'is_active': True,
-        'created_at': datetime.now()
-    },
-    'monitor': {
-        'user_id': 3,
-        'username': 'monitor',
-        'email': 'monitor@zeinaguard.local',
-        'password_hash': generate_password_hash('monitor123', method=HASH_METHOD),
-        'is_admin': False,
-        'is_active': True,
-        'created_at': datetime.now()
-    },
-}
+@auth_bp.route('/login', methods=['POST'])
+def login():
+    """User login endpoint"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Missing JSON'}), 400
+            
+        username = data.get('username')
+        password = data.get('password')
+        
+        if not username or not password:
+            return jsonify({'error': 'Missing username or password'}), 400
+            
+        user = authenticate_user(username, password)
+        if not user:
+            return jsonify({'error': 'Invalid credentials'}), 401
+            
+        return jsonify(AuthService.create_tokens(
+            user_id=user.id,
+            username=user.username,
+            email=user.email,
+            is_admin=user.is_admin
+        )), 200
+    except Exception as e:
+        return jsonify({'error': f'Login failed: {str(e)}'}), 500
 
+@auth_bp.route('/me', methods=['GET'])
+@jwt_required()
+def get_me():
+    """Get current authenticated user information"""
+    return jsonify(get_jwt_identity()), 200
 
-def authenticate_user(username: str, password: str):
-    """
-    Authenticate user by username and password
-    Returns user data if valid, None otherwise
-    """
-    user = MOCK_USERS.get(username)
-    
-    if not user:
-        return None
-    
-    if not user.get('is_active'):
-        return None
-    
-    if not verify_password(user['password_hash'], password):
-        return None
-    
-    return user
-
-
-def get_user_by_id(user_id: int):
-    """Get user by ID"""
-    for user in MOCK_USERS.values():
-        if user['user_id'] == user_id:
-            return user
-    return None
+@auth_bp.route('/logout', methods=['POST'])
+@jwt_required()
+def logout():
+    """Logout endpoint"""
+    return jsonify({'message': 'Logged out successfully'}), 200

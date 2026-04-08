@@ -1,14 +1,12 @@
-version: '3.9'
-
 services:
-  # PostgreSQL with TimescaleDB extension
+  # PostgreSQL with TimescaleDB: Secure, performant time-series data storage
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: zeinaguard_postgres
     environment:
-      POSTGRES_USER: zeinaguard_user
-      POSTGRES_PASSWORD: secure_password_change_me
-      POSTGRES_DB: zeinaguard_db
+      POSTGRES_USER: ${DB_USER:-zeinaguard_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
+      POSTGRES_DB: ${DB_NAME:-zeinaguard_db}
       POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=timescaledb"
     ports:
       - "5432:5432"
@@ -19,16 +17,18 @@ services:
     networks:
       - zeinaguard_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zeinaguard_user -d zeinaguard_db"]
-      interval: 10s
+      # Ensures database is accepting connections before dependent services start
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-zeinaguard_user} -d ${DB_NAME:-zeinaguard_db}"]
+      interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # Redis for message queue and caching
+  # Redis: High-speed caching and message queue for WebSocket events
   redis:
     image: redis:7-alpine
     container_name: zeinaguard_redis
-    command: redis-server --appendonly yes --requirepass redis_password_change_me
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password_change_me}
     ports:
       - "6379:6379"
     volumes:
@@ -36,12 +36,14 @@ services:
     networks:
       - zeinaguard_network
     healthcheck:
-      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "redis_password_change_me", "ping"]
-      interval: 10s
+      # Verifies Redis is alive and authenticated
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password_change_me}", "ping"]
+      interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # Flask Backend (API + Socket.IO on port 5000)
+  # Flask Backend: Core logic, REST API, and Socket.IO server
   flask-backend:
     build:
       context: .
@@ -49,16 +51,16 @@ services:
     container_name: zeinaguard_flask
     environment:
       FLASK_APP: app.py
-      FLASK_ENV: development
+      FLASK_ENV: production
       FLASK_PORT: 5000
-      DATABASE_URL: postgresql://zeinaguard_user:secure_password_change_me@postgres:5432/zeinaguard_db
-      REDIS_URL: redis://:redis_password_change_me@redis:6379/0
-      JWT_SECRET_KEY: your_jwt_secret_key_change_me
-      FLASK_DEBUG: 1
+      DATABASE_URL: postgresql://${DB_USER:-zeinaguard_user}:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/${DB_NAME:-zeinaguard_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-your_jwt_secret_key_change_me}
+      FLASK_DEBUG: 0
     ports:
       - "5000:5000"
     volumes:
-      - ./backend:/app
+      - ./backend:/app:ro  # Read-only mount for code updates without rebuild
     networks:
       - zeinaguard_network
     depends_on:
@@ -66,27 +68,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: python app.py
     healthcheck:
+      # Internal health check to confirm Flask application is responsive
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
+    restart: unless-stopped
 
-  # Next.js Frontend (host:3000 -> container:5000, Next.js dev listens on 5000)
+  # Next.js Frontend: Enterprise security dashboard
   next-frontend:
     build:
       context: .
       dockerfile: Dockerfile.nextjs
     container_name: zeinaguard_nextjs
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:5000
+      # Relative path for client-side API calls
+      NEXT_PUBLIC_API_URL: /backend-api
+      # WebSocket endpoint must be absolute for the browser
       NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
+      # Internal address for server-side Next.js rewrites
+      BACKEND_URL: http://flask-backend:5000
     ports:
       - "3000:5000"
     volumes:
-      - .:/app
+      - .:/app:ro
       - /app/node_modules
       - /app/.next
     networks:
@@ -94,14 +101,36 @@ services:
     depends_on:
       flask-backend:
         condition: service_healthy
+    restart: unless-stopped
 
-  # PgAdmin for database management
+  # Sensor Service: Scapy-based monitoring (Requires Host Network for sniffing)
+  zeinaguard-sensor:
+    build:
+      context: .
+      dockerfile: Dockerfile.sensor
+    container_name: zeinaguard_sensor
+    privileged: true
+    # 'host' network is CRITICAL for Scapy to access physical WiFi interfaces (wlan0, etc.)
+    network_mode: host
+    environment:
+      # Since we are in 'host' mode, 'localhost' points to the host machine
+      # where flask-backend maps port 5000.
+      ZEINAGUARD_BACKEND: localhost
+      ZEINAGUARD_PORT: 5000
+      SENSOR_INTERFACE: ${SENSOR_INTERFACE:-wlan0}
+      ENABLE_CONTAINMENT: "True"
+    depends_on:
+      flask-backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # PgAdmin: Database management interface
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: zeinaguard_pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.local
-      PGADMIN_DEFAULT_PASSWORD: admin_password_change_me
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password_change_me}
     ports:
       - "5050:80"
     volumes:
@@ -110,6 +139,7 @@ services:
       - zeinaguard_network
     depends_on:
       - postgres
+    restart: unless-stopped
 
 volumes:
   postgres_data:

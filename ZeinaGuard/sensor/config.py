@@ -1,9 +1,10 @@
 # config.py
+import os
 
-# Default values - can be overridden by CLI or runtime logic
-INTERFACE = "wlx002e2dc0346b"
-BACKEND_HOST = "192.168.201.130"
-BACKEND_PORT = 8000
+# Default values - can be overridden by Environment variables
+INTERFACE = os.getenv("SENSOR_INTERFACE", "wlan0")
+BACKEND_HOST = os.getenv("ZEINAGUARD_BACKEND", "flask-backend")
+BACKEND_PORT = int(os.getenv("ZEINAGUARD_PORT", "5000"))
 
 LOCKED_CHANNEL = None
 
@@ -14,7 +15,6 @@ TRUSTED_APS = {
         "encryption": "SECURED" }
 }
 
-ENABLE_ACTIVE_CONTAINMENT = True   
-DEAUTH_COUNT = 40               # عدد الإطارات
-DEAUTH_INTERVAL = 0.1              # زمن بين الإرسال
-
+ENABLE_ACTIVE_CONTAINMENT = os.getenv("ENABLE_CONTAINMENT", "True").lower() == "true"
+DEAUTH_COUNT = int(os.getenv("DEAUTH_COUNT", "40"))
+DEAUTH_INTERVAL = float(os.getenv("DEAUTH_INTERVAL", "0.1"))

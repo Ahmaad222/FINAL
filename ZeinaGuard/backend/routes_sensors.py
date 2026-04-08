@@ -1,88 +1,128 @@
-from flask import Blueprint, jsonify, request
+"""
+Sensors API Routes for ZeinaGuard Pro
+Handles sensor registration and monitoring metrics
+"""
+
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required
+from models import db, Sensor, SensorHealth
 from auth import token_required
-from models import db, Sensor
+from datetime import datetime
+from sqlalchemy import desc
 
-sensors_bp = Blueprint(
-    "sensors",
-    __name__,
-    url_prefix="/api/sensors"
-)
+sensors_bp = Blueprint('sensors', __name__, url_prefix='/api/sensors')
 
+@sensors_bp.route('/', methods=['GET'])
+@jwt_required(optional=True)
+def get_sensors():
+    """Get list of sensors with latest health metrics from the database"""
+    try:
+        sensors = Sensor.query.all()
+        result = []
+        
+        for s in sensors:
+            # Get latest health record for this sensor
+            health = SensorHealth.query.filter_by(sensor_id=s.id).order_by(desc(SensorHealth.created_at)).first()
+            
+            # Map database status to frontend status
+            status = health.status if health else ('online' if s.is_active else 'offline')
+            
+            result.append({
+                'id': s.id,
+                'hostname': s.hostname or s.name,
+                'name': s.name,
+                'location': s.location or 'Unknown',
+                'status': status,
+                'signal_strength': health.signal_strength if health else -100,
+                'cpu_usage': health.cpu_usage if health else 0,
+                'memory_usage': health.memory_usage if health else 0,
+                'uptime_percent': 100, # Mocked for now, can be calculated from uptime history
+                'last_seen': health.last_heartbeat.isoformat() if health and health.last_heartbeat else s.updated_at.isoformat(),
+                'packet_count': 0, # Mocked or retrieved from separate table if available
+                'coverage_area': 'Standard Room' # Default value
+            })
+            
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-# -----------------------------
-# Register Sensor
-# -----------------------------
-@sensors_bp.route("/register", methods=["POST"])
-@token_required
-def register_sensor(current_user):
-
-    data = request.get_json()
-
-    sensor_id = data.get("id")
-
-    name = data.get("name")
-
-    location = data.get("location", "unknown")
-
-    if not sensor_id or not name:
-
+@sensors_bp.route('/register', methods=['POST'])
+@jwt_required(optional=True)
+def register_sensor():
+    """Register or update a sensor in the database"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Missing JSON'}), 400
+            
+        name = data.get('name')
+        hostname = data.get('hostname')
+        ip_address = data.get('ip_address')
+        mac_address = data.get('mac_address')
+        location = data.get('location')
+        
+        if not name or not hostname:
+            return jsonify({'error': 'Name and hostname are required'}), 400
+            
+        sensor = Sensor.query.filter_by(hostname=hostname).first()
+        
+        if sensor:
+            sensor.name = name
+            sensor.ip_address = ip_address
+            sensor.mac_address = mac_address
+            sensor.location = location
+            sensor.updated_at = datetime.utcnow()
+        else:
+            sensor = Sensor(
+                name=name,
+                hostname=hostname,
+                ip_address=ip_address,
+                mac_address=mac_address,
+                location=location,
+                is_active=True
+            )
+            db.session.add(sensor)
+            
+        db.session.commit()
+        
         return jsonify({
+            'message': 'Sensor registered successfully',
+            'sensor_id': sensor.id
+        }), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
-            "error": "sensor id and name required"
-
-        }), 400
-
-    sensor = Sensor.query.get(sensor_id)
-
-    if not sensor:
-
-        sensor = Sensor(
-
-            id=sensor_id,
-            name=name,
-            location=location,
-            is_active=True
-
+@sensors_bp.route('/<int:sensor_id>/health', methods=['POST'])
+@jwt_required(optional=True)
+def update_sensor_health(sensor_id):
+    """Log a new health record for a sensor"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Missing JSON'}), 400
+            
+        health = SensorHealth(
+            sensor_id=sensor_id,
+            status=data.get('status', 'online'),
+            signal_strength=data.get('signal_strength'),
+            cpu_usage=data.get('cpu_usage'),
+            memory_usage=data.get('memory_usage'),
+            uptime=data.get('uptime'),
+            last_heartbeat=datetime.utcnow()
         )
-
-        db.session.add(sensor)
-
-    else:
-
-        sensor.name = name
-        sensor.location = location
-        sensor.is_active = True
-
-    db.session.commit()
-
-    return jsonify({
-
-        "message": "sensor registered",
-        "id": sensor_id
-
-    })
-
-
-# -----------------------------
-# Get Sensors
-# -----------------------------
-@sensors_bp.route("/", methods=["GET"])
-@token_required
-def get_sensors(current_user):
-
-    sensors = Sensor.query.all()
-
-    return jsonify([
-
-        {
-
-            "id": s.id,
-            "name": s.name,
-            "location": s.location,
-            "status": "online" if s.is_active else "offline"
-
-        }
-
-        for s in sensors
-
-    ])
+        
+        db.session.add(health)
+        
+        # Also update the main sensor record's active status
+        sensor = Sensor.query.get(sensor_id)
+        if sensor:
+            sensor.is_active = (health.status == 'online')
+            sensor.updated_at = datetime.utcnow()
+            
+        db.session.commit()
+        
+        return jsonify({'message': 'Sensor health updated'}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
