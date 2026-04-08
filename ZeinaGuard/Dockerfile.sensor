@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Use official Python 3.11-slim for minimal attack surface and size
 FROM python:3.11-slim
 
@@ -9,6 +10,13 @@ WORKDIR /app
 # - tcpdump: Required for raw network monitoring
 # - gcc: Required for compiling some Python C-extensions
 # - iw / net-tools: Required for network interface management
+=======
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for packet analysis
+>>>>>>> f7c9ae9ffba41872a3f3deb481c2d4978803a478
 RUN apt-get update && apt-get install -y \
     gcc \
     libpcap-dev \
@@ -17,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     net-tools \
     && rm -rf /var/lib/apt/lists/*
 
+<<<<<<< HEAD
 # Copy dependency definition first for caching efficiency
 COPY sensor/requirements.txt .
 
@@ -31,4 +40,20 @@ COPY sensor/ .
 
 # Run sensor with unbuffered output for logging
 # (Root privileges are provided by 'privileged: true' in docker-compose.yml)
+=======
+# Copy requirements
+COPY sensor/requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy sensor code
+COPY sensor/ .
+
+# Since we need root for scapy, we'll run as root
+# (Default for Docker unless specified otherwise)
+
+# Run sensor
+# Use python -u for unbuffered output to see logs in docker compose
+>>>>>>> f7c9ae9ffba41872a3f3deb481c2d4978803a478
 CMD ["python", "-u", "main.py"]
