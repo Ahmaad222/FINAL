@@ -4,31 +4,19 @@ FROM python:3.11-slim
 # Set working directory for app logic
 WORKDIR /app
 
-# Install critical system dependencies:
-# - libpcap-dev: Required for Scapy packet processing
-# - tcpdump: Required for raw network monitoring
-# - gcc: Required for compiling some Python C-extensions
-# - iw / net-tools: Required for network interface management
-RUN apt-get update && apt-get install -y \
-    gcc \
-    libpcap-dev \
-    tcpdump \
-    iw \
-    net-tools \
-    && rm -rf /var/lib/apt/lists/*
+# Install critical system dependencies with retries for robustness
+RUN apt-get update && \
+    (apt-get install -y gcc libpcap-dev tcpdump iw net-tools || (sleep 5 && apt-get install -y gcc libpcap-dev tcpdump iw net-tools)) && \
+    rm -rf /var/lib/apt/lists/*
 
 # Copy dependency definition first for caching efficiency
 COPY sensor/requirements.txt .
 
-# Install dependencies with production optimizations:
-# --no-cache-dir: Reduces image size
-# --default-timeout: Robustness on slow connections
-# --retries: Automatic recovery from transient network errors
-RUN pip install --no-cache-dir --default-timeout=100 --retries 5 -r requirements.txt
+# Install dependencies with production optimizations and high reliability
+RUN pip install --no-cache-dir --default-timeout=100 --retries 10 -r requirements.txt
 
 # Copy sensor source code
 COPY sensor/ .
 
 # Run sensor with unbuffered output for logging
-# (Root privileges are provided by 'privileged: true' in docker-compose.yml)
 CMD ["python", "-u", "main.py"]

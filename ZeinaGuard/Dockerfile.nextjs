@@ -11,23 +11,31 @@ RUN corepack enable
 # Set working directory
 WORKDIR /app
 
+# Install system dependencies with retries
+RUN apt-get update && \
+    (apt-get install -y curl || (sleep 5 && apt-get install -y curl)) && \
+    rm -rf /var/lib/apt/lists/*
+
 # Copy dependency files first for better caching
 COPY package.json pnpm-lock.yaml ./
 
 # Configure pnpm for robustness:
-# --frozen-lockfile: Ensures deterministic builds
-# --network-timeout: Prevents build failures on slow networks
+# --fetch-retries: Retries on connection errors
+# --fetch-retry-maxtimeout: Increases timeout for retries
 # --prefer-offline: Uses cache whenever possible
-RUN pnpm install --frozen-lockfile --network-timeout 100000 --prefer-offline
+# --frozen-lockfile: Ensures deterministic builds
+RUN pnpm config set fetch-retries 10 && \
+    pnpm config set fetch-retry-maxtimeout 100000 && \
+    pnpm install --frozen-lockfile --prefer-offline
 
 # Copy application code
 COPY . .
 
-# Build Next.js application (optimizes for production)
+# Build Next.js application
 RUN pnpm run build
 
-# Expose Next.js default port (matches package.json start script)
+# Expose Next.js port (Next.js listens on 5000 from package.json)
 EXPOSE 5000
 
-# Run in production mode
+# Start production build
 CMD ["pnpm", "start"]
