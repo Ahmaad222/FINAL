@@ -16,17 +16,16 @@ RUN apt-get update && \
     (apt-get install -y curl || (sleep 5 && apt-get install -y curl)) && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy dependency files first for better caching
-COPY package.json pnpm-lock.yaml ./
+# Copy ONLY package.json first to generate a fresh lockfile
+COPY package.json ./
 
 # Configure pnpm for robustness:
 # --fetch-retries: Retries on connection errors
 # --fetch-retry-maxtimeout: Increases timeout for retries
 # --prefer-offline: Uses cache whenever possible
-# --frozen-lockfile: Ensures deterministic builds
 RUN pnpm config set fetch-retries 10 && \
     pnpm config set fetch-retry-maxtimeout 100000 && \
-    pnpm install --frozen-lockfile --prefer-offline
+    pnpm install --prefer-offline
 
 # Copy application code
 COPY . .
@@ -34,7 +33,7 @@ COPY . .
 # Build Next.js application
 RUN pnpm run build
 
-# Expose Next.js port (Next.js listens on 5000 from package.json)
+# Expose Next.js port
 EXPOSE 5000
 
 # Start production build
