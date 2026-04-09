@@ -22,16 +22,16 @@ class User(db.Model):
     __tablename__ = 'users'
     
     id = db.Column(Integer, primary_key=True)
-    username = db.Column(String(255), unique=True, nullable=False)
-    email = db.Column(String(255), unique=True, nullable=False)
-    password_hash = db.Column(String(255), nullable=False)
-    first_name = db.Column(String(255))
-    last_name = db.Column(String(255))
+    username = db.Column(Text, unique=True, nullable=False)
+    email = db.Column(Text, unique=True, nullable=False)
+    password_hash = db.Column(Text, nullable=False)
+    first_name = db.Column(Text)
+    last_name = db.Column(Text)
     is_active = db.Column(Boolean, default=True)
     is_admin = db.Column(Boolean, default=False)
-    last_login = db.Column(DateTime)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
-    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login = db.Column(DateTime(timezone=True))
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = db.Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     roles = relationship('Role', secondary='user_roles', backref='users')
@@ -47,9 +47,9 @@ class Role(db.Model):
     __tablename__ = 'roles'
     
     id = db.Column(Integer, primary_key=True)
-    name = db.Column(String(100), unique=True, nullable=False)
+    name = db.Column(Text, unique=True, nullable=False)
     description = db.Column(Text)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     # Relationships
     permissions = relationship('Permission', secondary='role_permissions', backref='roles')
@@ -62,9 +62,9 @@ class Permission(db.Model):
     __tablename__ = 'permissions'
     
     id = db.Column(Integer, primary_key=True)
-    name = db.Column(String(100), unique=True, nullable=False)
+    name = db.Column(Text, unique=True, nullable=False)
     description = db.Column(Text)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     def __repr__(self):
         return f'<Permission {self.name}>'
@@ -88,15 +88,15 @@ class Sensor(db.Model):
     __tablename__ = 'sensors'
     
     id = db.Column(Integer, primary_key=True)
-    name = db.Column(String(255), nullable=False)
-    hostname = db.Column(String(255), unique=True)
-    ip_address = db.Column(String(45))  # IPv4 or IPv6
+    name = db.Column(Text, nullable=False)
+    hostname = db.Column(Text, unique=True)
+    ip_address = db.Column(String(45))  # IPv4 or IPv6 (using String for compatibility)
     mac_address = db.Column(String(17))
-    location = db.Column(String(255))
+    location = db.Column(Text)
     is_active = db.Column(Boolean, default=True)
-    firmware_version = db.Column(String(50))
-    created_at = db.Column(DateTime, default=datetime.utcnow)
-    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    firmware_version = db.Column(Text)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = db.Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     health_records = relationship('SensorHealth', backref='sensor', cascade='all, delete-orphan')
@@ -110,15 +110,15 @@ class Sensor(db.Model):
 class SensorHealth(db.Model):
     __tablename__ = 'sensor_health'
     
-    id = db.Column(Integer, primary_key=True)
+    id = db.Column(Integer, primary_key=True, autoincrement=True)
     sensor_id = db.Column(Integer, ForeignKey('sensors.id', ondelete='CASCADE'), nullable=False)
-    status = db.Column(String(50), default='online')  # online, offline, degraded
+    status = db.Column(Text, default='online')  # online, offline, degraded
     signal_strength = db.Column(Integer)  # 0-100
     cpu_usage = db.Column(Float)
     memory_usage = db.Column(Float)
     uptime = db.Column(Integer)  # in seconds
-    last_heartbeat = db.Column(DateTime)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    last_heartbeat = db.Column(DateTime(timezone=True))
+    created_at = db.Column(DateTime(timezone=True), primary_key=True, default=datetime.utcnow)
     
     # Index for time-series queries
     __table_args__ = (
@@ -135,17 +135,17 @@ class Threat(db.Model):
     __tablename__ = 'threats'
     
     id = db.Column(Integer, primary_key=True)
-    threat_type = db.Column(String(100), nullable=False)  # rogue_ap, evil_twin, etc.
-    severity = db.Column(String(50), nullable=False)  # critical, high, medium, low, info
+    threat_type = db.Column(Text, nullable=False)  # rogue_ap, evil_twin, etc.
+    severity = db.Column(Text, nullable=False)  # critical, high, medium, low, info
     source_mac = db.Column(String(17))
     target_mac = db.Column(String(17))
-    ssid = db.Column(String(255))
+    ssid = db.Column(Text)
     detected_by = db.Column(Integer, ForeignKey('sensors.id'))
     created_by = db.Column(Integer, ForeignKey('users.id'))
     description = db.Column(Text)
     is_resolved = db.Column(Boolean, default=False)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
-    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = db.Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     events = relationship('ThreatEvent', backref='threat', cascade='all, delete-orphan')
@@ -165,14 +165,13 @@ class Threat(db.Model):
 class ThreatEvent(db.Model):
     __tablename__ = 'threat_events'
     
-    id = db.Column(Integer, primary_key=True)
-    threat_id = db.Column(Integer, ForeignKey('threats.id', ondelete='CASCADE'), nullable=False)
+    time = db.Column(DateTime(timezone=True), primary_key=True, default=datetime.utcnow, nullable=False)
+    threat_id = db.Column(Integer, ForeignKey('threats.id', ondelete='CASCADE'), primary_key=True, nullable=False)
     sensor_id = db.Column(Integer, ForeignKey('sensors.id'))
-    time = db.Column(DateTime, default=datetime.utcnow, nullable=False)
     event_data = db.Column(JSON)  # Additional metadata
     packet_count = db.Column(Integer)
     signal_strength = db.Column(Integer)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     # Indexes for time-series queries
     __table_args__ = (
@@ -190,15 +189,15 @@ class AlertRule(db.Model):
     __tablename__ = 'alert_rules'
     
     id = db.Column(Integer, primary_key=True)
-    name = db.Column(String(255), nullable=False)
+    name = db.Column(Text, nullable=False)
     description = db.Column(Text)
-    threat_type = db.Column(String(100))
-    severity = db.Column(String(50))
+    threat_type = db.Column(Text)
+    severity = db.Column(Text)
     is_enabled = db.Column(Boolean, default=True)
-    action_type = db.Column(String(50))  # block, alert, log
+    action_type = db.Column(Text)  # block, alert, log
     created_by = db.Column(Integer, ForeignKey('users.id'))
-    created_at = db.Column(DateTime, default=datetime.utcnow)
-    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = db.Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
     alerts = relationship('Alert', backref='rule')
@@ -222,8 +221,8 @@ class Alert(db.Model):
     is_read = db.Column(Boolean, default=False)
     is_acknowledged = db.Column(Boolean, default=False)
     acknowledged_by = db.Column(Integer, ForeignKey('users.id'))
-    acknowledged_at = db.Column(DateTime)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    acknowledged_at = db.Column(DateTime(timezone=True))
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     def __repr__(self):
         return f'<Alert {self.id}>'
@@ -235,16 +234,16 @@ class Incident(db.Model):
     __tablename__ = 'incidents'
     
     id = db.Column(Integer, primary_key=True)
-    title = db.Column(String(255), nullable=False)
+    title = db.Column(Text, nullable=False)
     description = db.Column(Text)
-    severity = db.Column(String(50))
-    status = db.Column(String(50), default='open')  # open, investigating, resolved, closed
+    severity = db.Column(Text)
+    status = db.Column(Text, default='open')  # open, investigating, resolved, closed
     threat_ids = db.Column(JSON)  # Array of related threat IDs
     assigned_to = db.Column(Integer, ForeignKey('users.id'))
     created_by = db.Column(Integer, ForeignKey('users.id'))
-    created_at = db.Column(DateTime, default=datetime.utcnow)
-    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    resolved_at = db.Column(DateTime)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = db.Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
+    resolved_at = db.Column(DateTime(timezone=True))
     
     # Relationships
     events = relationship('IncidentEvent', backref='incident', cascade='all, delete-orphan')
@@ -263,10 +262,10 @@ class IncidentEvent(db.Model):
     
     id = db.Column(Integer, primary_key=True)
     incident_id = db.Column(Integer, ForeignKey('incidents.id', ondelete='CASCADE'), nullable=False)
-    event_type = db.Column(String(100))  # status_change, comment, action_taken
+    event_type = db.Column(Text)  # status_change, comment, action_taken
     event_data = db.Column(JSON)
     created_by = db.Column(Integer, ForeignKey('users.id'))
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     def __repr__(self):
         return f'<IncidentEvent {self.event_type}>'
@@ -278,15 +277,15 @@ class Report(db.Model):
     __tablename__ = 'reports'
     
     id = db.Column(Integer, primary_key=True)
-    title = db.Column(String(255), nullable=False)
-    report_type = db.Column(String(100))  # daily, weekly, monthly, custom
+    title = db.Column(Text, nullable=False)
+    report_type = db.Column(Text)  # daily, weekly, monthly, custom
     generated_by = db.Column(Integer, ForeignKey('users.id'))
     start_date = db.Column(String(10))
     end_date = db.Column(String(10))
     threat_summary = db.Column(JSON)
     sensor_summary = db.Column(JSON)
-    file_path = db.Column(String(500))
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    file_path = db.Column(Text)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     def __repr__(self):
         return f'<Report {self.title}>'
@@ -297,12 +296,12 @@ class AuditLog(db.Model):
     
     id = db.Column(Integer, primary_key=True)
     user_id = db.Column(Integer, ForeignKey('users.id'))
-    action = db.Column(String(255), nullable=False)
-    entity_type = db.Column(String(100))
+    action = db.Column(Text, nullable=False)
+    entity_type = db.Column(Text)
     entity_id = db.Column(Integer)
     changes = db.Column(JSON)
     ip_address = db.Column(String(45))
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     # Indexes
     __table_args__ = (
@@ -323,8 +322,8 @@ class NetworkTopology(db.Model):
     sensor_id = db.Column(Integer, ForeignKey('sensors.id'))
     discovered_networks = db.Column(JSON)  # Array of SSIDs
     discovered_devices = db.Column(JSON)  # Array of device info
-    created_at = db.Column(DateTime, default=datetime.utcnow)
-    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
+    updated_at = db.Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow)
     
     def __repr__(self):
         return f'<NetworkTopology sensor={self.sensor_id}>'
@@ -335,12 +334,12 @@ class BlockedDevice(db.Model):
     
     id = db.Column(Integer, primary_key=True)
     mac_address = db.Column(String(17), unique=True, nullable=False)
-    device_name = db.Column(String(255))
+    device_name = db.Column(Text)
     reason = db.Column(Text)
     is_active = db.Column(Boolean, default=True)
     blocked_by = db.Column(Integer, ForeignKey('users.id'))
-    created_at = db.Column(DateTime, default=datetime.utcnow)
-    expires_at = db.Column(DateTime)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
+    expires_at = db.Column(DateTime(timezone=True))
     
     def __repr__(self):
         return f'<BlockedDevice {self.mac_address}>'

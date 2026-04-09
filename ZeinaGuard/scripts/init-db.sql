@@ -4,31 +4,31 @@
 -- Users and Authentication
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
-    username VARCHAR(255) UNIQUE NOT NULL,
-    email VARCHAR(255) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    first_name VARCHAR(255),
-    last_name VARCHAR(255),
+    username TEXT UNIQUE NOT NULL,
+    email TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    first_name TEXT,
+    last_name TEXT,
     is_active BOOLEAN DEFAULT true,
     is_admin BOOLEAN DEFAULT false,
-    last_login TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_login TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- User Roles and Permissions
 CREATE TABLE IF NOT EXISTS roles (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(100) UNIQUE NOT NULL,
+    name TEXT UNIQUE NOT NULL,
     description TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS permissions (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(100) UNIQUE NOT NULL,
+    name TEXT UNIQUE NOT NULL,
     description TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS user_roles (
@@ -46,29 +46,32 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 -- Sensors
 CREATE TABLE IF NOT EXISTS sensors (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    hostname VARCHAR(255) UNIQUE,
+    name TEXT NOT NULL,
+    hostname TEXT UNIQUE,
     ip_address INET,
     mac_address MACADDR,
-    location VARCHAR(255),
+    location TEXT,
     is_active BOOLEAN DEFAULT true,
-    firmware_version VARCHAR(50),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    firmware_version TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Sensor Health (Time-Series Data)
+-- PRIMARY KEY must include partitioning column 'created_at' for hypertable
 CREATE TABLE IF NOT EXISTS sensor_health (
-    id SERIAL PRIMARY KEY,
+    id SERIAL,
     sensor_id INTEGER REFERENCES sensors(id) ON DELETE CASCADE,
-    status VARCHAR(50), -- online, offline, degraded
+    status TEXT, -- online, offline, degraded
     signal_strength INTEGER, -- 0-100
     cpu_usage FLOAT,
     memory_usage FLOAT,
     uptime INTEGER, -- in seconds
-    last_heartbeat TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+    last_heartbeat TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, created_at)
+    );
+
 
 -- Network Topology
 CREATE TABLE IF NOT EXISTS network_topology (
@@ -76,48 +79,50 @@ CREATE TABLE IF NOT EXISTS network_topology (
     sensor_id INTEGER REFERENCES sensors(id),
     discovered_networks TEXT, -- JSON array of SSIDs
     discovered_devices TEXT, -- JSON array of devices
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Threats (Time-Series Data)
 CREATE TABLE IF NOT EXISTS threats (
     id SERIAL PRIMARY KEY,
-    threat_type VARCHAR(100) NOT NULL, -- rogue_ap, evil_twin, deauth_attack, etc.
-    severity VARCHAR(50) NOT NULL, -- critical, high, medium, low, info
+    threat_type TEXT NOT NULL, -- rogue_ap, evil_twin, deauth_attack, etc.
+    severity TEXT NOT NULL, -- critical, high, medium, low, info
     source_mac MACADDR,
     target_mac MACADDR,
-    ssid VARCHAR(255),
+    ssid TEXT,
     detected_by INTEGER REFERENCES sensors(id),
     description TEXT,
     is_resolved BOOLEAN DEFAULT false,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Threat Events (Time-Series - Hypertable)
+-- Partitioned on 'time'
 CREATE TABLE IF NOT EXISTS threat_events (
-    time TIMESTAMP NOT NULL,
+    time TIMESTAMPTZ NOT NULL,
     threat_id INTEGER REFERENCES threats(id) ON DELETE CASCADE,
     sensor_id INTEGER REFERENCES sensors(id),
     event_data JSONB, -- Additional event metadata
     packet_count INTEGER,
     signal_strength INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (threat_id, time)
 );
 
 -- Alerts and Rules
 CREATE TABLE IF NOT EXISTS alert_rules (
     id SERIAL PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
+    name TEXT NOT NULL,
     description TEXT,
-    threat_type VARCHAR(100),
-    severity VARCHAR(50),
+    threat_type TEXT,
+    severity TEXT,
     is_enabled BOOLEAN DEFAULT true,
-    action_type VARCHAR(50), -- block, alert, log
+    action_type TEXT, -- block, alert, log
     created_by INTEGER REFERENCES users(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -128,70 +133,70 @@ CREATE TABLE IF NOT EXISTS alerts (
     is_read BOOLEAN DEFAULT false,
     is_acknowledged BOOLEAN DEFAULT false,
     acknowledged_by INTEGER REFERENCES users(id),
-    acknowledged_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    acknowledged_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Incidents
 CREATE TABLE IF NOT EXISTS incidents (
     id SERIAL PRIMARY KEY,
-    title VARCHAR(255) NOT NULL,
+    title TEXT NOT NULL,
     description TEXT,
-    severity VARCHAR(50),
-    status VARCHAR(50) DEFAULT 'open', -- open, investigating, resolved, closed
+    severity TEXT,
+    status TEXT DEFAULT 'open', -- open, investigating, resolved, closed
     threat_ids TEXT, -- JSON array of related threat IDs
     assigned_to INTEGER REFERENCES users(id),
     created_by INTEGER REFERENCES users(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    resolved_at TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    resolved_at TIMESTAMPTZ
 );
 
 CREATE TABLE IF NOT EXISTS incident_events (
     id SERIAL PRIMARY KEY,
     incident_id INTEGER REFERENCES incidents(id) ON DELETE CASCADE,
-    event_type VARCHAR(100), -- status_change, comment, action_taken
+    event_type TEXT, -- status_change, comment, action_taken
     event_data JSONB,
     created_by INTEGER REFERENCES users(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Reports
 CREATE TABLE IF NOT EXISTS reports (
     id SERIAL PRIMARY KEY,
-    title VARCHAR(255) NOT NULL,
-    report_type VARCHAR(100), -- daily, weekly, monthly, custom
+    title TEXT NOT NULL,
+    report_type TEXT, -- daily, weekly, monthly, custom
     generated_by INTEGER REFERENCES users(id),
     start_date DATE,
     end_date DATE,
     threat_summary JSONB,
     sensor_summary JSONB,
-    file_path VARCHAR(500),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    file_path TEXT,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Audit Logs
 CREATE TABLE IF NOT EXISTS audit_logs (
     id SERIAL PRIMARY KEY,
     user_id INTEGER REFERENCES users(id),
-    action VARCHAR(255) NOT NULL,
-    entity_type VARCHAR(100),
+    action TEXT NOT NULL,
+    entity_type TEXT,
     entity_id INTEGER,
     changes JSONB,
     ip_address INET,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Blocked MAC Addresses and Devices
 CREATE TABLE IF NOT EXISTS blocked_devices (
     id SERIAL PRIMARY KEY,
     mac_address MACADDR UNIQUE NOT NULL,
-    device_name VARCHAR(255),
+    device_name TEXT,
     reason TEXT,
     is_active BOOLEAN DEFAULT true,
     blocked_by INTEGER REFERENCES users(id),
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at TIMESTAMP
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ
 );
 
 -- Create indexes for performance
@@ -231,56 +236,56 @@ ON CONFLICT (name) DO NOTHING;
 -- Network Topology Tables (added for topology visualization feature)
 CREATE TABLE IF NOT EXISTS topology_sensors (
     id SERIAL PRIMARY KEY,
-    sensor_id VARCHAR(100) UNIQUE NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    location VARCHAR(255),
-    mac_address VARCHAR(17),
+    sensor_id TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    location TEXT,
+    mac_address TEXT,
     is_active BOOLEAN DEFAULT true,
-    last_seen TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_seen TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS topology_access_points (
     id SERIAL PRIMARY KEY,
-    ap_id VARCHAR(100) UNIQUE NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    ssid VARCHAR(255),
-    mac_address VARCHAR(17),
-    security VARCHAR(50),
+    ap_id TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    ssid TEXT,
+    mac_address TEXT,
+    security TEXT,
     signal_strength INTEGER,
     is_shared BOOLEAN DEFAULT false,
-    last_seen TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_seen TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS topology_stations (
     id SERIAL PRIMARY KEY,
-    station_id VARCHAR(100) UNIQUE NOT NULL,
-    name VARCHAR(255) NOT NULL,
-    device_type VARCHAR(100),
-    mac_address VARCHAR(17),
-    vendor_info VARCHAR(255),
-    status VARCHAR(50) DEFAULT 'offline',
+    station_id TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
+    device_type TEXT,
+    mac_address TEXT,
+    vendor_info TEXT,
+    status TEXT DEFAULT 'offline',
     signal_strength INTEGER,
     is_shared BOOLEAN DEFAULT false,
-    last_seen TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    last_seen TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS topology_connections (
     id SERIAL PRIMARY KEY,
-    source_type VARCHAR(50) NOT NULL,
-    source_id VARCHAR(100) NOT NULL,
-    target_type VARCHAR(50) NOT NULL,
-    target_id VARCHAR(100) NOT NULL,
-    connection_type VARCHAR(50) DEFAULT 'association',
+    source_type TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    target_type TEXT NOT NULL,
+    target_id TEXT NOT NULL,
+    connection_type TEXT DEFAULT 'association',
     signal_strength INTEGER,
     is_active BOOLEAN DEFAULT true,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(source_id, target_id)
 );
 
@@ -288,4 +293,3 @@ CREATE INDEX IF NOT EXISTS idx_topology_sensors_active ON topology_sensors(is_ac
 CREATE INDEX IF NOT EXISTS idx_topology_aps_shared ON topology_access_points(is_shared);
 CREATE INDEX IF NOT EXISTS idx_topology_stations_shared ON topology_stations(is_shared);
 CREATE INDEX IF NOT EXISTS idx_topology_connections_active ON topology_connections(is_active);
-

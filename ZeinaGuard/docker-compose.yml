@@ -84,15 +84,10 @@ services:
       NEXT_PUBLIC_API_URL: /backend-api
       NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
       BACKEND_URL: http://flask-backend:5000
-      # Extra build robustness environment variables
       PNPM_CONFIG_FETCH_RETRIES: 10
       PNPM_CONFIG_FETCH_RETRY_MAXTIMEOUT: 100000
     ports:
       - "3000:5000"
-    volumes:
-      - .:/app:ro
-      - /app/node_modules
-      - /app/.next
     networks:
       - zeinaguard_network
     depends_on:
@@ -123,8 +118,9 @@ services:
     image: dpage/pgadmin4:latest
     container_name: zeinaguard_pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.local
+      PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.com
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password_change_me}
+      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "*"
     ports:
       - "5050:80"
     volumes:
