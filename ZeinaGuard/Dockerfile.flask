@@ -13,7 +13,8 @@ RUN apt-get update && \
 COPY backend/requirements.txt .
 
 # Install dependencies with production optimizations and high reliability
-# Use --default-timeout and --retries for slow connections
+# --default-timeout: Robustness on slow connections
+# --retries: Automatic recovery from transient network errors
 RUN pip install --no-cache-dir --default-timeout=100 --retries 10 -r requirements.txt
 
 # Copy backend source code
@@ -22,5 +23,5 @@ COPY backend/ .
 # Expose backend port
 EXPOSE 5000
 
-# Start Flask with Gunicorn
+# Start Flask with Gunicorn for production-grade concurrency
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--worker-class", "eventlet", "--workers", "1", "app:app"]

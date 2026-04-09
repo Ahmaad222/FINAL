@@ -16,16 +16,17 @@ RUN apt-get update && \
     (apt-get install -y curl || (sleep 5 && apt-get install -y curl)) && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy ONLY package.json first to generate a fresh lockfile
-COPY package.json ./
+# Copy dependency files first for better caching
+COPY package.json pnpm-lock.yaml ./
 
 # Configure pnpm for robustness:
 # --fetch-retries: Retries on connection errors
 # --fetch-retry-maxtimeout: Increases timeout for retries
 # --prefer-offline: Uses cache whenever possible
+# --frozen-lockfile: Ensures deterministic builds
 RUN pnpm config set fetch-retries 10 && \
     pnpm config set fetch-retry-maxtimeout 100000 && \
-    pnpm install --prefer-offline
+    pnpm install --frozen-lockfile --prefer-offline
 
 # Copy application code
 COPY . .
