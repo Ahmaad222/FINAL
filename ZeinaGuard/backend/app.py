@@ -3,6 +3,9 @@ ZeinaGuard Pro - Wireless Intrusion Prevention System
 Flask Backend - Detection Engine and API Server
 """
 
+import eventlet
+eventlet.monkey_patch()
+
 import os
 import sys
 import subprocess
@@ -60,7 +63,7 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 # Configuration
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'change-me-in-production')
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
-app.config['JSON_SORT_KEYS'] = False
+app.json.sort_keys = False
 
 # Database Configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
