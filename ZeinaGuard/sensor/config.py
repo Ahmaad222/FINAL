@@ -2,7 +2,7 @@
 import os
 
 # Default values - can be overridden by Environment variables
-INTERFACE = os.getenv("SENSOR_INTERFACE", "wlan0")
+INTERFACE = os.getenv("SENSOR_INTERFACE", "wlx002e2dc0346b")
 BACKEND_HOST = os.getenv("ZEINAGUARD_BACKEND", "flask-backend")
 BACKEND_PORT = int(os.getenv("ZEINAGUARD_PORT", "5000"))
 
