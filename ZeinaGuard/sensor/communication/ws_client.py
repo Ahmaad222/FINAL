@@ -7,7 +7,7 @@ from core.event_bus import dashboard_queue
 
 class WSClient:
 
-    def __init__(self, backend_url="http://192.168.201.130:8000", token=None):
+    def __init__(self, backend_url="http://192.168.201.131:8000", token=None):
 
         self.backend_url = backend_url
         self.token = token
