@@ -120,7 +120,6 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.com
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password_change_me}
-      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "*"
     ports:
       - "5050:80"
     volumes:

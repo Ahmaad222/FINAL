@@ -5,7 +5,6 @@ Run this after first deployment
 """
 
 import os
-from app import app, db
 from models import (
     User, Role, Permission, Sensor, SensorHealth,
     Threat, ThreatEvent, AlertRule, Alert, Incident,
@@ -18,6 +17,7 @@ from datetime import datetime
 
 def init_database():
     """Initialize database with schema and seed data"""
+    from app import app, db
     
     with app.app_context():
         print("[DB] Creating tables...")

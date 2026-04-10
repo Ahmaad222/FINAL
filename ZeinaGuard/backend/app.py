@@ -3,9 +3,6 @@ ZeinaGuard Pro - Wireless Intrusion Prevention System
 Flask Backend - Detection Engine and API Server
 """
 
-import eventlet
-eventlet.monkey_patch()
-
 import os
 import sys
 import subprocess
@@ -15,6 +12,7 @@ import importlib.util
 # 📦 Runtime Dependency Checker
 # --------------------------------
 BACKEND_DEPENDENCIES = {
+    "eventlet": "eventlet",
     "Flask": "flask",
     "Flask-CORS": "flask_cors",
     "Flask-JWT-Extended": "flask_jwt_extended",
@@ -29,18 +27,19 @@ BACKEND_DEPENDENCIES = {
 def ensure_dependencies():
     """Checks and installs missing backend dependencies at runtime."""
     for package, module in BACKEND_DEPENDENCIES.items():
-        if importlib.util.find_spec(module) is None:
-            print(f"Missing dependency: {package} → installing...")
-            try:
+        try:
+            if importlib.util.find_spec(module) is None:
+                print(f"Missing dependency: {package} → installing...")
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package], 
                                       stdout=subprocess.DEVNULL, 
                                       stderr=subprocess.STDOUT)
-            except Exception as e:
-                print(f"❌ Failed to install {package}: {e}")
-                # We don't exit(1) here to allow the app to potentially run if the module 
-                # name mapping was slightly off but the package is actually there.
+        except Exception as e:
+            print(f"❌ Failed to install {package}: {e}")
 
 ensure_dependencies()
+
+import eventlet
+eventlet.monkey_patch()
 
 from datetime import timedelta
 from flask import Flask, jsonify
@@ -89,6 +88,9 @@ CORS(app, resources={
 # Initialize Database
 db.init_app(app)
 
+# Import init_database here to avoid circular imports if any
+from init_db import init_database
+
 # Initialize JWT
 auth_service = AuthService(app)
 
@@ -109,13 +111,14 @@ def health():
         'version': '1.0.0'
     }), 200
 
-# Create tables on startup
+# Create tables and seed data on startup
 with app.app_context():
     try:
-        db.create_all()
-        print("[DB] Database tables created/verified")
+        # Call init_database which handles both table creation and seeding
+        init_database()
+        print("[DB] Database initialized (tables + seed data)")
     except Exception as e:
-        print(f"[DB] Warning: Could not create tables: {e}")
+        print(f"[DB] Warning: Could not initialize database: {e}")
 
 # Root endpoint
 @app.route('/', methods=['GET'])
