@@ -5,7 +5,7 @@ class APIClient:
     def __init__(self):
 
         # Backend URL
-        self.backend_url = "http://192.168.201.130:8000"
+        self.backend_url = "http://192.168.201.131:8000"
 
         # Credentials
         self.username = "admin"
