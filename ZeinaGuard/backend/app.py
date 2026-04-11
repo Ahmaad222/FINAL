@@ -96,19 +96,43 @@ app.socketio = socketio  # Store reference for broadcasting
 # Register API blueprints
 register_blueprints(app)
 
-# Create tables on startup
+# Create tables and fix schema on startup
 with app.app_context():
     try:
+        from models import db
         db.create_all()
-        print("[DB] Database tables created/verified")
+        print("[DB] Initial tables verified")
+        
+        # Apply schema fixes
+        try:
+            from fix_db_schema import fix_schema
+            fix_schema()
+            print("[DB] Schema migrations applied successfully")
+        except ImportError:
+            print("[DB] Warning: fix_db_schema.py not found, skipping migration")
+        except Exception as migration_error:
+            print(f"[DB] Error during schema migration: {migration_error}")
+            
     except Exception as e:
-        print(f"[DB] Warning: Could not create tables: {e}")
+        print(f"[DB] Critical: Could not initialize database: {e}")
 
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint for Docker healthcheck"""
-    return jsonify({'status': 'healthy', 'service': 'zeinaguard-backend'}), 200
+    db_status = 'ok'
+    try:
+        from sqlalchemy import text
+        db.session.execute(text("SELECT 1"))
+    except Exception:
+        db_status = 'error'
+        
+    return jsonify({
+        'status': 'healthy' if db_status == 'ok' else 'degraded',
+        'service': 'zeinaguard-backend',
+        'database': db_status,
+        'timestamp': datetime.utcnow().isoformat()
+    }), 200 if db_status == 'ok' else 500
 
 # Root endpoint
 @app.route('/', methods=['GET'])

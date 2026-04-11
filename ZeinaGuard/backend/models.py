@@ -11,6 +11,7 @@ from sqlalchemy import (
     Index
 )
 from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import JSONB
 
 # Initialize SQLAlchemy
 db = SQLAlchemy()
@@ -169,7 +170,7 @@ class ThreatEvent(db.Model):
     threat_id = db.Column(Integer, ForeignKey('threats.id', ondelete='CASCADE'), nullable=False)
     sensor_id = db.Column(Integer, ForeignKey('sensors.id'))
     time = db.Column(DateTime, default=datetime.utcnow, nullable=False)
-    event_data = db.Column(JSON)  # Additional metadata
+    event_data = db.Column(JSONB)  # Additional metadata
     packet_count = db.Column(Integer)
     signal_strength = db.Column(Integer)
     created_at = db.Column(DateTime, default=datetime.utcnow)
@@ -239,7 +240,7 @@ class Incident(db.Model):
     description = db.Column(Text)
     severity = db.Column(String(50))
     status = db.Column(String(50), default='open')  # open, investigating, resolved, closed
-    threat_ids = db.Column(JSON)  # Array of related threat IDs
+    threat_ids = db.Column(JSONB)  # Array of related threat IDs
     assigned_to = db.Column(Integer, ForeignKey('users.id'))
     created_by = db.Column(Integer, ForeignKey('users.id'))
     created_at = db.Column(DateTime, default=datetime.utcnow)
@@ -264,7 +265,7 @@ class IncidentEvent(db.Model):
     id = db.Column(Integer, primary_key=True)
     incident_id = db.Column(Integer, ForeignKey('incidents.id', ondelete='CASCADE'), nullable=False)
     event_type = db.Column(String(100))  # status_change, comment, action_taken
-    event_data = db.Column(JSON)
+    event_data = db.Column(JSONB)
     created_by = db.Column(Integer, ForeignKey('users.id'))
     created_at = db.Column(DateTime, default=datetime.utcnow)
     
@@ -283,8 +284,8 @@ class Report(db.Model):
     generated_by = db.Column(Integer, ForeignKey('users.id'))
     start_date = db.Column(String(10))
     end_date = db.Column(String(10))
-    threat_summary = db.Column(JSON)
-    sensor_summary = db.Column(JSON)
+    threat_summary = db.Column(JSONB)
+    sensor_summary = db.Column(JSONB)
     file_path = db.Column(String(500))
     created_at = db.Column(DateTime, default=datetime.utcnow)
     
@@ -300,7 +301,7 @@ class AuditLog(db.Model):
     action = db.Column(String(255), nullable=False)
     entity_type = db.Column(String(100))
     entity_id = db.Column(Integer)
-    changes = db.Column(JSON)
+    changes = db.Column(JSONB)
     ip_address = db.Column(String(45))
     created_at = db.Column(DateTime, default=datetime.utcnow)
     
@@ -321,13 +322,14 @@ class NetworkTopology(db.Model):
     
     id = db.Column(Integer, primary_key=True)
     sensor_id = db.Column(Integer, ForeignKey('sensors.id'))
-    discovered_networks = db.Column(JSON)  # Array of SSIDs
-    discovered_devices = db.Column(JSON)  # Array of device info
+    discovered_networks = db.Column(JSONB)  # Array of SSIDs
+    discovered_devices = db.Column(JSONB)  # Array of device info
     created_at = db.Column(DateTime, default=datetime.utcnow)
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     def __repr__(self):
         return f'<NetworkTopology sensor={self.sensor_id}>'
+
 
 
 class BlockedDevice(db.Model):

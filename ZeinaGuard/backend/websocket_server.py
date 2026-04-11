@@ -85,24 +85,28 @@ def init_socketio(app):
     # ----------------------------
     @socketio.on("new_threat")
     def handle_new_threat(payload):
-
-        print(f"[WebSocket] 🚨 Received Threat: {payload.get('ssid')} from Sensor")
+        import traceback
+        ssid = payload.get('ssid', 'N/A')
+        print(f"[WebSocket] 🚨 Received Threat: {ssid} from Sensor")
 
         with app.app_context():
-
             try:
-
+                # Add structured logging
+                print(f"[WebSocket] [DB-INSERT] Attempting to save threat: {payload.get('threat_type')}")
+                
                 new_threat = Threat(
                     threat_type=payload.get("threat_type", "UNKNOWN"),
                     severity=payload.get("severity", "HIGH"),
                     source_mac=payload.get("source_mac"),
                     ssid=payload.get("ssid"),
-                    description="Detected via Sensor WebSocket"
+                    description=payload.get("description", "Detected via Sensor WebSocket"),
+                    detected_by=payload.get("sensor_id"), # Link to sensor if provided
+                    created_by=None # Explicitly set to NULL as per requirements
                 )
 
                 db.session.add(new_threat)
                 db.session.commit()
-                print(f"[WebSocket] ✅ Threat '{payload.get('ssid')}' saved to PostgreSQL database (ID: {new_threat.id})")
+                print(f"[WebSocket] [DB-SUCCESS] ✅ Threat '{ssid}' saved (ID: {new_threat.id})")
 
                 broadcast_data = {
                     "id": new_threat.id,
@@ -110,16 +114,12 @@ def init_socketio(app):
                     "timestamp": datetime.now().isoformat(),
                     "data": payload
                 }
-
                 socketio.emit("threat_event", broadcast_data)
 
-                print(f"[WebSocket] 🚀 Broadcasted Threat ID: {new_threat.id}")
-
             except Exception as e:
-
                 db.session.rollback()
-
-                print(f"[WebSocket] ❌ Error saving threat: {e}")
+                print(f"[WebSocket] [DB-FAILURE] ❌ Error saving threat: {str(e)}")
+                traceback.print_exc()
 
     # ----------------------------
     # Receive Network Scan Data
@@ -127,8 +127,12 @@ def init_socketio(app):
     @socketio.on("network_scan")
     def handle_network_scan(payload):
         """Processes enriched network data from sensor."""
+        import traceback
+        import json
+        
         sensor_name = payload.get("sensor_id", "sensor1")
-        print(f"[WebSocket] 📡 Received Scan Data: {payload.get('ssid')} from {sensor_name}")
+        ssid = payload.get('ssid', 'Unknown SSID')
+        print(f"[WebSocket] 📡 Received Scan Data: {ssid} from {sensor_name}")
         
         with app.app_context():
             try:
@@ -137,19 +141,30 @@ def init_socketio(app):
                 # 🛠️ Find or Auto-Create the sensor
                 sensor = Sensor.query.filter_by(name=sensor_name).first()
                 if not sensor:
-                    print(f"[WebSocket] 🆕 Auto-registering new sensor: {sensor_name}")
+                    print(f"[WebSocket] [DB] Creating new sensor record for: {sensor_name}")
                     sensor = Sensor(name=sensor_name, hostname=sensor_name, is_active=True)
                     db.session.add(sensor)
                     db.session.commit()
                 
-                # 🛠️ Find or Create the topology record for this sensor
+                # 🛠️ Find or Create the topology record
                 topology = NetworkTopology.query.filter_by(sensor_id=sensor.id).first()
                 if not topology:
+                    print(f"[WebSocket] [DB] Initializing topology for sensor: {sensor_name}")
                     topology = NetworkTopology(sensor_id=sensor.id, discovered_networks=[], discovered_devices=[])
                     db.session.add(topology)
                 
+                # 🛠️ Fix: Ensure discovered_networks is a list (Defensive against schema mismatches)
+                current_networks = topology.discovered_networks
+                if isinstance(current_networks, str):
+                    try:
+                        current_networks = json.loads(current_networks)
+                    except:
+                        current_networks = []
+                
+                if current_networks is None:
+                    current_networks = []
+                
                 # Update topology with latest scan
-                current_networks = topology.discovered_networks or []
                 network_info = {
                     "ssid": payload.get("ssid"),
                     "bssid": payload.get("bssid"),
@@ -167,11 +182,9 @@ def init_socketio(app):
                     "last_seen": payload.get("timestamp")
                 }
 
-                
-                # Update if exists, otherwise append
                 found = False
                 for i, net in enumerate(current_networks):
-                    if net.get("bssid") == payload.get("bssid"):
+                    if isinstance(net, dict) and net.get("bssid") == payload.get("bssid"):
                         current_networks[i] = network_info
                         found = True
                         break
@@ -181,11 +194,8 @@ def init_socketio(app):
                 
                 topology.discovered_networks = current_networks
                 
-                # 🛠️ NEW: Save every individual scan event to the Threat table for history
-                # This ensures the user sees ALL data in the database
+                # 🛠️ Save individual scan event to history (Threat table)
                 severity_map = {"ROGUE": "HIGH", "SUSPICIOUS": "MEDIUM", "LEGIT": "INFO"}
-                
-                # Create a tidy, professional description string
                 manufacturer = payload.get("manufacturer", "Unknown")
                 distance = f"{payload.get('distance', 0)}m"
                 channel = payload.get("channel", "??")
@@ -199,19 +209,32 @@ def init_socketio(app):
                     source_mac=payload.get("bssid"),
                     ssid=payload.get("ssid"),
                     detected_by=sensor.id,
-                    description=tidy_description
+                    description=tidy_description,
+                    created_by=None
                 )
                 db.session.add(history_entry)
                 
-                db.session.commit()
-                print(f"[WebSocket] ✅ Full scan data for '{payload.get('ssid')}' logged to history.")
+                # Retry mechanism for commit
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        db.session.commit()
+                        print(f"[WebSocket] [DB-SUCCESS] ✅ Scan data for '{ssid}' saved")
+                        break
+                    except Exception as commit_error:
+                        db.session.rollback()
+                        if attempt == max_retries - 1:
+                            raise commit_error
+                        print(f"[WebSocket] [DB-RETRY] Retrying commit (attempt {attempt+2}/{max_retries})...")
                 
                 # Broadcast to UI
                 socketio.emit("new_scan_data", payload)
                 
             except Exception as e:
-                print(f"[WebSocket] ❌ Error processing scan data: {e}")
                 db.session.rollback()
+                print(f"[WebSocket] [DB-FAILURE] ❌ Error processing scan data: {str(e)}")
+                traceback.print_exc()
+
 
     return socketio
 
