@@ -1,15 +1,18 @@
 import requests
-
+import os
 
 class APIClient:
     def __init__(self, backend_url=None):
 
         # Backend URL - Use provided URL or fallback to internal default
-        self.backend_url = backend_url or "http://192.168.201.130:8000"
+        self.backend_url = backend_url or "http://flask-backend:5000"
 
-        # Credentials
-        self.username = "admin"
-        self.password = "admin123"
+        # Credentials from Environment Variables or Defaults
+        self.username = os.getenv("SENSOR_USERNAME", "admin")
+        self.password = os.getenv("SENSOR_PASSWORD", "admin123")
+
+        if not self.username or not self.password:
+            print("[API] ⚠️ Warning: Missing SENSOR_USERNAME or SENSOR_PASSWORD!")
 
         self.token = None
 
@@ -26,29 +29,31 @@ class APIClient:
         }
 
         try:
-            print(f"[API] Authenticating with {url} ...")
+            print(f"[API] 🔑 Attempting authentication with {url} ...")
 
             response = requests.post(url, json=payload, timeout=5)
 
-            if response.status_code != 200:
-                print(f"[API] ❌ Auth Failed: {response.status_code}")
-                print(response.text)
+            if response.status_code == 200:
+                data = response.json()
+                self.token = data.get("access_token")
+
+                if self.token:
+                    print(f"[API] ✅ Login Successful! Sensor authenticated as: {self.username}")
+                    return self.token
+                else:
+                    print("[API] ❌ Auth Failed: No access token in response.")
+                    return None
+            
+            elif response.status_code == 401:
+                print(f"[API] ❌ Login Failed: Invalid credentials for user '{self.username}'")
                 return None
-
-            data = response.json()
-
-            self.token = data.get("access_token")
-
-            if not self.token:
-                print("[API] ❌ No token received")
+            else:
+                print(f"[API] ❌ Auth Error: Received status code {response.status_code}")
+                print(f"[API] Response: {response.text}")
                 return None
-
-            print("[API] ✅ Authentication Successful!")
-
-            return self.token
 
         except requests.exceptions.RequestException as e:
-            print(f"[API] ❌ Connection Error: {e}")
+            print(f"[API] ❌ Connection Error while authenticating: {e}")
             return None
 
     def get_headers(self):

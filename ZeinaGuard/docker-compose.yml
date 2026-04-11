@@ -1,7 +1,7 @@
 version: '3.9'
 
 services:
-  # PostgreSQL with TimescaleDB extension
+  # 1. PostgreSQL with TimescaleDB extension
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: zeinaguard_postgres
@@ -20,11 +20,11 @@ services:
       - zeinaguard_network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U zeinaguard_user -d zeinaguard_db"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
 
-  # Redis for message queue and caching
+  # 2. Redis for message queue and caching
   redis:
     image: redis:7-alpine
     container_name: zeinaguard_redis
@@ -37,11 +37,11 @@ services:
       - zeinaguard_network
     healthcheck:
       test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "redis_password_change_me", "ping"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
 
-  # Flask Backend (API + Socket.IO on port 5000)
+  # 3. Flask Backend (API + Socket.IO)
   flask-backend:
     build:
       context: .
@@ -69,12 +69,36 @@ services:
     command: python app.py
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
       start_period: 15s
 
-  # Next.js Frontend (host:3000 -> container:5000, Next.js dev listens on 5000)
+  # 4. Python WIPS Sensor (Interactive)
+  sensor:
+    build:
+      context: .
+      dockerfile: Dockerfile.sensor
+    container_name: zeinaguard_sensor
+    privileged: true
+    network_mode: host
+    tty: true           # Enable interactive terminal
+    stdin_open: true    # Keep stdin open
+    environment:
+      INTERFACE: wlx002e2dc0346b
+      BACKEND_HOST: flask-backend
+      BACKEND_PORT: 5000
+      MAX_AUTH_RETRIES: 30
+      AUTH_RETRY_DELAY: 5
+      SENSOR_USERNAME: admin
+      SENSOR_PASSWORD: admin123
+    extra_hosts:
+      - "flask-backend:127.0.0.1" # Allows resolving service name in host mode
+    depends_on:
+      flask-backend:
+        condition: service_healthy
+
+  # 5. Next.js Frontend
   next-frontend:
     build:
       context: .
@@ -83,8 +107,6 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:5000
       NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
-      # For SSR (if used), we'd need an internal URL
-      # INTERNAL_API_URL: http://flask-backend:5000
     ports:
       - "3000:5000"
     volumes:
@@ -97,36 +119,13 @@ services:
       flask-backend:
         condition: service_healthy
 
-  # Python Sensor
-  sensor:
-    build:
-      context: .
-      dockerfile: Dockerfile.sensor
-    container_name: zeinaguard_sensor
-    privileged: true
-    network_mode: host # Required for real wireless sniffing if hardware allows
-    environment:
-      INTERFACE: eth0 # Change to your wireless interface for real sniffing
-      BACKEND_URL: http://localhost:5000 # Since network_mode is host, we use localhost
-      MAX_AUTH_RETRIES: 20
-      AUTH_RETRY_DELAY: 5
-    depends_on:
-      flask-backend:
-        condition: service_healthy
-    # If using bridge network instead of host:
-    # networks:
-    #   - zeinaguard_network
-    # environment:
-    #   BACKEND_URL: http://flask-backend:5000
-
-  # PgAdmin for database management
+  # 6. PgAdmin
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: zeinaguard_pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.local
       PGADMIN_DEFAULT_PASSWORD: admin_password_change_me
-      # Fixed config issues
       PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "*"
     ports:
       - "5050:80"

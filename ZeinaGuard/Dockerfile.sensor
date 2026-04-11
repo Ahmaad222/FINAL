@@ -19,8 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY sensor/ .
 
 # Add a default interface environment variable
-ENV INTERFACE=eth0
+ENV INTERFACE=wlx002e2dc0346b
 ENV BACKEND_URL=http://flask-backend:5000
+ENV PYTHONUNBUFFERED=1
 
 # Run sensor
 CMD ["python", "main.py"]
