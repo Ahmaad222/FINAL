@@ -1,0 +1,26 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies for packet analysis
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpcap-dev \
+    tcpdump \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY sensor/requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy sensor code
+COPY sensor/ .
+
+# Add a default interface environment variable
+ENV INTERFACE=eth0
+ENV BACKEND_URL=http://flask-backend:5000
+
+# Run sensor
+CMD ["python", "main.py"]

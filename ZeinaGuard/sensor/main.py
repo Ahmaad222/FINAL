@@ -40,6 +40,7 @@ if os.name != 'nt' and os.geteuid() != 0:
     print("👉 Run with: sudo python3 main.py\n")
 
 import threading
+import time
 from monitoring.sniffer import start_monitoring
 from detection.threat_manager import ThreatManager
 from prevention.response_engine import ResponseEngine
@@ -73,19 +74,20 @@ def main():
     # --------------------------------
     # 🌐 Dynamic Backend Resolution
     # --------------------------------
-    backend_host = os.getenv("ZEINAGUARD_BACKEND", config.BACKEND_HOST)
-    backend_port = config.BACKEND_PORT
-    backend_url = f"http://{backend_host}:{backend_port}"
+    backend_url = config.BACKEND_URL
+    print(f"🔗 Target Backend: {backend_url}")
 
     # --------------------------------
-    # Try Backend Authentication
+    # Try Backend Authentication (with Retries)
     # --------------------------------
 
     token = None
     ws = None
     
-    max_auth_retries = 2
-    for attempt in range(max_auth_retries + 1):
+    max_auth_retries = int(os.getenv("MAX_AUTH_RETRIES", "10"))
+    retry_delay = int(os.getenv("AUTH_RETRY_DELAY", "5"))
+
+    for attempt in range(1, max_auth_retries + 1):
         try:
             api = APIClient(backend_url=backend_url)
             token = api.authenticate_sensor()
@@ -100,24 +102,16 @@ def main():
                 )
                 ws_thread.start()
                 break # Success!
-
-            else:
-                if attempt < max_auth_retries:
-                    print(f"⚠️ Connection to {backend_url} failed.")
-                    new_ip = input("👉 Enter Backend Server IP (or press Enter to retry): ").strip()
-                    if new_ip:
-                        backend_url = f"http://{new_ip}:{backend_port}"
-                else:
-                    print("⚠️ Running in OFFLINE MODE after multiple failed attempts.")
+            
+            print(f"⚠️ Auth attempt {attempt}/{max_auth_retries} failed. Retrying in {retry_delay}s...")
+            time.sleep(retry_delay)
 
         except Exception as e:
-            print(f"⚠️ Connection failed: {e}")
-            if attempt < max_auth_retries:
-                new_ip = input("👉 Enter Backend Server IP: ").strip()
-                if new_ip:
-                    backend_url = f"http://{new_ip}:{backend_port}"
-            else:
-                print("⚠️ Running in OFFLINE MODE")
+            print(f"⚠️ Connection failed on attempt {attempt}: {e}")
+            time.sleep(retry_delay)
+    
+    if not token:
+        print("❌ Failed to authenticate after multiple attempts. Running in OFFLINE MODE.")
 
     # --------------------------------
     # 🔥 Terminal UI Thread

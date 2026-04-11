@@ -547,9 +547,9 @@ print_summary() {
     echo -e "  ${DIM}────────────────────────────────────────────────────────────${RESET}"
     
     # Service names from docker-compose.yml (exact match!)
-    local services=("postgres" "redis" "flask-backend" "next-frontend" "pgadmin")
-    local ports=("5432" "6379" "5000" "3000" "5050")
-    local names=("PostgreSQL" "Redis" "Flask API" "Next.js UI" "PgAdmin")
+    local services=("postgres" "redis" "flask-backend" "next-frontend" "pgadmin" "sensor")
+    local ports=("5432" "6379" "5000" "3000" "5050" "N/A")
+    local names=("PostgreSQL" "Redis" "Flask API" "Next.js UI" "PgAdmin" "WIPS Sensor")
     
     for i in "${!services[@]}"; do
         local service="${services[$i]}"

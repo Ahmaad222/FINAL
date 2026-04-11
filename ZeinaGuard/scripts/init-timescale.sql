@@ -10,22 +10,29 @@ SELECT create_hypertable('threat_events', 'time', if_not_exists => TRUE);
 -- Convert sensor_health to hypertable (time-series optimized for sensor monitoring)
 SELECT create_hypertable('sensor_health', 'created_at', if_not_exists => TRUE);
 
+-- Set up compression if not already enabled
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM timescaledb_information.compression_settings WHERE hypertable_name = 'threat_events') THEN
+        ALTER TABLE threat_events SET (
+            timescaledb.compress,
+            timescaledb.compress_orderby = 'threat_id, time DESC',
+            timescaledb.compress_segmentby = 'threat_id'
+        );
+    END IF;
+    
+    IF NOT EXISTS (SELECT 1 FROM timescaledb_information.compression_settings WHERE hypertable_name = 'sensor_health') THEN
+        ALTER TABLE sensor_health SET (
+            timescaledb.compress,
+            timescaledb.compress_orderby = 'sensor_id, created_at DESC',
+            timescaledb.compress_segmentby = 'sensor_id'
+        );
+    END IF;
+END $$;
+
 -- Set up automatic data compression for old data (> 7 days)
 SELECT add_compression_policy('threat_events', INTERVAL '7 days', if_not_exists => TRUE);
 SELECT add_compression_policy('sensor_health', INTERVAL '7 days', if_not_exists => TRUE);
-
--- Set up automatic chunk interval (1 day for threat data)
-ALTER TABLE threat_events SET (
-    timescaledb.compress,
-    timescaledb.compress_orderby = 'threat_id, sensor_id',
-    timescaledb.compress_segmentby = 'threat_id'
-);
-
-ALTER TABLE sensor_health SET (
-    timescaledb.compress,
-    timescaledb.compress_orderby = 'sensor_id',
-    timescaledb.compress_segmentby = 'sensor_id'
-);
 
 -- Create continuous aggregates for fast analytics queries
 -- Daily threat summary (updates automatically)

@@ -72,7 +72,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 15s
 
   # Next.js Frontend (host:3000 -> container:5000, Next.js dev listens on 5000)
   next-frontend:
@@ -83,6 +83,8 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:5000
       NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
+      # For SSR (if used), we'd need an internal URL
+      # INTERNAL_API_URL: http://flask-backend:5000
     ports:
       - "3000:5000"
     volumes:
@@ -95,6 +97,28 @@ services:
       flask-backend:
         condition: service_healthy
 
+  # Python Sensor
+  sensor:
+    build:
+      context: .
+      dockerfile: Dockerfile.sensor
+    container_name: zeinaguard_sensor
+    privileged: true
+    network_mode: host # Required for real wireless sniffing if hardware allows
+    environment:
+      INTERFACE: eth0 # Change to your wireless interface for real sniffing
+      BACKEND_URL: http://localhost:5000 # Since network_mode is host, we use localhost
+      MAX_AUTH_RETRIES: 20
+      AUTH_RETRY_DELAY: 5
+    depends_on:
+      flask-backend:
+        condition: service_healthy
+    # If using bridge network instead of host:
+    # networks:
+    #   - zeinaguard_network
+    # environment:
+    #   BACKEND_URL: http://flask-backend:5000
+
   # PgAdmin for database management
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -102,6 +126,8 @@ services:
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.local
       PGADMIN_DEFAULT_PASSWORD: admin_password_change_me
+      # Fixed config issues
+      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "*"
     ports:
       - "5050:80"
     volumes:
@@ -109,7 +135,8 @@ services:
     networks:
       - zeinaguard_network
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
