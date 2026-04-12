@@ -118,8 +118,8 @@ class SensorHealth(db.Model):
     cpu_usage = db.Column(Float)
     memory_usage = db.Column(Float)
     uptime = db.Column(Integer)  # in seconds
-    last_heartbeat = db.Column(DateTime)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    last_heartbeat = db.Column(DateTime(timezone=True))
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow, primary_key=True)
     
     # Index for time-series queries
     __table_args__ = (
@@ -169,11 +169,11 @@ class ThreatEvent(db.Model):
     id = db.Column(Integer, primary_key=True)
     threat_id = db.Column(Integer, ForeignKey('threats.id', ondelete='CASCADE'), nullable=False)
     sensor_id = db.Column(Integer, ForeignKey('sensors.id'))
-    time = db.Column(DateTime, default=datetime.utcnow, nullable=False)
+    time = db.Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False, primary_key=True)
     event_data = db.Column(JSONB)  # Additional metadata
     packet_count = db.Column(Integer)
     signal_strength = db.Column(Integer)
-    created_at = db.Column(DateTime, default=datetime.utcnow)
+    created_at = db.Column(DateTime(timezone=True), default=datetime.utcnow)
     
     # Indexes for time-series queries
     __table_args__ = (

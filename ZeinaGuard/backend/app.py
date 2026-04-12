@@ -107,11 +107,16 @@ with app.app_context():
         try:
             from fix_db_schema import fix_schema
             fix_schema()
-            print("[DB] Schema migrations applied successfully")
-        except ImportError:
-            print("[DB] Warning: fix_db_schema.py not found, skipping migration")
+            print("[DB] Basic schema fixes applied")
+            
+            # Apply TimescaleDB migration
+            from migrate_timescale import migrate
+            migrate()
+            print("[DB] TimescaleDB migration applied successfully")
+        except ImportError as e:
+            print(f"[DB] Warning: Migration script not found: {e}")
         except Exception as migration_error:
-            print(f"[DB] Error during schema migration: {migration_error}")
+            print(f"[DB] Error during migration: {migration_error}")
             
     except Exception as e:
         print(f"[DB] Critical: Could not initialize database: {e}")
