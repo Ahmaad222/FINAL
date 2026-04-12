@@ -140,61 +140,43 @@ def admin_required(f):
     return decorated_function
 
 
-# In-memory user store (FOR DEVELOPMENT ONLY - use database in production)
-# Matches init_db.py credentials: admin/admin123, analyst/analyst123
-MOCK_USERS = {
-    'admin': {
-        'user_id': 1,
-        'username': 'admin',
-        'email': 'admin@zeinaguard.local',
-        'password_hash': generate_password_hash('admin123', method=HASH_METHOD),
-        'is_admin': True,
-        'is_active': True,
-        'created_at': datetime.now()
-    },
-    'analyst': {
-        'user_id': 2,
-        'username': 'analyst',
-        'email': 'analyst@zeinaguard.local',
-        'password_hash': generate_password_hash('analyst123', method=HASH_METHOD),
-        'is_admin': False,
-        'is_active': True,
-        'created_at': datetime.now()
-    },
-    'monitor': {
-        'user_id': 3,
-        'username': 'monitor',
-        'email': 'monitor@zeinaguard.local',
-        'password_hash': generate_password_hash('monitor123', method=HASH_METHOD),
-        'is_admin': False,
-        'is_active': True,
-        'created_at': datetime.now()
-    },
-}
-
-
 def authenticate_user(username: str, password: str):
     """
     Authenticate user by username and password
     Returns user data if valid, None otherwise
     """
-    user = MOCK_USERS.get(username)
+    from models import User
+    user = User.query.filter_by(username=username).first()
     
     if not user:
         return None
     
-    if not user.get('is_active'):
+    if not user.is_active:
         return None
     
-    if not verify_password(user['password_hash'], password):
+    if not verify_password(user.password_hash, password):
         return None
     
-    return user
+    return {
+        'user_id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'is_admin': user.is_admin,
+        'is_active': user.is_active
+    }
 
 
 def get_user_by_id(user_id: int):
     """Get user by ID"""
-    for user in MOCK_USERS.values():
-        if user['user_id'] == user_id:
-            return user
-    return None
+    from models import User
+    user = User.query.get(user_id)
+    if not user:
+        return None
+        
+    return {
+        'user_id': user.id,
+        'username': user.username,
+        'email': user.email,
+        'is_admin': user.is_admin,
+        'is_active': user.is_active
+    }
