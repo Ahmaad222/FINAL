@@ -94,6 +94,50 @@ def get_topology():
                         'type': 'detection',
                         'signal_strength': net.get('signal')
                     })
+            
+            # Devices (Stations/Clients)
+            if topo.discovered_devices:
+                for dev in topo.discovered_devices:
+                    if not isinstance(dev, dict): continue
+                    
+                    mac = dev.get('mac')
+                    if not mac: continue
+                    
+                    node_id = f'station_{mac.replace(":", "")}'
+                    
+                    # Deduplicate stations
+                    existing_node = next((n for n in nodes if n['id'] == node_id), None)
+                    if existing_node:
+                        existing_node['is_shared'] = True
+                        shared_nodes[node_id] = 'shared_station'
+                    else:
+                        nodes.append({
+                            'id': node_id,
+                            'type': 'station',
+                            'label': dev.get('name', f'Device {mac[-5:]}'),
+                            'mac_address': mac,
+                            'device_type': dev.get('type', 'Unknown'),
+                            'signal_strength': dev.get('signal'),
+                            'is_shared': False
+                        })
+                        station_count += 1
+                    
+                    # Add edge
+                    # If bssid is present, it's connected to a router
+                    bssid = dev.get('bssid')
+                    source_id = f'router_{bssid.replace(":", "")}' if bssid else sensor_node_id
+                    edge_type = 'connection' if bssid else 'detection'
+                    
+                    # Check if edge already exists to avoid duplicates
+                    edge_id = f'edge_{source_id}_{node_id}'
+                    if not any(e['id'] == edge_id for e in edges):
+                        edges.append({
+                            'id': edge_id,
+                            'source': source_id,
+                            'target': node_id,
+                            'type': edge_type,
+                            'signal_strength': dev.get('signal')
+                        })
         
         return jsonify({
             'success': True,

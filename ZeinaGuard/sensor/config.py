@@ -1,7 +1,9 @@
 # config.py
 import os
+import socket
 
 # Default values - can be overridden by Environment Variables or CLI
+SENSOR_ID = os.getenv("SENSOR_ID", socket.gethostname())
 INTERFACE = os.getenv("INTERFACE", "wlx002e2dc0346b") # Real wireless interface from user
 BACKEND_HOST = os.getenv("BACKEND_HOST", "flask-backend")
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "5000"))

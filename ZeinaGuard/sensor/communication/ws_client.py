@@ -1,7 +1,7 @@
 import socketio
 import threading
 import time
-
+from config import SENSOR_ID
 from core.event_bus import dashboard_queue
 
 
@@ -11,14 +11,13 @@ class WSClient:
 
         self.backend_url = backend_url or "http://192.168.201.130:8000"
         self.token = token
+        self.sensor_id = SENSOR_ID
 
         self.sio = socketio.Client(
             reconnection=True,
             reconnection_attempts=0,
             reconnection_delay=3
         )
-
-        self.is_running = False
 
         # -----------------------------
         # Socket Events
@@ -29,7 +28,7 @@ class WSClient:
             print(f"[WebSocket] 🟢 Connected to Backend at {self.backend_url}")
 
             self.sio.emit("sensor_register", {
-                "sensor_id": "sensor1"
+                "sensor_id": self.sensor_id
             })
 
         @self.sio.event
@@ -95,7 +94,7 @@ class WSClient:
                 if data.get("type") == "NETWORK_SCAN":
                     event = data.get("event", {})
                     payload = {
-                        "sensor_id": "sensor1",
+                        "sensor_id": self.sensor_id,
                         "ssid": event.get("ssid"),
                         "bssid": event.get("bssid"),
                         "channel": event.get("channel"),
@@ -115,10 +114,25 @@ class WSClient:
                     print(f"[WebSocket] 📡 Network Data Sent: {payload['ssid']} ({payload['bssid']})")
                     continue
 
+                # 🚀 Handle Station/Client Detection
+                if data.get("type") == "STATION_DETECTED":
+                    payload = {
+                        "sensor_id": self.sensor_id,
+                        "mac": data.get("mac"),
+                        "bssid": data.get("bssid"),
+                        "signal": data.get("signal"),
+                        "timestamp": data.get("timestamp"),
+                        "type": "Station"
+                    }
+                    self.sio.emit("station_scan", payload)
+                    print(f"[WebSocket] 📱 Station Data Sent: {payload['mac']}")
+                    continue
+
                 # 🛑 Existing Threat Logic
                 event = data.get("event", {})
 
                 payload = {
+                    "sensor_id": self.sensor_id,
                     "threat_type": data.get("status"),
                     "ssid": event.get("ssid"),
                     "source_mac": event.get("bssid"),

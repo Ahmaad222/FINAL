@@ -446,6 +446,10 @@ def keyboard_listener():
 # -------------------------
 
 def run_terminal_ui():
+    import config
+    if not config.ENABLE_TUI:
+        print("📝 Terminal UI disabled (Non-interactive mode). Streaming logs only.")
+        return
 
     t = threading.Thread(
         target=keyboard_listener,

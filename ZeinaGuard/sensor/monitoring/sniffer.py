@@ -12,12 +12,17 @@ from config import INTERFACE, LOCKED_CHANNEL
 from utils import (
     get_ssid, extract_channel, estimate_distance, 
     get_auth_type, get_wps_info, get_manufacturer, 
-    get_uptime, get_raw_beacon
+    get_uptime, get_raw_beacon, is_open_network,
+    get_ap_fingerprint
 )
 from core.event_bus import event_queue
 
-clients_map = {}
+START_TIME = time.time()
+AP_TIMEOUT = 120 # Seconds
+
+# {BSSID: {"last_seen": timestamp, "first_seen": timestamp}}
 aps_state = {} 
+clients_map = {}
 
 # Deduplication Cache: {BSSID: last_sent_time}
 seen_networks = {}
@@ -37,8 +42,14 @@ def enable_monitor_mode(iface):
 
 def build_event(packet):
     dot11 = packet[Dot11]
-
     bssid = dot11.addr2
+    now = time.time()
+    
+    if bssid not in aps_state:
+        aps_state[bssid] = {"first_seen": now, "last_seen": now}
+    else:
+        aps_state[bssid]["last_seen"] = now
+
     ssid = get_ssid(packet)
     channel = extract_channel(packet)
     signal = getattr(packet, "dBm_AntSignal", None)
@@ -50,7 +61,10 @@ def build_event(packet):
     manufacturer = get_manufacturer(bssid)
     uptime = get_uptime(packet)
     raw_beacon = get_raw_beacon(packet)
-    elapsed_time = round(time.time() - START_TIME, 2)
+    fingerprint = get_ap_fingerprint(packet)
+    
+    first_seen = aps_state[bssid]["first_seen"]
+    elapsed_time = round(now - first_seen, 2)
 
     clients_count = len(clients_map.get(bssid, set()))
 
@@ -66,6 +80,7 @@ def build_event(packet):
         "manufacturer": manufacturer,
         "uptime": uptime,
         "raw_beacon": raw_beacon,
+        "fingerprint": fingerprint,
         "elapsed_time": elapsed_time,
         "encryption": "OPEN" if is_open_network(packet) else "SECURED",
         "clients": clients_count
@@ -88,16 +103,11 @@ def handle_packet(packet):
         # 🛑 Deduplication Logic
         with cache_lock:
             last_sent = seen_networks.get(bssid, 0)
-            # If seen in last 60 seconds, don't resend (unless it's a critical update we want, but let's stick to 60s)
             if now - last_sent < DEDUPE_COOLDOWN:
+                # Update but don't re-emit to avoid flooding
                 return 
 
             seen_networks[bssid] = now
-
-        aps_state[bssid] = {
-            "last_seen": now,
-            "event": event
-        }
 
         print(f"[PARSED] SSID={str(event['ssid']):<15} | BSSID={bssid} | CH={event['channel']} | SIG={event['signal']}")
         event_queue.put(event)
@@ -107,14 +117,29 @@ def handle_packet(packet):
         bssid = dot11.addr3
         src = dot11.addr2
         if bssid and src and bssid != src:
-            clients_map.setdefault(bssid, set()).add(src)
+            if bssid not in clients_map:
+                clients_map[bssid] = set()
+            
+            if src not in clients_map[bssid]:
+                clients_map[bssid].add(src)
+                
+                # Emit new station event
+                event_queue.put({
+                    "type": "STATION_DETECTED",
+                    "mac": src,
+                    "vendor": get_manufacturer(src),
+                    "bssid": bssid,
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "signal": getattr(packet, "dBm_AntSignal", None)
+                })
 
 
 def ap_cleaner():
+    """Periodic cleanup of old networks and dedupe cache."""
     while True:
         now = time.time()
         with cache_lock:
-            # Clear old entries from dedupe cache every few mins to keep memory clean
+            # Clear old entries from dedupe cache every few mins
             for bssid in list(seen_networks.keys()):
                 if now - seen_networks[bssid] > DEDUPE_COOLDOWN * 2:
                     del seen_networks[bssid]
@@ -122,11 +147,14 @@ def ap_cleaner():
         for bssid in list(aps_state.keys()):
             if now - aps_state[bssid]["last_seen"] > AP_TIMEOUT:
                 del aps_state[bssid]
+                if bssid in clients_map:
+                    del clients_map[bssid]
+                    
                 event_queue.put({
                     "type": "AP_REMOVED",
                     "bssid": bssid
                 })
-        time.sleep(10)
+        time.sleep(60) # Cleanup every minute
 
 
 def channel_hopper():

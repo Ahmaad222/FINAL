@@ -124,6 +124,15 @@ class ThreatManager:
                 self.handle_removal(event["bssid"])
                 continue
 
+            # -----------------------
+            # Station Detected
+            # -----------------------
+
+            if isinstance(event, dict) and event.get("type") == "STATION_DETECTED":
+                # Forward to dashboard for topology mapping
+                dashboard_queue.put(event)
+                continue
+
             # 🚀 Log Advanced Data
             self.log_to_file(event)
 

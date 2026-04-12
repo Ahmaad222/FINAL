@@ -22,9 +22,10 @@ except Exception:
     redis_client = None
 
 # --------------------------------
-# Connected Clients
+# Connected Clients & Cache
 # --------------------------------
 connected_clients = {}
+last_scan_record = {} # Cache: {bssid: {"status": "ROGUE", "timestamp": time}}
 
 
 # --------------------------------
@@ -90,20 +91,28 @@ def init_socketio(app):
         
         DEBUG_WS = os.getenv("DEBUG_WS", "true").lower() == "true"
         ssid = payload.get('ssid', 'N/A')
-        sensor_id = payload.get('sensor_id', 'unknown')
+        sensor_name = payload.get('sensor_id', 'sensor1')
         
         if DEBUG_WS:
-            print(f"[RECEIVED] 🚨 THREAT | SSID={ssid} | TYPE={payload.get('threat_type')} | SENSOR={sensor_id}", flush=True)
+            print(f"[RECEIVED] 🚨 THREAT | SSID={ssid} | TYPE={payload.get('threat_type')} | SENSOR={sensor_name}", flush=True)
 
         with app.app_context():
             try:
+                # 🛠️ Find or Auto-Create the sensor
+                sensor = Sensor.query.filter_by(name=sensor_name).first()
+                if not sensor:
+                    sensor = Sensor(name=sensor_name, hostname=sensor_name, is_active=True)
+                    db.session.add(sensor)
+                    db.session.commit()
+                    if DEBUG_WS: print(f"[DB] Created sensor: {sensor_name}", flush=True)
+
                 new_threat = Threat(
                     threat_type=payload.get("threat_type", "UNKNOWN"),
                     severity=payload.get("severity", "HIGH"),
                     source_mac=payload.get("source_mac"),
                     ssid=payload.get("ssid"),
                     description=payload.get("description", "Detected via Sensor WebSocket"),
-                    detected_by=payload.get("sensor_id"),
+                    detected_by=sensor.id,
                     created_by=None
                 )
 
@@ -204,22 +213,48 @@ def init_socketio(app):
                 
                 topology.discovered_networks = current_networks
                 
-                # 🛠️ Save to history (Threat table)
-                severity_map = {"ROGUE": "HIGH", "SUSPICIOUS": "MEDIUM", "LEGIT": "INFO"}
+                # 🛠️ Save to history (Threat table) - ONLY if status changed or 10 mins passed
+                import time
+                current_status = payload.get("status", "LEGIT")
+                last_record = last_scan_record.get(bssid)
                 
-                history_entry = Threat(
-                    threat_type=payload.get("status", "SCAN"),
-                    severity=severity_map.get(payload.get("status"), "INFO"),
-                    source_mac=bssid,
-                    ssid=ssid,
-                    detected_by=sensor.id,
-                    description=f"CH: {payload.get('channel')} | Auth: {payload.get('auth')}",
-                    created_by=None
-                )
-                db.session.add(history_entry)
+                should_save = False
+                if not last_record:
+                    should_save = True
+                else:
+                    last_status = last_record.get("status")
+                    last_time = last_record.get("timestamp", 0)
+                    
+                    # Save if status upgraded (e.g. LEGIT -> ROGUE) or status changed
+                    if current_status != last_status:
+                        should_save = True
+                    # Or every 10 minutes for a "heartbeat" log
+                    elif time.time() - last_time > 600:
+                        should_save = True
+                
+                if should_save:
+                    severity_map = {"ROGUE": "HIGH", "SUSPICIOUS": "MEDIUM", "LEGIT": "INFO"}
+                    
+                    history_entry = Threat(
+                        threat_type=payload.get("status", "SCAN"),
+                        severity=severity_map.get(current_status, "INFO"),
+                        source_mac=bssid,
+                        ssid=ssid,
+                        detected_by=sensor.id,
+                        description=f"CH: {payload.get('channel')} | Auth: {payload.get('auth')}",
+                        created_by=None
+                    )
+                    db.session.add(history_entry)
+                    
+                    # Update cache
+                    last_scan_record[bssid] = {
+                        "status": current_status,
+                        "timestamp": time.time()
+                    }
+                    if DEBUG_WS: print(f"[DB] Saved history record for {bssid} (Reason: {'Status Change' if last_record and last_status != current_status else 'New/Heartbeat'})", flush=True)
                 
                 db.session.commit()
-                if DEBUG_WS: print(f"[DB-SUCCESS] ✅ Scan data saved", flush=True)
+                if DEBUG_WS: print(f"[DB-SUCCESS] ✅ Scan data updated", flush=True)
                 
                 # Broadcast to UI
                 socketio.emit("new_scan_data", payload)
@@ -229,6 +264,82 @@ def init_socketio(app):
                 print(f"[DB-FAILURE] ❌ Error processing scan data: {str(e)}", file=sys.stderr, flush=True)
                 traceback.print_exc()
 
+    # ----------------------------
+    # Receive Station Scan Data
+    # ----------------------------
+    @socketio.on("station_scan")
+    def handle_station_scan(payload):
+        """Processes station/client data from sensor."""
+        import traceback
+        import json
+        import sys
+        
+        DEBUG_WS = os.getenv("DEBUG_WS", "true").lower() == "true"
+        sensor_name = payload.get("sensor_id", "sensor1")
+        mac = payload.get('mac')
+        bssid = payload.get('bssid')
+        
+        if DEBUG_WS:
+            print(f"[RECEIVED] 📱 STATION | MAC={mac} | BSSID={bssid} | SENSOR={sensor_name}", flush=True)
+            
+        if not mac: return
+
+        with app.app_context():
+            try:
+                from models import NetworkTopology, Sensor, db
+                
+                # 🛠️ Find or Auto-Create the sensor
+                sensor = Sensor.query.filter_by(name=sensor_name).first()
+                if not sensor:
+                    sensor = Sensor(name=sensor_name, hostname=sensor_name, is_active=True)
+                    db.session.add(sensor)
+                    db.session.commit()
+                
+                # 🛠️ Find or Create the topology record
+                topology = NetworkTopology.query.filter_by(sensor_id=sensor.id).first()
+                if not topology:
+                    topology = NetworkTopology(sensor_id=sensor.id, discovered_networks=[], discovered_devices=[])
+                    db.session.add(topology)
+                
+                # 🛠️ Ensure discovered_devices is a list
+                current_devices = topology.discovered_devices
+                if isinstance(current_devices, str):
+                    try:
+                        current_devices = json.loads(current_devices)
+                    except:
+                        current_devices = []
+                
+                if current_devices is None:
+                    current_devices = []
+                
+                # Update topology with latest scan
+                device_info = {
+                    "mac": mac,
+                    "bssid": bssid,
+                    "signal": payload.get("signal"),
+                    "timestamp": payload.get("timestamp"),
+                    "type": payload.get("type", "Station")
+                }
+
+                found = False
+                for i, dev in enumerate(current_devices):
+                    if isinstance(dev, dict) and dev.get("mac") == mac:
+                        current_devices[i] = device_info
+                        found = True
+                        break
+                
+                if not found:
+                    current_devices.append(device_info)
+                
+                topology.discovered_devices = current_devices
+                db.session.commit()
+                
+                if DEBUG_WS: print(f"[DB-SUCCESS] ✅ Station data saved", flush=True)
+                
+            except Exception as e:
+                db.session.rollback()
+                print(f"[DB-FAILURE] ❌ Error processing station data: {str(e)}", file=sys.stderr, flush=True)
+                traceback.print_exc()
 
     return socketio
 

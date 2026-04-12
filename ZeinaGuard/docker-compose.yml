@@ -92,6 +92,8 @@ services:
       AUTH_RETRY_DELAY: 5
       SENSOR_USERNAME: admin
       SENSOR_PASSWORD: admin123
+    volumes:
+      - ./sensor/data_logs:/app/data_logs
     extra_hosts:
       - "flask-backend:127.0.0.1"
     depends_on:
