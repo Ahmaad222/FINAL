@@ -37,6 +37,16 @@ attack_stats = {
 # -------------------------
 
 def update_ap(event_summary):
+    import config
+
+    # 📝 Non-Interactive Logging Mode
+    if not config.ENABLE_TUI:
+        ssid = event_summary.get("ssid", "Hidden")
+        bssid = event_summary.get("bssid")
+        status = event_summary.get("classification", "LEGIT")
+        signal = event_summary.get("signal", "??")
+        print(f"[SCAN] SSID={str(ssid):<15} | BSSID={bssid} | SIG={signal:>3} | STATUS={status}")
+        return
 
     with lock:
 
@@ -443,13 +453,16 @@ def run_terminal_ui():
     )
     t.start()
 
+    # Use screen=True to prevent mixing with stdout logs
+    # Use auto_refresh=False for manual control
     with Live(
         generate_layout(),
-        refresh_per_second=2,
-        console=console
+        refresh_per_second=4,
+        console=console,
+        screen=True,
+        auto_refresh=False
     ) as live:
 
         while True:
-
-            live.update(generate_layout())
-            time.sleep(1)
+            live.update(generate_layout(), refresh=True)
+            time.sleep(0.5) # 2 FPS UI refresh for stability

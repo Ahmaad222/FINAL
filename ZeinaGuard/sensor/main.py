@@ -114,14 +114,18 @@ def main():
         print("❌ Failed to authenticate after multiple attempts. Running in OFFLINE MODE.")
 
     # --------------------------------
-    # 🔥 Terminal UI Thread
+    # 🔥 Terminal UI Thread (Only if enabled)
     # --------------------------------
 
-    ui_thread = threading.Thread(
-        target=run_terminal_ui,
-        daemon=True
-    )
-    ui_thread.start()
+    if config.ENABLE_TUI:
+        print("🖥️ Starting Terminal UI...")
+        ui_thread = threading.Thread(
+            target=run_terminal_ui,
+            daemon=True
+        )
+        ui_thread.start()
+    else:
+        print("📝 Running in NON-INTERACTIVE Mode (Logging only)")
 
     # --------------------------------
     # Threat Manager

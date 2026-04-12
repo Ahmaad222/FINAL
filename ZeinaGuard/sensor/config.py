@@ -20,3 +20,9 @@ ENABLE_ACTIVE_CONTAINMENT = os.getenv("ENABLE_ACTIVE_CONTAINMENT", "True").lower
 DEAUTH_COUNT = int(os.getenv("DEAUTH_COUNT", "40"))               # عدد الإطارات
 DEAUTH_INTERVAL = float(os.getenv("DEAUTH_INTERVAL", "0.1"))              # زمن بين الإرسال
 
+# --- UI & Logging Configuration ---
+RUN_MODE = os.getenv("RUN_MODE", "DOCKER").upper() # DOCKER | LOCAL
+# If in Docker, default TUI to False unless explicitly enabled
+ENABLE_TUI = os.getenv("ENABLE_TUI", "False" if RUN_MODE == "DOCKER" else "True").lower() == "true"
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+
