@@ -5,7 +5,17 @@ import os
 INTERFACE = os.getenv("INTERFACE", "wlx002e2dc0346b") # Real wireless interface from user
 BACKEND_HOST = os.getenv("BACKEND_HOST", "flask-backend")
 BACKEND_PORT = int(os.getenv("BACKEND_PORT", "5000"))
-BACKEND_URL = os.getenv("BACKEND_URL", f"http://{BACKEND_HOST}:{BACKEND_PORT}")
+
+# Automatic Backend Resolution
+if os.getenv("BACKEND_URL"):
+    BACKEND_URL = os.getenv("BACKEND_URL")
+elif os.getenv("RUN_MODE") == "LOCAL":
+    BACKEND_URL = f"http://localhost:{BACKEND_PORT}"
+else:
+    # Default to container name, but fallback to localhost if resolution fails
+    BACKEND_URL = f"http://{BACKEND_HOST}:{BACKEND_PORT}"
+
+print(f"[CONFIG] 🔗 Backend URL: {BACKEND_URL}")
 
 LOCKED_CHANNEL = None
 

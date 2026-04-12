@@ -1,7 +1,7 @@
 # monitoring/sniffer.py
 
 from scapy.all import sniff, conf
-from scapy.layers.dot11 import Dot11, Dot11Beacon
+from scapy.layers.dot11 import Dot11, Dot11Beacon, Dot11ProbeResp
 import threading
 import os
 import sys
@@ -19,23 +19,23 @@ from core.event_bus import event_queue
 clients_map = {}
 aps_state = {} 
 
-AP_TIMEOUT = 60 
-START_TIME = time.time()
-FIRST_PACKET = True
+# Deduplication Cache: {BSSID: last_sent_time}
+seen_networks = {}
+DEDUPE_COOLDOWN = 60 # Seconds
+cache_lock = threading.Lock()
 
-def is_open_network(packet):
-    if packet.haslayer(Dot11Beacon):
-        cap = packet[Dot11Beacon].cap
-        return not cap.privacy
-    return False
-
+def enable_monitor_mode(iface):
+    """Automatically enables monitor mode on the interface."""
+    print(f"[MONITOR] 🔧 Enabling monitor mode on {iface}...")
+    try:
+        os.system(f"ip link set {iface} down")
+        os.system(f"iw dev {iface} set type monitor")
+        os.system(f"ip link set {iface} up")
+        print(f"[MONITOR] ✅ Monitor mode enabled on {iface}")
+    except Exception as e:
+        print(f"[MONITOR] ❌ Failed to enable monitor mode: {e}")
 
 def build_event(packet):
-    global FIRST_PACKET
-    if FIRST_PACKET:
-        print("🎯 First WiFi packet captured! Sniffer is working.")
-        FIRST_PACKET = False
-
     dot11 = packet[Dot11]
 
     bssid = dot11.addr2
@@ -76,25 +76,36 @@ def handle_packet(packet):
     if not packet.haslayer(Dot11):
         return
 
-    dot11 = packet[Dot11]
-
-    if packet.haslayer(Dot11Beacon) and dot11.addr2:
+    # Process Beacons and Probe Responses
+    if packet.haslayer(Dot11Beacon) or packet.haslayer(Dot11ProbeResp):
+        dot11 = packet[Dot11]
+        if not dot11.addr2: return
 
         event = build_event(packet)
         bssid = event["bssid"]
         now = time.time()
+
+        # 🛑 Deduplication Logic
+        with cache_lock:
+            last_sent = seen_networks.get(bssid, 0)
+            # If seen in last 60 seconds, don't resend (unless it's a critical update we want, but let's stick to 60s)
+            if now - last_sent < DEDUPE_COOLDOWN:
+                return 
+
+            seen_networks[bssid] = now
 
         aps_state[bssid] = {
             "last_seen": now,
             "event": event
         }
 
+        print(f"[PARSED] SSID={str(event['ssid']):<15} | BSSID={bssid} | CH={event['channel']} | SIG={event['signal']}")
         event_queue.put(event)
 
-    if dot11.type == 2:
+    dot11 = packet[Dot11]
+    if dot11.type == 2: # Data frame
         bssid = dot11.addr3
         src = dot11.addr2
-
         if bssid and src and bssid != src:
             clients_map.setdefault(bssid, set()).add(src)
 
@@ -102,35 +113,33 @@ def handle_packet(packet):
 def ap_cleaner():
     while True:
         now = time.time()
-        removed = []
+        with cache_lock:
+            # Clear old entries from dedupe cache every few mins to keep memory clean
+            for bssid in list(seen_networks.keys()):
+                if now - seen_networks[bssid] > DEDUPE_COOLDOWN * 2:
+                    del seen_networks[bssid]
 
         for bssid in list(aps_state.keys()):
             if now - aps_state[bssid]["last_seen"] > AP_TIMEOUT:
-                removed.append(bssid)
                 del aps_state[bssid]
-
                 event_queue.put({
                     "type": "AP_REMOVED",
                     "bssid": bssid
                 })
-
-        time.sleep(5)
+        time.sleep(10)
 
 
 def channel_hopper():
-    import config
-
+    print("[HOPPER] 🌀 Starting channel hopping (1-13)...")
     while True:
-        if config.LOCKED_CHANNEL is not None:
-            os.system(f"iwconfig {INTERFACE} channel {config.LOCKED_CHANNEL} 2>/dev/null")
+        if LOCKED_CHANNEL is not None:
+            os.system(f"iw dev {INTERFACE} set channel {LOCKED_CHANNEL}")
             time.sleep(1)
             continue
 
         for ch in range(1, 14):
-            if config.LOCKED_CHANNEL is not None:
-                break
-
-            os.system(f"iwconfig {INTERFACE} channel {ch} 2>/dev/null")
+            if LOCKED_CHANNEL is not None: break
+            os.system(f"iw dev {INTERFACE} set channel {ch}")
             time.sleep(0.4)
 
 
@@ -144,11 +153,14 @@ def start_monitoring():
         print("❌ Error: Root privileges required for sniffing!")
         return
 
+    # Enable monitor mode automatically
+    enable_monitor_mode(INTERFACE)
+
     threading.Thread(target=channel_hopper, daemon=True).start()
     threading.Thread(target=ap_cleaner, daemon=True).start()
 
-    print(f"📡 Sniffing on {INTERFACE}...")
+    print(f"📡 Sniffing on {INTERFACE} (Monitor Mode)...")
     try:
         sniff(iface=INTERFACE, prn=handle_packet, store=False)
     except Exception as e:
-        print(f"❌ Sniffing failed: {e}")
+        print(f"[ERROR] Sniffing failed: {e}")
