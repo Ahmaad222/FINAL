@@ -39,7 +39,7 @@ def ensure_dependencies():
 
 ensure_dependencies()
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager

@@ -31,7 +31,7 @@ class APIClient:
         try:
             print(f"[API] 🔑 Attempting authentication with {url} ...")
 
-            response = requests.post(url, json=payload, timeout=5)
+            response = requests.post(url, json=payload, timeout=10)
 
             if response.status_code == 200:
                 data = response.json()
@@ -41,15 +41,15 @@ class APIClient:
                     print(f"[API] ✅ Login Successful! Sensor authenticated as: {self.username}")
                     return self.token
                 else:
-                    print("[API] ❌ Auth Failed: No access token in response.")
+                    print(f"[API] ❌ Auth Failed: No access token in response. Data: {data}")
                     return None
             
             elif response.status_code == 401:
-                print(f"[API] ❌ Login Failed: Invalid credentials for user '{self.username}'")
+                print(f"[API] ❌ Login Failed: Invalid credentials for user '{self.username}' (401)")
                 return None
             else:
                 print(f"[API] ❌ Auth Error: Received status code {response.status_code}")
-                print(f"[API] Response: {response.text}")
+                print(f"[API] Response Content: {response.text[:200]}")
                 return None
 
         except requests.exceptions.RequestException as e:

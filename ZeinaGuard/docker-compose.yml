@@ -22,7 +22,7 @@ services:
       test: ["CMD-SHELL", "pg_isready -U zeinaguard_user -d zeinaguard_db"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   # 2. Redis for message queue and caching
   redis:
@@ -69,9 +69,9 @@ services:
     command: python app.py
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
       start_period: 15s
 
   # 4. Python WIPS Sensor (Interactive)
@@ -82,8 +82,8 @@ services:
     container_name: zeinaguard_sensor
     privileged: true
     network_mode: host
-    tty: true           # Enable interactive terminal
-    stdin_open: true    # Keep stdin open
+    tty: true
+    stdin_open: true
     environment:
       INTERFACE: wlx002e2dc0346b
       BACKEND_HOST: flask-backend
@@ -93,7 +93,7 @@ services:
       SENSOR_USERNAME: admin
       SENSOR_PASSWORD: admin123
     extra_hosts:
-      - "flask-backend:127.0.0.1" # Allows resolving service name in host mode
+      - "flask-backend:127.0.0.1"
     depends_on:
       flask-backend:
         condition: service_healthy
@@ -125,8 +125,8 @@ services:
     container_name: zeinaguard_pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.local
-      PGADMIN_DEFAULT_PASSWORD: admin_password_change_me
-      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "*"
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_ALLOW_SPECIAL_EMAIL_DOMAINS: "['*']"
     ports:
       - "5050:80"
     volumes:
