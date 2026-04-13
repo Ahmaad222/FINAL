@@ -14,7 +14,6 @@ from flask_jwt_extended import JWTManager
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash
 
-from auth import AuthService
 from routes import register_blueprints
 from websocket_server import init_socketio
 from models import db, User
@@ -39,9 +38,11 @@ def ensure_dependencies():
         if importlib.util.find_spec(module) is None:
             print(f"Missing dependency: {package} → installing...")
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package],
-                                      stdout=subprocess.DEVNULL,
-                                      stderr=subprocess.STDOUT)
+                subprocess.check_call(
+                    [sys.executable, "-m", "pip", "install", package],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.STDOUT
+                )
             except Exception as e:
                 print(f"❌ Failed to install {package}: {e}")
 
@@ -67,10 +68,11 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # --- Extensions ---
 db.init_app(app)
-auth_service = AuthService(app)
+JWTManager(app)  # ✅ مهم تضيف ده عشان JWT يشتغل
 socketio = init_socketio(app)
 app.socketio = socketio
 
+# --- Register Routes ---
 register_blueprints(app)
 
 # --------------------------------
