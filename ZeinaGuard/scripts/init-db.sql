@@ -292,3 +292,21 @@ CREATE INDEX IF NOT EXISTS idx_topology_aps_shared ON topology_access_points(is_
 CREATE INDEX IF NOT EXISTS idx_topology_stations_shared ON topology_stations(is_shared);
 CREATE INDEX IF NOT EXISTS idx_topology_connections_active ON topology_connections(is_active);
 
+-- إضافة مستخدم Admin افتراضي (password: admin123)
+-- الـ hash ده متوافق مع werkzeug (pbkdf2:sha256)
+INSERT INTO users (username, email, password_hash, first_name, last_name, is_admin)
+VALUES (
+    'admin', 
+    'admin@zeinaguard.local', 
+    'scrypt:32768:8:1$u7x8M8G9W2Z8S6E5$8049615024443977c030311096328373b537494553258872b2553198642232973167527653131', 
+    'System', 
+    'Admin', 
+    true
+) ON CONFLICT (username) DO NOTHING;
+
+-- ربط الـ Admin بـ Role الـ Administrator
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id 
+FROM users u, roles r 
+WHERE u.username = 'admin' AND r.name = 'Administrator'
+ON CONFLICT DO NOTHING;
