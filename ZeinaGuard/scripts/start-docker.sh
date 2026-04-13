@@ -1,11 +1,8 @@
 #!/bin/bash
 
-# ZeinaGuard Hybrid Startup Script
-# Starts Backend in Docker and Sensor Locally
-
 echo "[SYSTEM] Starting Docker services..."
 
-# Use 'docker compose' or 'docker-compose'
+# Detect docker compose version
 if docker compose version > /dev/null 2>&1; then
     COMPOSE="docker compose"
 else
@@ -14,53 +11,59 @@ fi
 
 $COMPOSE up -d
 
-echo "[SYSTEM] Waiting for backend..."
+echo "[SYSTEM] Waiting for backend to be fully ready..."
 
-# wait until backend is ready
-MAX_RETRIES=30
-RETRIES=0
-until curl -s http://localhost:5000/health > /dev/null; do
-    echo "Waiting for backend... ($RETRIES/$MAX_RETRIES)"
-    sleep 2
-    ((RETRIES++))
-    if [ $RETRIES -ge $MAX_RETRIES ]; then
-        echo "[ERROR] Backend failed to start in time."
-        $COMPOSE logs flask-backend
-        exit 1
+# Wait for backend health (strong check)
+for i in {1..30}; do
+    RESPONSE=$(curl -s http://localhost:5000/health)
+
+    if echo "$RESPONSE" | grep -q "healthy"; then
+        echo "[SYSTEM] Backend is ready!"
+        break
     fi
+
+    echo "Waiting for backend... ($i/30)"
+    sleep 2
 done
 
-echo "[SYSTEM] Backend is ready!"
-
-# Final verification
+# Final safety check
 if ! curl -s http://localhost:5000/health | grep -q "healthy"; then
-    echo "[ERROR] Backend health check failed."
+    echo "[ERROR] Backend failed to start correctly!"
+    $COMPOSE logs flask-backend
     exit 1
 fi
 
 echo "[SYSTEM] Starting sensor locally..."
 
+# Absolute path fix (IMPORTANT)
+PROJECT_ROOT=$(pwd)
+SENSOR_PATH="$PROJECT_ROOT/sensor"
+
 # Function to run sensor
 run_sensor() {
-    cd sensor || exit
+    cd "$SENSOR_PATH" || exit
     export RUN_MODE=LOCAL
     export ENABLE_TUI=True
-    # Using the interface specified by the user
+
+    echo "[SENSOR] Running on interface: wlx002e2dc0346b"
     sudo python3 main.py wlx002e2dc0346b
 }
 
-# Try to run in a new terminal for better UX if gnome-terminal is available
+# Try to run in new terminal
 if command -v gnome-terminal > /dev/null 2>&1; then
+    echo "[SYSTEM] Launching sensor in new terminal..."
+
     gnome-terminal -- bash -c "
-    cd $(pwd)/sensor;
+    cd '$SENSOR_PATH';
     export RUN_MODE=LOCAL;
     export ENABLE_TUI=True;
-    echo 'Starting ZeinaGuard Sensor in new terminal...';
+    echo '[SENSOR] Starting ZeinaGuard Sensor...';
     sudo python3 main.py wlx002e2dc0346b;
+    echo '[SENSOR] Stopped.';
     exec bash
     "
-    echo "[SYSTEM] Sensor started in a new terminal."
+
 else
-    echo "[SYSTEM] gnome-terminal not found, running sensor in current terminal..."
+    echo "[SYSTEM] gnome-terminal not found → running in same terminal"
     run_sensor
 fi
