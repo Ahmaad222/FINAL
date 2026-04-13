@@ -71,11 +71,9 @@ def main():
     # --------------------------------
     # 🌐 Dynamic Backend Resolution
     # --------------------------------
-    backend_host = config.BACKEND_HOST
-    backend_port = config.BACKEND_PORT
-    backend_url = f"http://{backend_host}:{backend_port}"
+    backend_url = config.BACKEND_URL
 
-    print(f"📡 Backend Target: {backend_url}")
+    print(f"[CONFIG] Backend URL: {backend_url}")
 
     # --------------------------------
     # Try Backend Authentication (with infinite retry for Docker)
@@ -86,11 +84,12 @@ def main():
     
     while token is None:
         try:
+            print(f"[CONNECT] Trying to connect to {backend_url}...")
             api = APIClient(backend_url=backend_url)
             token = api.authenticate_sensor()
 
             if token:
-                print(f"✅ Sensor authenticated with backend at {backend_url}")
+                print(f"[SUCCESS] Connected to backend at {backend_url}")
                 ws = WSClient(backend_url=backend_url, token=token)
 
                 ws_thread = threading.Thread(
@@ -101,10 +100,16 @@ def main():
                 break # Success!
             else:
                 print(f"⚠️ Authentication failed. Retrying in 10 seconds...")
+                if backend_url != "http://localhost:5000":
+                    print("[FALLBACK] Switching to localhost...")
+                    backend_url = "http://localhost:5000"
                 time.sleep(10)
 
         except Exception as e:
             print(f"⚠️ Connection failed: {e}. Retrying in 10 seconds...")
+            if backend_url != "http://localhost:5000":
+                print("[FALLBACK] Switching to localhost...")
+                backend_url = "http://localhost:5000"
             time.sleep(10)
 
     # --------------------------------

@@ -3,8 +3,16 @@ import os
 
 # Default values - can be overridden by Environment variables
 INTERFACE = os.getenv("SENSOR_INTERFACE", "wlan0")
-BACKEND_HOST = os.getenv("ZEINAGUARD_BACKEND", "flask-backend")
-BACKEND_PORT = int(os.getenv("ZEINAGUARD_PORT", "5000"))
+RUN_MODE = os.getenv("RUN_MODE", "LOCAL")
+
+if RUN_MODE == "LOCAL":
+    BACKEND_URL = "http://localhost:5000"
+else:
+    BACKEND_URL = "http://flask-backend:5000"
+
+# Legacy support
+BACKEND_HOST = "localhost" if "localhost" in BACKEND_URL else "flask-backend"
+BACKEND_PORT = 5000
 
 LOCKED_CHANNEL = None
 

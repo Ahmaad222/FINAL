@@ -74,24 +74,6 @@ services:
       retries: 5
       start_period: 10s
 
-  # Sensor Service
-  zeinaguard-sensor:
-    build:
-      context: .
-      dockerfile: Dockerfile.sensor
-    container_name: zeinaguard_sensor
-    privileged: true
-    network_mode: host
-    environment:
-      ZEINAGUARD_BACKEND: localhost
-      ZEINAGUARD_PORT: 5000
-      SENSOR_INTERFACE: wlan0  # Change to your interface
-      ENABLE_CONTAINMENT: "True"
-    depends_on:
-      flask-backend:
-        condition: service_healthy
-    restart: unless-stopped
-
   # Next.js Frontend (host:3000 -> container:5000, Next.js dev listens on 5000)
   next-frontend:
     build:
