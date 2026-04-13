@@ -1,5 +1,5 @@
 services:
-  # --- قاعدة البيانات (TimescaleDB) ---
+  # --- PostgreSQL (TimescaleDB) ---
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: zeinaguard_postgres
@@ -21,10 +21,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-      start_period: 30s # وقت إضافي لتنفيذ ملفات الـ SQL عند أول تشغيل
+      start_period: 30s
     restart: unless-stopped
 
-  # --- نظام التخزين المؤقت (Redis) ---
+  # --- Redis ---
   redis:
     image: redis:7-alpine
     container_name: zeinaguard_redis
@@ -42,7 +42,7 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # --- الباك اند (Flask) ---
+  # --- Flask Backend ---
   flask-backend:
     build:
       context: .
@@ -54,7 +54,7 @@ services:
       FLASK_PORT: 5000
       DATABASE_URL: postgresql://${DB_USER:-zeinaguard_user}:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/${DB_NAME:-zeinaguard_db}
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0
-      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-super_secure_very_long_secret_key_123456789}
+      JWT_SECRET_KEY: super_secure_very_long_secret_key_123456789_very_secure
       FLASK_DEBUG: 0
     ports:
       - "5000:5000"
@@ -69,15 +69,14 @@ services:
         condition: service_healthy
     command: python app.py
     healthcheck:
-      # اختبار الصحة عبر التأكد من استجابة endpoint الـ health
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-      start_period: 40s # وقت كافٍ لإنشاء الأدمن وتثبيت الـ dependencies إذا لزم الأمر
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     restart: unless-stopped
 
-  # --- الفرونت اند (Next.js) ---
+  # --- Next.js Frontend ---
   next-frontend:
     build:
       context: .
@@ -100,7 +99,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # --- أداة إدارة قاعدة البيانات ---
+  # --- PgAdmin ---
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: zeinaguard_pgadmin
