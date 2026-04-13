@@ -7,10 +7,10 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime
 from models import db, Threat, ThreatEvent, Sensor
-from auth import token_required
 from websocket_server import broadcast_threat_event
 
 threats_bp = Blueprint('threats', __name__, url_prefix='/api/threats')
+
 
 @threats_bp.route('/', methods=['GET'])
 @jwt_required(optional=True)
@@ -20,17 +20,17 @@ def get_threats():
         limit = request.args.get('limit', default=50, type=int)
         severity = request.args.get('severity', type=str)
         is_resolved = request.args.get('resolved', type=lambda v: v.lower() == 'true')
-        
+
         query = Threat.query
-        
+
         if severity:
             query = query.filter_by(severity=severity)
-        
+
         if is_resolved is not None:
             query = query.filter_by(is_resolved=is_resolved)
-            
+
         threats = query.order_by(Threat.created_at.desc()).limit(limit).all()
-        
+
         result = []
         for t in threats:
             result.append({
@@ -44,14 +44,16 @@ def get_threats():
                 'is_resolved': t.is_resolved,
                 'created_at': t.created_at.isoformat()
             })
-            
+
         return jsonify({
             'success': True,
             'data': result,
             'total': len(result)
         }), 200
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @threats_bp.route('/<int:threat_id>', methods=['GET'])
 @jwt_required(optional=True)
@@ -61,7 +63,7 @@ def get_threat(threat_id):
         threat = Threat.query.get(threat_id)
         if not threat:
             return jsonify({'error': 'Threat not found'}), 404
-            
+
         return jsonify({
             'id': threat.id,
             'threat_type': threat.threat_type,
@@ -78,8 +80,10 @@ def get_threat(threat_id):
                 'packet_count': e.packet_count
             } for e in threat.events]
         }), 200
+
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @threats_bp.route('/<int:threat_id>/resolve', methods=['POST'])
 @jwt_required()
@@ -89,19 +93,21 @@ def resolve_threat(threat_id):
         threat = Threat.query.get(threat_id)
         if not threat:
             return jsonify({'error': 'Threat not found'}), 404
-            
+
         threat.is_resolved = True
         threat.updated_at = datetime.utcnow()
         db.session.commit()
-        
+
         return jsonify({
             'message': 'Threat resolved successfully',
             'threat_id': threat_id,
             'resolved_at': threat.updated_at.isoformat()
         }), 200
+
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
 
 @threats_bp.route('/demo/simulate-threat', methods=['POST'])
 @jwt_required(optional=True)
@@ -111,24 +117,23 @@ def simulate_threat():
     Saves to database and broadcasts via WebSocket
     """
     try:
-        # Get or create a default sensor for the demo
+        # Get or create a default sensor
         sensor = Sensor.query.first()
         sensor_id = sensor.id if sensor else 1
-        
+
         new_threat = Threat(
             threat_type='rogue_ap',
             severity='critical',
             source_mac='00:11:22:33:44:55',
             ssid='FreeWiFi-Trap',
             detected_by=sensor_id,
-            description='Critical rogue access point detected in office area (SIMULATED)',
+            description='Critical rogue access point detected (SIMULATED)',
             is_resolved=False
         )
-        
+
         db.session.add(new_threat)
         db.session.commit()
-        
-        # Broadcast to WebSocket clients
+
         threat_data = {
             'id': new_threat.id,
             'threat_type': new_threat.threat_type,
@@ -140,13 +145,14 @@ def simulate_threat():
             'signal_strength': -35,
             'packet_count': 150
         }
-        
+
         broadcast_threat_event(threat_data)
-        
+
         return jsonify({
-            'message': 'Threat simulated and saved to database',
+            'message': 'Threat simulated and saved',
             'threat': threat_data
         }), 200
+
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
