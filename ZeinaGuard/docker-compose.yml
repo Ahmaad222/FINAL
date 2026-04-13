@@ -1,6 +1,7 @@
 version: "3.9"
 
 services:
+  # --- قاعدة البيانات (TimescaleDB) ---
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: zeinaguard_postgres
@@ -17,13 +18,15 @@ services:
       - ./scripts/init-timescale.sql:/docker-entrypoint-initdb.d/02-timescale.sql
     networks:
       - zeinaguard_network
+    # الاختبار الصحي: التأكد أن قاعدة البيانات جاهزة فعلياً
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-zeinaguard_user} -d ${DB_NAME:-zeinaguard_db}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
     restart: unless-stopped
 
+  # --- نظام التخزين المؤقت (Redis) ---
   redis:
     image: redis:7-alpine
     container_name: zeinaguard_redis
@@ -41,6 +44,7 @@ services:
       retries: 5
     restart: unless-stopped
 
+  # --- الباك اند (Flask) ---
   flask-backend:
     build:
       context: .
@@ -60,33 +64,23 @@ services:
       - ./backend:/app:ro
     networks:
       - zeinaguard_network
-
-    # 🔥 أهم تعديل هنا
+    # هنا يكمن الحل: الانتظار حتى تصبح الخدمات healthy
     depends_on:
-      - postgres
-      - redis
-
-    command: >
-      sh -c "
-      echo '⏳ Waiting for Postgres...';
-      sleep 10;
-      until nc -z postgres 5432; do
-        echo '❌ Postgres not ready yet... retrying';
-        sleep 2;
-      done;
-      echo '✅ Postgres is ready!';
-      python app.py
-      "
-
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # تشغيل مباشر بدون سكريبتات انتظار خارجية
+    command: python app.py
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 20s
-
     restart: unless-stopped
 
+  # --- الفرونت اند (Next.js) ---
   next-frontend:
     build:
       context: .
@@ -105,9 +99,11 @@ services:
     networks:
       - zeinaguard_network
     depends_on:
-      - flask-backend
+      flask-backend:
+        condition: service_healthy
     restart: unless-stopped
 
+  # --- أداة إدارة قاعدة البيانات (Optional) ---
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: zeinaguard_pgadmin
@@ -121,7 +117,8 @@ services:
     networks:
       - zeinaguard_network
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
