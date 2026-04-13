@@ -12,6 +12,7 @@ SQLAlchemy==2.0.23
 python-dotenv==1.0.0
 redis==5.0.1
 gunicorn==21.2.0
+eventlet==0.33.3   # 🔥 مهم جدًا
 
 # =========================
 # Sensor & Monitoring
