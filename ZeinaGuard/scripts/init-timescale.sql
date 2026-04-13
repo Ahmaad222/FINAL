@@ -6,32 +6,40 @@ SELECT 'Enabling TimescaleDB Extension...' AS info;
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
 SELECT 'Converting tables to hypertables...' AS info;
--- Convert threat_events to hypertable (time-series optimized for threat detection)
+-- Convert threat_events to hypertable
 SELECT create_hypertable('threat_events', 'time', if_not_exists => TRUE);
 
--- Convert sensor_health to hypertable (time-series optimized for sensor monitoring)
+-- Convert sensor_health to hypertable
 SELECT create_hypertable('sensor_health', 'created_at', if_not_exists => TRUE);
 
--- Set up automatic data compression for old data (> 7 days)
-SELECT add_compression_policy('threat_events', INTERVAL '7 days', if_not_exists => TRUE);
-SELECT add_compression_policy('sensor_health', INTERVAL '7 days', if_not_exists => TRUE);
-
--- Set up automatic chunk interval (1 day for threat data)
+-----------------------------------------------------------
+-- 1. تفعيل الضغط أولاً (CRITICAL: Must happen before policies)
+-----------------------------------------------------------
 ALTER TABLE threat_events SET (
     timescaledb.compress,
-    timescaledb.compress_orderby = 'threat_id, sensor_id',
-    timescaledb.compress_segmentby = 'threat_id'
+    timescaledb.compress_orderby = 'time DESC',
+    timescaledb.compress_segmentby = 'threat_id, sensor_id'
 );
 
 ALTER TABLE sensor_health SET (
     timescaledb.compress,
-    timescaledb.compress_orderby = 'sensor_id',
+    timescaledb.compress_orderby = 'created_at DESC',
     timescaledb.compress_segmentby = 'sensor_id'
 );
 
--- Create continuous aggregates for fast analytics queries
--- Daily threat summary (updates automatically)
-CREATE MATERIALIZED VIEW IF NOT EXISTS threat_events_daily AS
+-----------------------------------------------------------
+-- 2. إضافة سياسات الضغط (Compression Policies)
+-----------------------------------------------------------
+-- Set up automatic data compression for old data (> 7 days)
+SELECT add_compression_policy('threat_events', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('sensor_health', INTERVAL '7 days', if_not_exists => TRUE);
+
+-----------------------------------------------------------
+-- 3. الجداول المحسنة للتقارير (Continuous Aggregates)
+-----------------------------------------------------------
+-- Daily threat summary
+CREATE MATERIALIZED VIEW IF NOT EXISTS threat_events_daily 
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 day', time) as bucket,
     threat_id,
@@ -43,8 +51,9 @@ SELECT
 FROM threat_events
 GROUP BY bucket, threat_id, sensor_id;
 
--- Hourly threat summary (for dashboards)
-CREATE MATERIALIZED VIEW IF NOT EXISTS threat_events_hourly AS
+-- Hourly threat summary
+CREATE MATERIALIZED VIEW IF NOT EXISTS threat_events_hourly 
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 hour', time) as bucket,
     threat_id,
@@ -55,7 +64,8 @@ FROM threat_events
 GROUP BY bucket, threat_id, sensor_id;
 
 -- Sensor health daily summary
-CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_health_daily AS
+CREATE MATERIALIZED VIEW IF NOT EXISTS sensor_health_daily 
+WITH (timescaledb.continuous) AS
 SELECT
     time_bucket('1 day', created_at) as bucket,
     sensor_id,
@@ -66,7 +76,9 @@ SELECT
 FROM sensor_health
 GROUP BY bucket, sensor_id;
 
--- Create refresh policies for continuous aggregates
+-----------------------------------------------------------
+-- 4. سياسات التحديث (Refresh Policies)
+-----------------------------------------------------------
 SELECT add_continuous_aggregate_policy('threat_events_daily',
     start_offset => INTERVAL '1 month',
     end_offset => INTERVAL '1 hour',
@@ -85,16 +97,22 @@ SELECT add_continuous_aggregate_policy('sensor_health_daily',
     schedule_interval => INTERVAL '1 hour',
     if_not_exists => TRUE);
 
--- Create retention policy (keep data for 90 days)
+-----------------------------------------------------------
+-- 5. سياسات مسح البيانات القديمة (Retention Policies)
+-----------------------------------------------------------
 SELECT add_retention_policy('threat_events', INTERVAL '90 days', if_not_exists => TRUE);
 SELECT add_retention_policy('sensor_health', INTERVAL '90 days', if_not_exists => TRUE);
 
--- Create useful indexes for time-series queries
+-----------------------------------------------------------
+-- 6. الفهارس الإضافية (Extra Indexes)
+-----------------------------------------------------------
 CREATE INDEX IF NOT EXISTS threat_events_threat_time ON threat_events (threat_id, time DESC);
 CREATE INDEX IF NOT EXISTS threat_events_sensor_time ON threat_events (sensor_id, time DESC);
 CREATE INDEX IF NOT EXISTS sensor_health_sensor_time ON sensor_health (sensor_id, created_at DESC);
 
--- Grant necessary permissions to application user
+-----------------------------------------------------------
+-- 7. الصلاحيات (Permissions)
+-----------------------------------------------------------
 GRANT ALL ON ALL TABLES IN SCHEMA public TO zeinaguard_user;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO zeinaguard_user;
 GRANT ALL ON ALL FUNCTIONS IN SCHEMA public TO zeinaguard_user;
