@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import importlib.util
+import shutil
 
 # --------------------------------
 # 📦 Auto Dependency Handler
@@ -12,7 +13,8 @@ DEPENDENCIES = {
     "websocket-client": "websocket",
     "requests": "requests",
     "rich": "rich",
-    "readchar": "readchar"
+    "readchar": "readchar",
+    "mac-vendor-lookup": "mac_vendor_lookup"
 }
 
 def ensure_dependencies():
@@ -21,7 +23,6 @@ def ensure_dependencies():
         if importlib.util.find_spec(module) is None:
             print(f"Missing dependency: {package} → installing...")
             try:
-                # Use sys.executable to ensure we install to the current environment (venv or system)
                 subprocess.check_call([sys.executable, "-m", "pip", "install", package], 
                                       stdout=subprocess.DEVNULL, 
                                       stderr=subprocess.STDOUT)
@@ -46,27 +47,39 @@ from detection.threat_manager import ThreatManager
 from prevention.response_engine import ResponseEngine
 from communication.ws_client import WSClient
 from communication.api_client import APIClient
-
-# 🔥 Terminal UI
 from ui.terminal_ui import run_terminal_ui
-
-
-import config # Import config first to allow runtime modification
+import config
 
 def main():
     # --------------------------------
-    # 🛠️ Command Line Arguments (Interface)
+    # 🛠️ DEBUG_RESET Check (Part 3)
+    # --------------------------------
+    if os.getenv("DEBUG_RESET", "false").lower() == "true":
+        print("[DEBUG] 🧹 DEBUG_RESET is true. Clearing old logs...")
+        log_dir = "/app/data_logs" if os.path.exists("/app") else "data_logs"
+        if os.path.exists(log_dir):
+            try:
+                for filename in os.listdir(log_dir):
+                    file_path = os.path.join(log_dir, filename)
+                    if os.path.isfile(file_path) or os.path.islink(file_path):
+                        os.unlink(file_path)
+                    elif os.path.isdir(file_path):
+                        shutil.rmtree(file_path)
+                print("[DEBUG] ✅ Logs cleared.")
+            except Exception as e:
+                print(f"[DEBUG] ❌ Error clearing logs: {e}")
+
+    # --------------------------------
+    # 🛠️ Command Line Arguments
     # --------------------------------
     if len(sys.argv) > 1:
         provided_iface = sys.argv[1]
         print(f"🔧 Using CLI provided interface: {provided_iface}")
         config.INTERFACE = provided_iface
-    else:
-        print(f"ℹ️ No interface provided via CLI, using config default: {config.INTERFACE}")
 
     # Validate interface
     if os.name != 'nt' and not os.path.exists(f"/sys/class/net/{config.INTERFACE}"):
-        print(f"❌ Error: Interface '{config.INTERFACE}' not found on this system!")
+        print(f"❌ Error: Interface '{config.INTERFACE}' not found!")
         sys.exit(1)
 
     print("🚀 Starting ZeinaGuard Sensor...")
@@ -75,12 +88,12 @@ def main():
     # 🌐 Dynamic Backend Resolution
     # --------------------------------
     backend_url = config.BACKEND_URL
-    print(f"🔗 Target Backend: {backend_url}")
+    sensor_name = os.getenv("SENSOR_USERNAME", "sensor1") # Use as name
+    print(f"🔗 Target Backend: {backend_url} | Sensor Name: {sensor_name}")
 
     # --------------------------------
-    # Try Backend Authentication (with Retries)
+    # Try Backend Authentication
     # --------------------------------
-
     token = None
     ws = None
     
@@ -93,15 +106,15 @@ def main():
             token = api.authenticate_sensor()
 
             if token:
-                print(f"✅ Sensor authenticated with backend at {backend_url}")
-                ws = WSClient(backend_url=backend_url, token=token)
+                print(f"✅ Sensor authenticated with backend.")
+                ws = WSClient(backend_url=backend_url, token=token, sensor_name=sensor_name)
 
                 ws_thread = threading.Thread(
                     target=ws.connect_to_server,
                     daemon=True
                 )
                 ws_thread.start()
-                break # Success!
+                break 
             
             print(f"⚠️ Auth attempt {attempt}/{max_auth_retries} failed. Retrying in {retry_delay}s...")
             time.sleep(retry_delay)
@@ -111,12 +124,11 @@ def main():
             time.sleep(retry_delay)
     
     if not token:
-        print("❌ Failed to authenticate after multiple attempts. Running in OFFLINE MODE.")
+        print("❌ Failed to authenticate. Running in OFFLINE MODE.")
 
     # --------------------------------
-    # 🔥 Terminal UI Thread (Only if enabled)
+    # 🔥 Terminal UI Thread
     # --------------------------------
-
     if config.ENABLE_TUI:
         print("🖥️ Starting Terminal UI...")
         ui_thread = threading.Thread(
@@ -124,15 +136,11 @@ def main():
             daemon=True
         )
         ui_thread.start()
-    else:
-        print("📝 Running in NON-INTERACTIVE Mode (Logging only)")
 
     # --------------------------------
     # Threat Manager
     # --------------------------------
-
     threat_manager = ThreatManager()
-
     t1 = threading.Thread(
         target=threat_manager.start,
         daemon=True
@@ -142,9 +150,7 @@ def main():
     # --------------------------------
     # Response Engine
     # --------------------------------
-
     response_engine = ResponseEngine()
-
     t2 = threading.Thread(
         target=response_engine.start,
         daemon=True
@@ -154,9 +160,7 @@ def main():
     # --------------------------------
     # Monitoring (Sniffer)
     # --------------------------------
-
     print("📡 Starting wireless monitoring...")
-
     start_monitoring()
 
 

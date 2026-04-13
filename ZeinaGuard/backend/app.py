@@ -86,6 +86,24 @@ CORS(app, resources={
 # Initialize Database
 db.init_app(app)
 
+# --------------------------------
+# 🛠️ DEBUG_RESET Logic (Part 3)
+# --------------------------------
+def debug_reset_db():
+    with app.app_context():
+        if os.getenv("DEBUG_RESET", "false").lower() == "true":
+            print("[DEBUG] 🧹 DEBUG_RESET is true. Clearing DB tables...")
+            try:
+                # Clear specific tables to avoid full drop/create overhead
+                db.session.execute(text("TRUNCATE TABLE threats CASCADE;"))
+                db.session.execute(text("TRUNCATE TABLE network_topology CASCADE;"))
+                db.session.execute(text("TRUNCATE TABLE sensor_health CASCADE;"))
+                db.session.commit()
+                print("[DEBUG] ✅ Database tables cleared.")
+            except Exception as e:
+                db.session.rollback()
+                print(f"[DEBUG] ❌ Error resetting DB: {e}")
+
 # Initialize JWT
 auth_service = AuthService(app)
 
@@ -106,6 +124,7 @@ with app.app_context():
         # Apply schema fixes
         try:
             from fix_db_schema import fix_schema
+            from sqlalchemy import text
             fix_schema()
             print("[DB] Basic schema fixes applied")
             
@@ -113,6 +132,10 @@ with app.app_context():
             from migrate_timescale import migrate
             migrate()
             print("[DB] TimescaleDB migration applied successfully")
+            
+            # Run Debug Reset
+            debug_reset_db()
+            
         except ImportError as e:
             print(f"[DB] Warning: Migration script not found: {e}")
         except Exception as migration_error:

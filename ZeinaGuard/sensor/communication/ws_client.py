@@ -7,10 +7,11 @@ from core.event_bus import dashboard_queue
 
 class WSClient:
 
-    def __init__(self, backend_url=None, token=None):
+    def __init__(self, backend_url=None, token=None, sensor_name="sensor1"):
 
         self.backend_url = backend_url or "http://127.0.0.1:5000"
         self.token = token
+        self.sensor_name = sensor_name
 
         self.sio = socketio.Client(
             reconnection=True,
@@ -29,7 +30,7 @@ class WSClient:
             print(f"[WebSocket] 🟢 Connected to Backend at {self.backend_url}")
 
             self.sio.emit("sensor_register", {
-                "sensor_id": "sensor1"
+                "sensor_name": self.sensor_name
             })
 
         @self.sio.event
@@ -70,7 +71,7 @@ class WSClient:
                 ).start()
 
                 self.sio.wait()
-                break # If wait finishes gracefully, break loop
+                break 
 
             except Exception as e:
                 print(f"[WebSocket] ❌ Connection Error: {e}")
@@ -91,11 +92,11 @@ class WSClient:
                 if not self.sio.connected:
                     continue
 
-                # 🚀 Handle Enriched Network Scan Data (Part 7)
+                # 🚀 Handle Enriched Network Scan Data
                 if data.get("type") == "NETWORK_SCAN":
                     event = data.get("event", {})
                     payload = {
-                        "sensor_id": "sensor1",
+                        "sensor_name": self.sensor_name, # Part 7
                         "ssid": event.get("ssid"),
                         "bssid": event.get("bssid"),
                         "channel": event.get("channel"),
@@ -114,9 +115,7 @@ class WSClient:
                         "clients": event.get("clients", [])
                     }
                     
-                    # [DEBUG] Sent to backend (Part 7)
-                    print(f"[WS] Sent → backend: SSID={payload['ssid']} BSSID={payload['bssid']}")
-                    
+                    print(f"[WS] Sent Scan → backend: SSID={payload['ssid']} BSSID={payload['bssid']}")
                     self.sio.emit("network_scan", payload, callback=self._ack_callback)
                     continue
 
@@ -129,7 +128,7 @@ class WSClient:
                     "source_mac": event.get("bssid"),
                     "signal": event.get("signal"),
                     "severity": "HIGH",
-                    "sensor_id": "sensor1"
+                    "sensor_name": self.sensor_name # Part 7
                 }
 
                 print(f"[WS] Sending Threat → backend: {payload['ssid']}")
@@ -141,5 +140,4 @@ class WSClient:
             time.sleep(0.1)
 
     def _ack_callback(self, data=None):
-        """Callback for WebSocket ACKs (Part 7)"""
         print(f"[WS] ACK received from backend")
