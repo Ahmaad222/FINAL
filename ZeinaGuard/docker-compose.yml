@@ -1,5 +1,4 @@
 services:
-  # --- PostgreSQL (TimescaleDB) ---
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: zeinaguard_postgres
@@ -24,7 +23,6 @@ services:
       start_period: 30s
     restart: unless-stopped
 
-  # --- Redis ---
   redis:
     image: redis:7-alpine
     container_name: zeinaguard_redis
@@ -42,7 +40,6 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # --- Flask Backend ---
   flask-backend:
     build:
       context: .
@@ -69,14 +66,13 @@ services:
         condition: service_healthy
     command: python app.py
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 60s
     restart: unless-stopped
 
-  # --- Next.js Frontend ---
   next-frontend:
     build:
       context: .
@@ -99,12 +95,11 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # --- PgAdmin ---
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: zeinaguard_pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.local
+      PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.com
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password_change_me}
     ports:
       - "5050:80"
