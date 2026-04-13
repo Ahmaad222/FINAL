@@ -9,7 +9,7 @@ class WSClient:
 
     def __init__(self, backend_url=None, token=None):
 
-        self.backend_url = backend_url or "http://192.168.201.130:8000"
+        self.backend_url = backend_url or "http://127.0.0.1:5000"
         self.token = token
 
         self.sio = socketio.Client(
@@ -91,7 +91,7 @@ class WSClient:
                 if not self.sio.connected:
                     continue
 
-                # 🚀 Handle Enriched Network Scan Data
+                # 🚀 Handle Enriched Network Scan Data (Part 7)
                 if data.get("type") == "NETWORK_SCAN":
                     event = data.get("event", {})
                     payload = {
@@ -106,13 +106,18 @@ class WSClient:
                         "manufacturer": event.get("manufacturer"),
                         "uptime": event.get("uptime"),
                         "raw_beacon": event.get("raw_beacon"),
+                        "fingerprint": event.get("fingerprint"),
                         "elapsed_time": event.get("elapsed_time"),
                         "timestamp": event.get("timestamp"),
                         "status": data.get("status"),
-                        "score": data.get("score")
+                        "score": data.get("score"),
+                        "clients": event.get("clients", [])
                     }
-                    self.sio.emit("network_scan", payload)
-                    print(f"[WebSocket] 📡 Network Data Sent: {payload['ssid']} ({payload['bssid']})")
+                    
+                    # [DEBUG] Sent to backend (Part 7)
+                    print(f"[WS] Sent → backend: SSID={payload['ssid']} BSSID={payload['bssid']}")
+                    
+                    self.sio.emit("network_scan", payload, callback=self._ack_callback)
                     continue
 
                 # 🛑 Existing Threat Logic
@@ -123,14 +128,18 @@ class WSClient:
                     "ssid": event.get("ssid"),
                     "source_mac": event.get("bssid"),
                     "signal": event.get("signal"),
-                    "severity": "HIGH"
+                    "severity": "HIGH",
+                    "sensor_id": "sensor1"
                 }
 
-                self.sio.emit("new_threat", payload)
-
-                print(f"[WebSocket] 🚀 Threat Sent: {payload['ssid']}")
+                print(f"[WS] Sending Threat → backend: {payload['ssid']}")
+                self.sio.emit("new_threat", payload, callback=self._ack_callback)
 
             except Exception as e:
                 print(f"[WebSocket] Listener Error: {e}")
 
             time.sleep(0.1)
+
+    def _ack_callback(self, data=None):
+        """Callback for WebSocket ACKs (Part 7)"""
+        print(f"[WS] ACK received from backend")

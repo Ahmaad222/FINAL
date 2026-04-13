@@ -4,3 +4,4 @@ websocket-client
 requests
 rich
 readchar
+mac-vendor-lookup

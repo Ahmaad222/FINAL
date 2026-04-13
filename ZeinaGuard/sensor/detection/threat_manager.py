@@ -25,49 +25,88 @@ class ThreatManager:
         self.last_ui_update = {}
         self.ui_interval = 1.0   # ثانية
         
-        # 🚀 Logging Setup
-        self.log_dir = "data_logs"
-        self.session_id = datetime.now().strftime("%Y%m%d_%HH%MM%SS")
-        self.csv_file = os.path.join(self.log_dir, f"scan_{self.session_id}.csv")
-        self.json_file = os.path.join(self.log_dir, f"scan_{self.session_id}.json")
+        # 🚀 Logging Setup (Part 1 & 4)
+        # In Docker, we use /app/data_logs. Locally, we might use data_logs.
+        base_log_dir = "/app/data_logs" if os.path.exists("/app") else "data_logs"
+        self.session_id = datetime.now().strftime("session_%Y%m%d_%H%M%S")
+        self.session_dir = os.path.join(base_log_dir, self.session_id)
+        
+        self.networks_csv = os.path.join(self.session_dir, "networks.csv")
+        self.networks_json = os.path.join(self.session_dir, "networks.json")
+        self.clients_csv = os.path.join(self.session_dir, "clients.csv")
+        
         self._init_logs()
 
     def _init_logs(self):
-        """Initializes the CSV file with headers."""
-        if not os.path.exists(self.log_dir):
-            os.makedirs(self.log_dir)
+        """Initializes the session folder and CSV files with headers."""
+        if not os.path.exists(self.session_dir):
+            try:
+                os.makedirs(self.session_dir, exist_ok=True)
+                print(f"[LOG] 📂 Created session folder: {self.session_dir}")
+            except Exception as e:
+                print(f"[LOG] ❌ Failed to create log directory: {e}")
             
+        # Networks CSV Headers
         headers = [
-            "SSID", "BSSID", "Channel", "PWR", "Distance", 
-            "Auth", "WPS", "Manufacturer", "Uptime", "Beacons", "Timestamp"
+            "Timestamp", "SSID", "BSSID", "Channel", "Signal", "Distance", 
+            "Auth", "WPS", "Manufacturer", "Uptime", "Fingerprint", "ClientsCount", "Elapsed"
         ]
-        with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(headers)
+        try:
+            with open(self.networks_csv, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                
+            # Clients CSV Headers
+            with open(self.clients_csv, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Timestamp", "ClientMAC", "AP_BSSID", "Vendor"])
+        except Exception as e:
+            print(f"[LOG] ❌ Failed to initialize CSV files: {e}")
 
     def log_to_file(self, event):
-        """Logs the network event to CSV and JSON."""
-        # CSV Logging
-        row = [
-            event.get("ssid"),
-            event.get("bssid"),
-            event.get("channel"),
-            event.get("signal"),
-            event.get("distance"),
-            event.get("auth"),
-            event.get("wps"),
-            event.get("manufacturer"),
-            event.get("uptime"),
-            event.get("raw_beacon"),
-            event.get("timestamp")
-        ]
-        with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(row)
-            
-        # JSON Logging (Append style)
-        with open(self.json_file, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(event) + "\n")
+        """Logs the network event to CSV and JSON (Part 4)."""
+        if not os.path.exists(self.session_dir): return
+
+        try:
+            # 1. Networks CSV
+            row = [
+                event.get("timestamp"),
+                event.get("ssid"),
+                event.get("bssid"),
+                event.get("channel"),
+                event.get("signal"),
+                event.get("distance"),
+                event.get("auth"),
+                event.get("wps"),
+                event.get("manufacturer"),
+                event.get("uptime"),
+                event.get("fingerprint"),
+                event.get("clients_count"),
+                event.get("elapsed_time")
+            ]
+            with open(self.networks_csv, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(row)
+                
+            # 2. Networks JSON (one object per line for easy streaming/reading)
+            with open(self.networks_json, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(event) + "\n")
+                
+            # 3. Clients CSV (if any clients found)
+            clients = event.get("clients", [])
+            if clients:
+                with open(self.clients_csv, 'a', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    for client in clients:
+                        writer.writerow([
+                            event.get("timestamp"),
+                            client.get("mac"),
+                            event.get("bssid"),
+                            client.get("vendor")
+                        ])
+        except Exception as e:
+            # print(f"[LOG] ❌ Error writing to log files: {e}")
+            pass
 
     # ---------------------------
     # Update UI
@@ -124,7 +163,7 @@ class ThreatManager:
                 self.handle_removal(event["bssid"])
                 continue
 
-            # 🚀 Log Advanced Data
+            # 🚀 Log Advanced Data (Part 4)
             self.log_to_file(event)
 
             # -----------------------
