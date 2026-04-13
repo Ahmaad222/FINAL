@@ -2,7 +2,7 @@
 import os
 
 # Default values - can be overridden by Environment variables
-INTERFACE = os.getenv("SENSOR_INTERFACE", "wlan0")
+INTERFACE = os.getenv("SENSOR_INTERFACE", "wlx002e2dc0346b")
 RUN_MODE = os.getenv("RUN_MODE", "LOCAL")
 
 if RUN_MODE == "LOCAL":
