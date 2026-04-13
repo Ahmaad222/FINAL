@@ -4,9 +4,6 @@ Flask Backend - Detection Engine and API Server
 """
 
 import os
-import sys
-import subprocess
-import importlib.util
 from datetime import timedelta
 from flask import Flask, jsonify
 from flask_cors import CORS
@@ -17,36 +14,6 @@ from werkzeug.security import generate_password_hash
 from routes import register_blueprints
 from websocket_server import init_socketio
 from models import db, User
-
-# --------------------------------
-# 📦 Runtime Dependency Checker
-# --------------------------------
-BACKEND_DEPENDENCIES = {
-    "Flask": "flask",
-    "Flask-CORS": "flask_cors",
-    "Flask-JWT-Extended": "flask_jwt_extended",
-    "Flask-SQLAlchemy": "flask_sqlalchemy",
-    "Flask-SocketIO": "flask_socketio",
-    "python-dotenv": "dotenv",
-    "redis": "redis",
-    "psycopg2-binary": "psycopg2",
-    "scapy": "scapy"
-}
-
-def ensure_dependencies():
-    for package, module in BACKEND_DEPENDENCIES.items():
-        if importlib.util.find_spec(module) is None:
-            print(f"Missing dependency: {package} → installing...")
-            try:
-                subprocess.check_call(
-                    [sys.executable, "-m", "pip", "install", package],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.STDOUT
-                )
-            except Exception as e:
-                print(f"❌ Failed to install {package}: {e}")
-
-ensure_dependencies()
 
 # Load environment variables
 load_dotenv()
@@ -69,14 +36,9 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 # --- Extensions ---
 db.init_app(app)
 JWTManager(app)  # ✅ مهم تضيف ده عشان JWT يشتغل
-socketio = init_socketio(app)
-app.socketio = socketio
-
-# --- Register Routes ---
-register_blueprints(app)
 
 # --------------------------------
-# 🛡️ Setup DB AFTER START
+# 🛡️ Setup DB Initialization
 # --------------------------------
 def setup_initial_data():
     with app.app_context():
@@ -106,13 +68,15 @@ def setup_initial_data():
         except Exception as e:
             print(f"[DB ERROR] {e}")
 
-# --------------------------------
-# 🔥 Run setup AFTER first request
-# --------------------------------
-@app.before_first_request
-def initialize():
-    print("[INIT] Running DB setup...")
-    setup_initial_data()
+# Call DB setup immediately after app and extensions are initialized
+setup_initial_data()
+
+# Initialize SocketIO after DB setup
+socketio = init_socketio(app)
+app.socketio = socketio
+
+# --- Register Routes ---
+register_blueprints(app)
 
 # --------------------------------
 # Routes
