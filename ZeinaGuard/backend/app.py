@@ -12,13 +12,12 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from dotenv import load_dotenv
-from werkzeug.security import generate_password_hash # لإضافة التشفير الصحيح
+from werkzeug.security import generate_password_hash
 
-# استيراد الملفات المحلية
 from auth import AuthService
 from routes import register_blueprints
 from websocket_server import init_socketio
-from models import db, User  # استيراد User لإنشاء الأدمن
+from models import db, User
 
 # --------------------------------
 # 📦 Runtime Dependency Checker
@@ -40,8 +39,8 @@ def ensure_dependencies():
         if importlib.util.find_spec(module) is None:
             print(f"Missing dependency: {package} → installing...")
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", package], 
-                                      stdout=subprocess.DEVNULL, 
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package],
+                                      stdout=subprocess.DEVNULL,
                                       stderr=subprocess.STDOUT)
             except Exception as e:
                 print(f"❌ Failed to install {package}: {e}")
@@ -63,29 +62,29 @@ app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# --- CORS Setup ---
+# --- CORS ---
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-# --- Initialize Extensions ---
+# --- Extensions ---
 db.init_app(app)
 auth_service = AuthService(app)
 socketio = init_socketio(app)
-app.socketio = socketio 
+app.socketio = socketio
 
 register_blueprints(app)
 
 # --------------------------------
-# 🛡️ Automatic Admin Creation
+# 🛡️ Setup DB AFTER START
 # --------------------------------
 def setup_initial_data():
     with app.app_context():
         try:
             db.create_all()
-            # التحقق من وجود الأدمن أو تحديث باسورده
+
             admin_user = User.query.filter_by(username='admin').first()
-            
+
             if not admin_user:
-                print("[DB] 🆕 Admin not found. Creating default admin...")
+                print("[DB] 🆕 Creating admin...")
                 new_admin = User(
                     username='admin',
                     email='admin@zeinaguard.local',
@@ -95,29 +94,38 @@ def setup_initial_data():
                 )
                 db.session.add(new_admin)
                 db.session.commit()
-                print("[DB] ✅ Default admin created (admin/admin123)")
+                print("[DB] ✅ Admin created")
             else:
-                # تحديث الـ Hash لضمان التوافق مع المكتبة الحالية
                 admin_user.password_hash = generate_password_hash('admin123')
                 admin_user.is_active = True
                 db.session.commit()
-                print("[DB] 🔄 Admin account verified and password hash updated.")
-                
+                print("[DB] 🔄 Admin updated")
+
         except Exception as e:
-            print(f"[DB] Error during startup: {e}")
+            print(f"[DB ERROR] {e}")
 
-# تنفيذ التهيئة
-setup_initial_data()
+# --------------------------------
+# 🔥 Run setup AFTER first request
+# --------------------------------
+@app.before_first_request
+def initialize():
+    print("[INIT] Running DB setup...")
+    setup_initial_data()
 
-# --- Routes ---
+# --------------------------------
+# Routes
+# --------------------------------
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'healthy', 'service': 'zeinaguard-backend'}), 200
+    return jsonify({'status': 'healthy'}), 200
 
 @app.route('/', methods=['GET'])
 def root():
-    return jsonify({'service': 'ZeinaGuard Pro Backend', 'status': 'running'}), 200
+    return jsonify({'service': 'ZeinaGuard Backend'}), 200
 
+# --------------------------------
+# Run
+# --------------------------------
 if __name__ == '__main__':
     port = int(os.getenv('FLASK_PORT', 5000))
     socketio.run(app, host='0.0.0.0', port=port, allow_unsafe_werkzeug=True)

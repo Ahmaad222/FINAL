@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install system dependencies for packet analysis
+# Install system dependencies
 RUN apt-get update && apt-get install -y \
     gcc \
     libpcap-dev \
@@ -12,14 +12,14 @@ RUN apt-get update && apt-get install -y \
 # Copy requirements
 COPY backend/requirements.txt .
 
-# Install Python dependencies
+# Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy Flask app
+# Copy app
 COPY backend/ .
 
 # Expose port
 EXPOSE 5000
 
-# Run Flask app
-CMD ["flask", "run", "--host=0.0.0.0"]
+# ✅ Run with gunicorn (FIX)
+CMD ["gunicorn", "-k", "eventlet", "-w", "1", "-b", "0.0.0.0:5000", "app:app"]
