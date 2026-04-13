@@ -9,7 +9,6 @@ services:
       POSTGRES_USER: zeinaguard_user
       POSTGRES_PASSWORD: secure_password_change_me
       POSTGRES_DB: zeinaguard_db
-      POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=timescaledb"
     ports:
       - "5432:5432"
     volumes:
@@ -19,10 +18,10 @@ services:
     networks:
       - zeinaguard_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zeinaguard_user -d zeinaguard_db"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U zeinaguard_user -d zeinaguard_db || exit 1"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
   # Redis for message queue and caching
   redis:

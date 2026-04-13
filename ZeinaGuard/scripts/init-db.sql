@@ -1,6 +1,8 @@
 -- ZeinaGuard Pro Database Schema
 -- Core tables for WIPS system
 
+SELECT 'Initializing ZeinaGuard Database Schema...' AS info;
+
 -- Users and Authentication
 CREATE TABLE IF NOT EXISTS users (
     id SERIAL PRIMARY KEY,
@@ -59,7 +61,7 @@ CREATE TABLE IF NOT EXISTS sensors (
 
 -- Sensor Health (Time-Series Data)
 CREATE TABLE IF NOT EXISTS sensor_health (
-    id SERIAL PRIMARY KEY,
+    id SERIAL,
     sensor_id INTEGER REFERENCES sensors(id) ON DELETE CASCADE,
     status VARCHAR(50), -- online, offline, degraded
     signal_strength INTEGER, -- 0-100
@@ -67,7 +69,8 @@ CREATE TABLE IF NOT EXISTS sensor_health (
     memory_usage FLOAT,
     uptime INTEGER, -- in seconds
     last_heartbeat TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, created_at)
 );
 
 -- Network Topology

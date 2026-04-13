@@ -1,9 +1,11 @@
 -- TimescaleDB Extension and Hypertable Configuration
 -- This script converts regular tables into hypertables for optimal time-series performance
 
+SELECT 'Enabling TimescaleDB Extension...' AS info;
 -- Ensure TimescaleDB extension is created
 CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
 
+SELECT 'Converting tables to hypertables...' AS info;
 -- Convert threat_events to hypertable (time-series optimized for threat detection)
 SELECT create_hypertable('threat_events', 'time', if_not_exists => TRUE);
 
