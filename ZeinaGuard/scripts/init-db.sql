@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS threats (
     target_mac MACADDR,
     ssid VARCHAR(255),
     detected_by INTEGER REFERENCES sensors(id),
+    created_by INTEGER REFERENCES users(id),
     description TEXT,
     is_resolved BOOLEAN DEFAULT false,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
