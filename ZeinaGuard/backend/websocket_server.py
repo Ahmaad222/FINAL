@@ -10,7 +10,8 @@ from datetime import datetime
 from flask_socketio import SocketIO, emit
 from redis import Redis
 from flask import request, current_app
-from models import db, Threat, Sensor
+from sqlalchemy.orm.attributes import flag_modified
+from models import db, Threat, Sensor, NetworkTopology
 
 # --------------------------------
 # Redis Connection (optional)
@@ -24,15 +25,12 @@ except Exception:
     redis_client = None
 
 # --------------------------------
-# Connected Clients
+# State & Caching
 # --------------------------------
 connected_clients = {}
-
-# --------------------------------
-# Deduplication Cache
-# --------------------------------
 LAST_SEEN_CACHE = {}
 COOLDOWN = 60  # seconds
+cache_lock = threading.Lock()  # Thread-safe lock for dictionary
 
 # --------------------------------
 # Cache Cleanup Thread
@@ -40,19 +38,19 @@ COOLDOWN = 60  # seconds
 def cleanup_cache():
     while True:
         now = time.time()
-        for bssid in list(LAST_SEEN_CACHE.keys()):
-            if now - LAST_SEEN_CACHE[bssid] > 120:
+        with cache_lock:
+            # Safely identify keys to remove without altering dict during iteration
+            expired_keys = [bssid for bssid, timestamp in LAST_SEEN_CACHE.items() if now - timestamp > 120]
+            for bssid in expired_keys:
                 del LAST_SEEN_CACHE[bssid]
         time.sleep(30)
 
 threading.Thread(target=cleanup_cache, daemon=True).start()
 
-
 # --------------------------------
 # Initialize SocketIO
 # --------------------------------
 def init_socketio(app):
-
     socketio = SocketIO(
         app,
         cors_allowed_origins="*",
@@ -64,13 +62,10 @@ def init_socketio(app):
     # ----------------------------
     @socketio.on("connect")
     def handle_connect():
-
         client_id = request.sid
-
         connected_clients[client_id] = {
             "connected_at": datetime.now().isoformat()
         }
-
         print(f"[WebSocket] 🟢 Client Connected: {client_id}")
 
     # ----------------------------
@@ -78,12 +73,9 @@ def init_socketio(app):
     # ----------------------------
     @socketio.on("disconnect")
     def handle_disconnect():
-
         client_id = request.sid
-
         if client_id in connected_clients:
             del connected_clients[client_id]
-
         print(f"[WebSocket] 🔴 Client Disconnected: {client_id}")
 
     # ----------------------------
@@ -91,31 +83,35 @@ def init_socketio(app):
     # ----------------------------
     @socketio.on("sensor_register")
     def handle_sensor_register(data):
-
         sensor_id = data.get("sensor_id")
-
         print(f"[WebSocket] 🛰️ Sensor Registered: {sensor_id}")
-
         emit("registration_success", {
             "status": "registered",
             "sensor_id": sensor_id
         })
 
     # ----------------------------
+    # Receive New Threat
+    # ----------------------------
+    @socketio.on("new_threat")
+    def handle_new_threat(payload):
+        # Listener for the "new_threat" event emitted by the client
+        print(f"[WebSocket] 🚨 New Threat Received: {payload.get('threat_type')} from {payload.get('source_mac')}")
+        # Broadcast to dashboard clients
+        socketio.emit("threat_event", payload, broadcast=True)
+
+    # ----------------------------
     # Receive Network Scan Data
     # ----------------------------
     @socketio.on("network_scan")
     def handle_network_scan(payload):
-
         sensor_name = payload.get("sensor_id", "sensor1")
+        bssid = payload.get("bssid")
+        
+        print(f"[RECEIVED] SSID={payload.get('ssid')} BSSID={bssid} SENSOR={sensor_name}")
 
-        print(f"[RECEIVED] SSID={payload.get('ssid')} "
-              f"BSSID={payload.get('bssid')} SENSOR={sensor_name}")
-
-        with app.app_context():
+        with current_app.app_context():  # Replaced app with current_app
             try:
-                from models import NetworkTopology
-
                 # ----------------------------
                 # Sensor Handling
                 # ----------------------------
@@ -129,15 +125,12 @@ def init_socketio(app):
                 # ----------------------------
                 # Deduplication Logic
                 # ----------------------------
-                bssid = payload.get("bssid")
                 now = time.time()
-
-                if bssid in LAST_SEEN_CACHE:
-                    if now - LAST_SEEN_CACHE[bssid] < COOLDOWN:
+                with cache_lock:
+                    if bssid in LAST_SEEN_CACHE and (now - LAST_SEEN_CACHE[bssid] < COOLDOWN):
                         print(f"[SKIP] Duplicate scan ignored for {bssid}")
                         return
-
-                LAST_SEEN_CACHE[bssid] = now
+                    LAST_SEEN_CACHE[bssid] = now
 
                 # ----------------------------
                 # Topology Update
@@ -181,7 +174,9 @@ def init_socketio(app):
                 if not found:
                     current_networks.append(network_info)
 
+                # Explicitly re-assign and flag as modified for SQLAlchemy JSON columns
                 topology.discovered_networks = current_networks
+                flag_modified(topology, "discovered_networks")
 
                 # ----------------------------
                 # Save History (Controlled)
@@ -221,7 +216,7 @@ def init_socketio(app):
                 # ----------------------------
                 # Broadcast
                 # ----------------------------
-                socketio.emit("new_scan_data", payload)
+                socketio.emit("new_scan_data", payload, broadcast=True)
 
             except Exception as e:
                 print(f"[DB-FAILURE] ❌ Error: {e}")
@@ -229,24 +224,20 @@ def init_socketio(app):
 
     return socketio
 
-
 # --------------------------------
 # Broadcast Threat Event
 # --------------------------------
 def broadcast_threat_event(threat_data):
-
-    socketio = current_app.socketio
-    socketio.emit("threat_event", threat_data)
-
+    # Depending on how the app is structured, pulling socketio from extensions is safer 
+    # if it's called outside the socketio context.
+    socketio = current_app.extensions.get('socketio') or current_app.socketio
+    socketio.emit("threat_event", threat_data, broadcast=True)
     print("[WebSocket] 📡 Threat broadcasted")
-
 
 # --------------------------------
 # Broadcast Sensor Status
 # --------------------------------
 def broadcast_sensor_status(sensor_data):
-
-    socketio = current_app.socketio
-    socketio.emit("sensor_status", sensor_data)
-
+    socketio = current_app.extensions.get('socketio') or current_app.socketio
+    socketio.emit("sensor_status", sensor_data, broadcast=True)
     print("[WebSocket] 📡 Sensor status broadcasted")

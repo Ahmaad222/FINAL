@@ -1,14 +1,10 @@
 import socketio
 import threading
 import time
-
 from core.event_bus import dashboard_queue
 
-
 class WSClient:
-
     def __init__(self, backend_url=None, token=None):
-
         self.backend_url = backend_url or "http://192.168.201.130:8000"
         self.token = token
 
@@ -19,41 +15,48 @@ class WSClient:
         )
 
         self.is_running = False
+        self.thread = None
 
         # -----------------------------
         # Socket Events
         # -----------------------------
+        self.sio.on("connect", self._on_connect)
+        self.sio.on("disconnect", self._on_disconnect)
+        self.sio.on("connect_error", self._on_connect_error)
+        self.sio.on("registration_success", self._on_registration_success)
 
-        @self.sio.event
-        def connect():
-            print(f"[WebSocket] 🟢 Connected to Backend at {self.backend_url}")
+    def _on_connect(self):
+        print(f"[WebSocket] 🟢 Connected to Backend at {self.backend_url}")
+        self.sio.emit("sensor_register", {
+            "sensor_id": "sensor1"
+        })
 
-            self.sio.emit("sensor_register", {
-                "sensor_id": "sensor1"
-            })
+    def _on_disconnect(self):
+        print("[WebSocket] 🔴 Disconnected from server")
 
-        @self.sio.event
-        def disconnect():
-            print("[WebSocket] 🔴 Disconnected from server")
+    def _on_connect_error(self, data):
+        print(f"[WebSocket] ❌ Connection failed: {data}")
 
-        @self.sio.event
-        def connect_error(data):
-            print(f"[WebSocket] ❌ Connection failed: {data}")
-
-        @self.sio.on("registration_success")
-        def registration_success(data):
-            print(f"[WebSocket] ✅ Sensor registered: {data}")
+    def _on_registration_success(self, data):
+        print(f"[WebSocket] ✅ Sensor registered: {data}")
 
     def connect_to_server(self):
-
         if not self.token:
             print("[WebSocket] ❌ Cannot start WS without token")
             return
 
-        while True:
+        self.is_running = True
+        
+        # Start listener thread before blocking with connect loop
+        self.thread = threading.Thread(
+            target=self._threat_listener,
+            daemon=True
+        )
+        self.thread.start()
+
+        while self.is_running:
             try:
                 print(f"[WebSocket] Connecting to {self.backend_url}...")
-
                 self.sio.connect(
                     self.backend_url,
                     headers={
@@ -61,34 +64,28 @@ class WSClient:
                     },
                     transports=["websocket"]
                 )
-
-                self.is_running = True
-
-                threading.Thread(
-                    target=self._threat_listener,
-                    daemon=True
-                ).start()
-
                 self.sio.wait()
-                break # If wait finishes gracefully, break loop
+                break  # If wait finishes gracefully, break loop
 
             except Exception as e:
                 print(f"[WebSocket] ❌ Connection Error: {e}")
                 print("[WebSocket] 🔄 Retrying in 5 seconds...")
                 time.sleep(5)
 
+    def stop(self):
+        """Gracefully stop the client and the listener thread."""
+        self.is_running = False
+        if self.sio.connected:
+            self.sio.disconnect()
+
     def _threat_listener(self):
-
         while self.is_running:
-
             try:
+                # Add timeout to avoid blocking indefinitely, allowing clean shutdown
+                # If you import standard queue, you can catch queue.Empty
+                data = dashboard_queue.get(timeout=1)
 
-                data = dashboard_queue.get()
-
-                if not data:
-                    continue
-
-                if not self.sio.connected:
+                if not data or not self.sio.connected:
                     continue
 
                 # 🚀 Handle Enriched Network Scan Data
@@ -117,7 +114,6 @@ class WSClient:
 
                 # 🛑 Existing Threat Logic
                 event = data.get("event", {})
-
                 payload = {
                     "threat_type": data.get("status"),
                     "ssid": event.get("ssid"),
@@ -127,10 +123,10 @@ class WSClient:
                 }
 
                 self.sio.emit("new_threat", payload)
-
-                print(f"[WebSocket] 🚀 Threat Sent: {payload['ssid']}")
+                print(f"[WebSocket] 🚀 Threat Sent: {payload.get('ssid', 'Unknown')}")
 
             except Exception as e:
-                print(f"[WebSocket] Listener Error: {e}")
+                # Expected when queue is empty during timeout
+                pass
 
             time.sleep(0.1)
