@@ -49,6 +49,7 @@ services:
       FLASK_APP: app.py
       FLASK_ENV: production
       FLASK_PORT: 5000
+      SOCKETIO_ASYNC_MODE: eventlet
       DATABASE_URL: postgresql://${DB_USER:-zeinaguard_user}:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/${DB_NAME:-zeinaguard_db}
       REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0
       JWT_SECRET_KEY: super_secure_very_long_secret_key_123456789_very_secure
@@ -64,9 +65,9 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: python app.py
+    command: gunicorn --worker-class eventlet --workers 1 --bind 0.0.0.0:5000 --timeout 120 app:app
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/ready')"]
       interval: 10s
       timeout: 5s
       retries: 10

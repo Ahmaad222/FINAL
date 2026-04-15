@@ -249,7 +249,7 @@ class NetworkScanEvent(db.Model):
 
     # Additional context
     reasons = db.Column(JSON)  # Why this was flagged (if applicable)
-    metadata = db.Column(JSON)  # Additional scan metadata
+    scan_metadata = db.Column('metadata', JSON)  # Additional scan metadata
 
     # Timestamp
     scanned_at = db.Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
