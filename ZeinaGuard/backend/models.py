@@ -8,7 +8,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import (
     String, Integer, Float, Boolean, Text, DateTime,
     LargeBinary, ForeignKey, JSON, UniqueConstraint,
-    Index, event
+    Index
 )
 from sqlalchemy.orm import relationship
 
@@ -101,8 +101,8 @@ class Sensor(db.Model):
     # Relationships
     health_records = relationship('SensorHealth', backref='sensor', cascade='all, delete-orphan')
     threats = relationship('Threat', backref='detecting_sensor')
-    network_data = relationship('NetworkTopology', backref='sensor', uselist=False)
     wifi_networks = relationship('WiFiNetwork', backref='sensor', cascade='all, delete-orphan')
+    network_data = relationship('NetworkTopology', backref='sensor', uselist=False)
 
     def __repr__(self):
         return f'<Sensor {self.name}>'
@@ -152,30 +152,37 @@ class WiFiNetwork(db.Model):
     frequency = db.Column(Integer)  # 2412, 5180, etc.
     signal_strength = db.Column(Integer)  # dBm
     encryption = db.Column(String(50))  # OPEN, WEP, WPA, WPA2, WPA3
+    clients_count = db.Column(Integer, default=0)
+    classification = db.Column(String(50), default='UNKNOWN')
+    risk_score = db.Column(Integer, default=0)
     auth_type = db.Column(String(50))
     wps_info = db.Column(JSON)  # WPS configuration if available
 
     # Additional metadata
     manufacturer = db.Column(String(255))  # OUI lookup result
     device_type = db.Column(String(50), default='AP')  # AP, Station, etc.
-    uptime_seconds = db.Column(Integer)  # Device uptime if available
+    uptime_seconds = db.Column(Integer, default=0)  # Device uptime if available
 
     # Deduplication counters
-    seen_count = db.Column(Integer, default=1)  # How many times this network was seen
+    seen_count = db.Column(Integer, default=1, nullable=False)  # How many times this network was seen
     first_seen = db.Column(DateTime, default=datetime.utcnow, nullable=False)
     last_seen = db.Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
     # Raw data for debugging
     raw_beacon = db.Column(Text)
+    raw_data = db.Column(JSON)
+    created_at = db.Column(DateTime, default=datetime.utcnow)
+    updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     # Indexes for efficient queries
     __table_args__ = (
         # Composite unique index for deduplication
-        UniqueConstraint('sensor_id', 'bssid', name='uq_sensor_bssid'),
+        UniqueConstraint('sensor_id', 'bssid', name='uq_wifi_networks_sensor_bssid'),
         # Index for time-based queries
-        Index('idx_wifi_networks_sensor_lastseen', 'sensor_id', 'last_seen'),
+        Index('idx_wifi_networks_sensor_last_seen', 'sensor_id', 'last_seen'),
         # Index for signal strength tracking
         Index('idx_wifi_networks_signal', 'signal_strength'),
+        Index('idx_wifi_networks_bssid', 'bssid'),
     )
 
     def __repr__(self):
@@ -198,11 +205,15 @@ class WiFiNetwork(db.Model):
             existing.channel = kwargs.get('channel', existing.channel)
             existing.frequency = kwargs.get('frequency', existing.frequency)
             existing.encryption = kwargs.get('encryption', existing.encryption)
+            existing.clients_count = kwargs.get('clients_count', existing.clients_count)
+            existing.classification = kwargs.get('classification', existing.classification)
+            existing.risk_score = kwargs.get('risk_score', existing.risk_score)
             existing.auth_type = kwargs.get('auth_type', existing.auth_type)
             existing.wps_info = kwargs.get('wps_info', existing.wps_info)
             existing.manufacturer = kwargs.get('manufacturer', existing.manufacturer)
             existing.uptime_seconds = kwargs.get('uptime_seconds', existing.uptime_seconds)
             existing.raw_beacon = kwargs.get('raw_beacon', existing.raw_beacon)
+            existing.raw_data = kwargs.get('raw_data', existing.raw_data)
             return existing, False
         else:
             # Create new record
@@ -214,11 +225,15 @@ class WiFiNetwork(db.Model):
                 channel=kwargs.get('channel'),
                 frequency=kwargs.get('frequency'),
                 encryption=kwargs.get('encryption', 'UNKNOWN'),
+                clients_count=kwargs.get('clients_count', 0),
+                classification=kwargs.get('classification', 'UNKNOWN'),
+                risk_score=kwargs.get('risk_score', 0),
                 auth_type=kwargs.get('auth_type'),
                 wps_info=kwargs.get('wps_info'),
                 manufacturer=kwargs.get('manufacturer'),
                 uptime_seconds=kwargs.get('uptime_seconds'),
-                raw_beacon=kwargs.get('raw_beacon')
+                raw_beacon=kwargs.get('raw_beacon'),
+                raw_data=kwargs.get('raw_data'),
             )
             session.add(network)
             return network, True

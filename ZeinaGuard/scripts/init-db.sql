@@ -73,6 +73,27 @@ CREATE TABLE IF NOT EXISTS sensor_health (
     PRIMARY KEY (id, created_at)
 );
 
+CREATE TABLE IF NOT EXISTS wifi_networks (
+    id SERIAL PRIMARY KEY,
+    sensor_id INTEGER NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+    ssid VARCHAR(255) NOT NULL DEFAULT 'Hidden',
+    bssid VARCHAR(17) NOT NULL,
+    channel INTEGER,
+    signal_strength INTEGER,
+    encryption VARCHAR(50),
+    clients_count INTEGER DEFAULT 0,
+    classification VARCHAR(50) DEFAULT 'UNKNOWN',
+    risk_score INTEGER DEFAULT 0,
+    uptime_seconds INTEGER NOT NULL DEFAULT 0,
+    seen_count INTEGER NOT NULL DEFAULT 1,
+    first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    raw_data JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_wifi_networks_sensor_bssid UNIQUE (sensor_id, bssid)
+);
+
 -- Network Topology
 CREATE TABLE IF NOT EXISTS network_topology (
     id SERIAL PRIMARY KEY,
@@ -204,6 +225,8 @@ CREATE INDEX idx_threats_severity ON threats(severity);
 CREATE INDEX idx_threats_sensor ON threats(detected_by);
 CREATE INDEX idx_sensor_health_sensor ON sensor_health(sensor_id);
 CREATE INDEX idx_sensor_health_created ON sensor_health(created_at);
+CREATE INDEX idx_wifi_networks_sensor_last_seen ON wifi_networks(sensor_id, last_seen);
+CREATE INDEX idx_wifi_networks_bssid ON wifi_networks(bssid);
 CREATE INDEX idx_alert_rules_enabled ON alert_rules(is_enabled);
 CREATE INDEX idx_alerts_threat ON alerts(threat_id);
 CREATE INDEX idx_incidents_status ON incidents(status);

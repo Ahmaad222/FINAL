@@ -1,455 +1,151 @@
-from rich.console import Console
-from rich.table import Table
-from rich.live import Live
-from rich import box
-from rich.layout import Layout
-from rich.panel import Panel
 import threading
 import time
-import readchar
+from collections import deque
+
+from rich import box
+from rich.console import Console
+from rich.layout import Layout
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+
 
 console = Console()
-
-aps_view = {}
-signal_history = {}
-
 lock = threading.Lock()
 
-current_filter = "ALL"
-hunt_mode = False
-
-# -------------------------
-# Attack log system
-# -------------------------
-
-attack_log = []
-MAX_LOG = 15
-
-attack_stats = {
-    "deauth_count": 0,
-    "clients_kicked": 0,
-    "target_bssid": None,
-    "start_time": time.time()
+aps_view = {}
+recent_sent = deque(maxlen=12)
+status_state = {
+    "sensor_status": "starting",
+    "backend_status": "offline",
+    "message": "Booting sensor",
+    "sent_count": 0,
 }
 
-# -------------------------
-# AP Update
-# -------------------------
 
 def update_ap(event_summary):
-
     with lock:
-
-        bssid = event_summary["bssid"]
-        signal = event_summary.get("signal")
-
-        if bssid not in signal_history:
-            signal_history[bssid] = []
-
-        if signal is not None:
-
-            signal_history[bssid].append(signal)
-
-            if len(signal_history[bssid]) > 6:
-                signal_history[bssid].pop(0)
-
         event_summary["last_seen"] = time.time()
-        aps_view[bssid] = event_summary
+        aps_view[event_summary["bssid"]] = event_summary
 
 
 def remove_ap(bssid):
+    with lock:
+        aps_view.pop(bssid, None)
+
+
+def update_status(sensor_status=None, backend_status=None, message=None):
+    with lock:
+        if sensor_status is not None:
+            status_state["sensor_status"] = sensor_status
+        if backend_status is not None:
+            status_state["backend_status"] = backend_status
+        if message is not None:
+            status_state["message"] = message
+
+
+def mark_sent(event_summary):
+    ssid = event_summary.get("ssid") or "Hidden"
+    bssid = event_summary.get("bssid") or "unknown"
+    line = f"📡 Sent: {ssid} ({bssid})"
 
     with lock:
+        status_state["sent_count"] += 1
+        status_state["message"] = line
+        recent_sent.appendleft(line)
 
-        aps_view.pop(bssid, None)
-        signal_history.pop(bssid, None)
-
-
-# -------------------------
-# Attack logging
-# -------------------------
 
 def log_attack(message, bssid=None):
-
+    del bssid
     with lock:
-
-        ts = time.strftime("%H:%M:%S")
-
-        attack_log.append(f"[{ts}] {message}")
-
-        if len(attack_log) > MAX_LOG:
-            attack_log.pop(0)
-
-        if bssid:
-            attack_stats["target_bssid"] = bssid
-
-        attack_stats["deauth_count"] += 1
+        status_state["message"] = message
+        recent_sent.appendleft(message)
 
 
 def client_kicked():
-
     with lock:
-        attack_stats["clients_kicked"] += 1
+        status_state["message"] = "Containment action sent"
 
 
-# -------------------------
-# Signal bars
-# -------------------------
-
-def get_signal_bars(signal):
-
-    if signal is None:
-        return "N/A"
-
-    if signal > -50:
-        return "▂▄▆█"
-    elif signal > -60:
-        return "▂▄▆"
-    elif signal > -70:
-        return "▂▄"
-    else:
-        return "▂"
-
-
-# -------------------------
-# Distance
-# -------------------------
-
-def estimate_distance(signal):
-
-    if signal is None:
-        return "Unknown"
-
-    if signal > -45:
-        return "🔥 ~1m"
-    elif signal > -55:
-        return "~3m"
-    elif signal > -65:
-        return "~7m"
-    elif signal > -75:
-        return "~15m"
-    else:
-        return "20m+"
-
-
-# -------------------------
-# Trend
-# -------------------------
-
-def get_trend(bssid):
-
-    history = signal_history.get(bssid, [])
-
-    if len(history) < 2:
-        return "..."
-
-    if history[-1] > history[0]:
-        return "Closer"
-    elif history[-1] < history[0]:
-        return "Away"
-    else:
-        return "Stable"
-
-
-# -------------------------
-# Radar Meter
-# -------------------------
-
-def radar_meter(signal):
-
-    if signal is None:
-        return "[----------]"
-
-    level = int((signal + 90) / 4)
-
-    level = max(0, min(level, 10))
-
-    return "[" + "█"*level + "░"*(10-level) + "]"
-
-
-# -------------------------
-# Last seen
-# -------------------------
-
-def get_last_seen(ts):
-
-    diff = int(time.time() - ts)
-
-    if diff < 5:
+def _get_last_seen(last_seen):
+    age = int(max(time.time() - last_seen, 0))
+    if age < 2:
         return "now"
-
-    return f"{diff}s"
-
-
-# -------------------------
-# Filters
-# -------------------------
-
-def apply_filter(aps):
-
-    if current_filter == "ALL":
-        return aps
-
-    return [
-        ap for ap in aps
-        if ap.get("classification") == current_filter
-    ]
+    return f"{age}s"
 
 
-# -------------------------
-# AP table
-# -------------------------
+def _build_status_panel():
+    with lock:
+        total_networks = len(aps_view)
+        sensor_status = status_state["sensor_status"]
+        backend_status = status_state["backend_status"]
+        message = status_state["message"]
+        sent_count = status_state["sent_count"]
 
-def generate_table():
-
-    table = Table(
-        title=f"📡 ZeinaGuard Monitor | Filter: {current_filter}",
-        box=box.ROUNDED,
-        expand=True
+    content = (
+        f"Sensor: {sensor_status}\n"
+        f"Backend: {backend_status}\n"
+        f"Live networks: {total_networks}\n"
+        f"Sent count: {sent_count}\n"
+        f"Status: {message}"
     )
 
+    return Panel(content, title="ZeinaGuard Sensor", border_style="cyan")
+
+
+def _build_networks_table():
+    table = Table(title="Live Networks", box=box.ROUNDED, expand=True)
     table.add_column("SSID", style="cyan")
     table.add_column("BSSID", style="magenta")
     table.add_column("CH", justify="center")
-    table.add_column("SIGNAL", justify="center")
-    table.add_column("LAST SEEN", justify="center")
-    table.add_column("STATUS", justify="center")
-    table.add_column("SCORE", justify="center")
+    table.add_column("Signal", justify="center")
+    table.add_column("Class", justify="center")
+    table.add_column("Seen", justify="center")
 
     with lock:
-
-        aps = list(aps_view.values())
-
-        aps = sorted(
-            aps,
-            key=lambda ap: ap.get("score", 0),
-            reverse=True
+        networks = sorted(
+            aps_view.values(),
+            key=lambda ap: (ap.get("signal") is not None, ap.get("signal") or -100),
+            reverse=True,
         )
 
-        aps = apply_filter(aps)
+    if not networks:
+        table.add_row("Waiting...", "-", "-", "-", "-", "-")
+        return table
 
-        for ap in aps:
-
-            status = ap.get("classification", "UNKNOWN")
-            signal = ap.get("signal")
-            last_seen = ap.get("last_seen", time.time())
-
-            color = "green"
-
-            if status == "SUSPICIOUS":
-                color = "yellow"
-
-            elif status == "ROGUE":
-                color = "bold white on red"
-
-            table.add_row(
-                str(ap.get("ssid")),
-                str(ap.get("bssid")),
-                str(ap.get("channel")),
-                get_signal_bars(signal),
-                get_last_seen(last_seen),
-                f"[{color}]{status}[/{color}]",
-                str(ap.get("score"))
-            )
+    for network in networks[:20]:
+        table.add_row(
+            str(network.get("ssid") or "Hidden"),
+            str(network.get("bssid") or "-"),
+            str(network.get("channel") or "-"),
+            str(network.get("signal") if network.get("signal") is not None else "-"),
+            str(network.get("classification") or "UNKNOWN"),
+            _get_last_seen(network.get("last_seen", time.time())),
+        )
 
     return table
 
 
-# -------------------------
-# Rogue target
-# -------------------------
-
-def get_top_rogue():
-
-    rogues = [
-        ap for ap in aps_view.values()
-        if ap.get("classification") == "ROGUE"
-    ]
-
-    if not rogues:
-        return None
-
-    return max(rogues, key=lambda ap: ap.get("signal", -100))
-
-
-# -------------------------
-# Rogue tracker
-# -------------------------
-
-def generate_hunt_panel():
-
-    rogue = get_top_rogue()
-
-    if not rogue:
-
-        return Panel(
-            "❌ No Rogue detected",
-            title="Rogue Hunt",
-            border_style="red"
-        )
-
-    signal = rogue.get("signal")
-    bssid = rogue.get("bssid")
-
-    content = (
-        f"🎯 SSID : {rogue['ssid']}\n"
-        f"📡 BSSID : {bssid}\n\n"
-        f"Signal : {signal} dBm\n"
-        f"Radar : {radar_meter(signal)}\n\n"
-        f"Distance : {estimate_distance(signal)}\n"
-        f"Trend : {get_trend(bssid)}"
-    )
-
-    return Panel(
-        content,
-        title="🔥 Rogue Tracker",
-        border_style="bright_red"
-    )
-
-
-# -------------------------
-# Summary
-# -------------------------
-
-def generate_summary():
-
+def _build_recent_sent_panel():
     with lock:
+        lines = list(recent_sent)
 
-        aps = list(aps_view.values())
-
-        total = len(aps)
-        rogue = sum(1 for ap in aps if ap.get("classification") == "ROGUE")
-        suspicious = sum(1 for ap in aps if ap.get("classification") == "SUSPICIOUS")
-        legit = sum(1 for ap in aps if ap.get("classification") == "LEGIT")
-
-    return Panel(
-        f"[bold]A[/]ll | [red]R[/]ogue | [yellow]S[/]uspicious | [green]L[/]egit | [cyan]H[/]unt | [bold]Q[/]uit\n"
-        f"📊 Total: {total} | 🔴 Rogue: {rogue} | 🟡 Suspicious: {suspicious} | 🟢 Legit: {legit}",
-        title="Controls",
-        border_style="bright_blue"
-    )
+    content = "\n".join(lines) if lines else "No transmissions yet"
+    return Panel(content, title="Recent Sent", border_style="green")
 
 
-# -------------------------
-# Attack feed
-# -------------------------
-
-def generate_attack_panel():
-
-    with lock:
-        logs = "\n".join(attack_log[-MAX_LOG:])
-
-    return Panel(
-        logs if logs else "No attack activity",
-        title="⚡ Attack Activity",
-        border_style="red"
-    )
-
-
-# -------------------------
-# Attack stats
-# -------------------------
-
-def generate_attack_stats():
-
-    with lock:
-
-        elapsed = max(time.time() - attack_stats["start_time"], 1)
-        rate = attack_stats["deauth_count"] / elapsed
-
-        stats = (
-            f"⚡ Deauth/sec : {rate:.2f}\n"
-            f"🎯 Target : {attack_stats['target_bssid']}\n"
-            f"📴 Clients kicked : {attack_stats['clients_kicked']}"
-        )
-
-    return Panel(
-        stats,
-        title="Attack Stats",
-        border_style="bright_red"
-    )
-
-
-# -------------------------
-# Layout
-# -------------------------
-
-def generate_layout():
-
+def _build_layout():
     layout = Layout()
-
-    if hunt_mode:
-
-        layout.split_column(
-            Layout(generate_summary(), size=4),
-            Layout(generate_hunt_panel()),
-            Layout(generate_attack_stats(), size=6),
-            Layout(generate_attack_panel(), size=10)
-        )
-
-    else:
-
-        layout.split_column(
-            Layout(generate_summary(), size=4),
-            Layout(generate_table()),
-            Layout(generate_attack_stats(), size=6),
-            Layout(generate_attack_panel(), size=10)
-        )
-
+    layout.split_column(
+        Layout(_build_status_panel(), size=7),
+        Layout(_build_networks_table(), ratio=3),
+        Layout(_build_recent_sent_panel(), size=14),
+    )
     return layout
 
 
-# -------------------------
-# Keyboard
-# -------------------------
-
-def keyboard_listener():
-
-    global current_filter, hunt_mode
-
-    while True:
-
-        key = readchar.readkey()
-
-        if key.lower() == "a":
-            current_filter = "ALL"
-
-        elif key.lower() == "r":
-            current_filter = "ROGUE"
-
-        elif key.lower() == "s":
-            current_filter = "SUSPICIOUS"
-
-        elif key.lower() == "l":
-            current_filter = "LEGIT"
-
-        elif key.lower() == "h":
-            hunt_mode = not hunt_mode
-
-        elif key.lower() == "q":
-            console.print("\n👋 Exiting...")
-            exit(0)
-
-
-# -------------------------
-# Run UI
-# -------------------------
-
 def run_terminal_ui():
-
-    t = threading.Thread(
-        target=keyboard_listener,
-        daemon=True
-    )
-    t.start()
-
-    with Live(
-        generate_layout(),
-        refresh_per_second=2,
-        console=console
-    ) as live:
-
+    with Live(_build_layout(), refresh_per_second=4, console=console, screen=False) as live:
         while True:
-
-            live.update(generate_layout())
-            time.sleep(1)
+            live.update(_build_layout())
+            time.sleep(0.25)
