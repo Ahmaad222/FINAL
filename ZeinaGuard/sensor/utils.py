@@ -11,6 +11,20 @@ _OUI_CACHE: dict[str, str] = {}
 _OUI_DB: dict[str, str] = {}
 
 
+def _sanitize_text_bytes(value: bytes | str | None) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="ignore")
+    else:
+        text = str(value)
+
+    text = text.replace("\x00", "")
+    text = "".join(ch for ch in text if ch.isprintable())
+    return text.strip()
+
+
 def _load_oui_db() -> dict[str, str]:
     global _OUI_DB
 
@@ -42,7 +56,7 @@ def get_ssid(packet):
     while elt:
         if elt.ID == 0:
             try:
-                ssid = elt.info.decode(errors="ignore").strip()
+                ssid = _sanitize_text_bytes(elt.info)
                 return ssid if ssid else "Hidden"
             except Exception:
                 return "Hidden"

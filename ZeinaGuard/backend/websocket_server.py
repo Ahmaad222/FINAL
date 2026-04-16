@@ -21,7 +21,7 @@ from sqlalchemy import func, literal_column, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from models import NetworkScanEvent, Sensor, Threat, WiFiNetwork, db
-from security import sanitize_input, validate_mac_address
+from security import sanitize_input, sanitize_json_payload, validate_mac_address
 
 
 LOGGER = logging.getLogger("zeinaguard.websocket")
@@ -140,7 +140,7 @@ class ScanPersistenceManager:
         self._thread.start()
 
     def ingest(self, network_data: dict[str, Any]) -> bool:
-        queued_event = self._build_queued_event(network_data)
+        queued_event = self._build_queued_event(sanitize_json_payload(network_data))
         try:
             self._ingest_queue.put_nowait(queued_event)
         except Full:
@@ -622,6 +622,8 @@ def _resolve_sensor(sensor_identifier: Any, hostname: Any = None) -> Sensor:
 
 
 def _normalize_network_events(payload: Any) -> list[dict[str, Any]]:
+    payload = sanitize_json_payload(payload)
+
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
 
@@ -766,10 +768,11 @@ def init_socketio(app):
 
     @socketio.on("sensor_register")
     def handle_sensor_register(data):
+        data = sanitize_json_payload(data or {})
         try:
             sensor = _resolve_sensor(
-                sensor_identifier=(data or {}).get("sensor_id"),
-                hostname=(data or {}).get("hostname"),
+                sensor_identifier=data.get("sensor_id"),
+                hostname=data.get("hostname"),
             )
             db.session.commit()
             emit(
@@ -787,6 +790,7 @@ def init_socketio(app):
 
     @socketio.on("network_scan")
     def handle_network_scan(payload):
+        payload = sanitize_json_payload(payload)
         network_events = _normalize_network_events(payload)
         if not network_events:
             emit("network_scan_ack", {"status": "ignored", "queued": 0})
@@ -811,13 +815,14 @@ def init_socketio(app):
 
     @socketio.on("new_threat")
     def handle_new_threat(payload):
-        ssid = _normalize_ssid((payload or {}).get("ssid"))
+        payload = sanitize_json_payload(payload or {})
+        ssid = _normalize_ssid(payload.get("ssid"))
         try:
             new_threat = Threat(
-                threat_type=(payload or {}).get("threat_type", "UNKNOWN"),
-                severity=(payload or {}).get("severity", "HIGH"),
-                source_mac=(payload or {}).get("source_mac"),
-                ssid=(payload or {}).get("ssid"),
+                threat_type=payload.get("threat_type", "UNKNOWN"),
+                severity=payload.get("severity", "HIGH"),
+                source_mac=payload.get("source_mac"),
+                ssid=payload.get("ssid"),
                 description="Detected via Sensor WebSocket",
             )
             db.session.add(new_threat)
