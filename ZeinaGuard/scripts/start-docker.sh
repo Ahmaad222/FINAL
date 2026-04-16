@@ -46,7 +46,7 @@ fi
 echo "[SYSTEM] Starting sensor locally..."
 
 # Absolute path fix (IMPORTANT)
-PROJECT_ROOT=/home/mohamed/FINAL/ZeinaGuard
+PROJECT_ROOT=~/FINAL/ZeinaGuard
 SENSOR_PATH="$PROJECT_ROOT/sensor"
 
 # Function to run sensor
