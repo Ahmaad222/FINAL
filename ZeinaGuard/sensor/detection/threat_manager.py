@@ -53,6 +53,12 @@ class ThreatManager:
 
             event_summary = self.engine.analyze(event)
             event_summary["timestamp"] = event.get("timestamp")
+            event_summary["manufacturer"] = event.get("manufacturer", event_summary.get("manufacturer", "Unknown"))
+            event_summary["uptime"] = event.get("uptime", event_summary.get("uptime", ""))
+            event_summary["auth"] = event.get("auth", event_summary.get("auth", ""))
+            event_summary["wps"] = event.get("wps", event_summary.get("wps", ""))
+            event_summary["distance"] = event.get("distance", event_summary.get("distance", -1))
+            event_summary["raw_beacon"] = event.get("raw_beacon", event_summary.get("raw_beacon", ""))
 
             bssid = event_summary["bssid"]
             status = event_summary["classification"]
