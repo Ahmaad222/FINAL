@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# تعريف اسم كارت الشبكة كمتغير لتسهيل التعديل
+INTERFACE="wlx00e02b2d5191"
+
 echo "[SYSTEM] Starting Docker services..."
 
 # Detect docker compose version
@@ -36,7 +39,7 @@ fi
 echo "[SYSTEM] Starting sensor locally..."
 
 # Absolute path fix (IMPORTANT)
-PROJECT_ROOT=~/FINAL/ZeinaGuard
+PROJECT_ROOT=/home/mohamed/FINAL/ZeinaGuard
 SENSOR_PATH="$PROJECT_ROOT/sensor"
 
 # Function to run sensor
@@ -45,8 +48,8 @@ run_sensor() {
     export RUN_MODE=LOCAL
     export ENABLE_TUI=True
 
-    echo "[SENSOR] Running on interface: wlx002e2dc0346b"
-    sudo python3 main.py wlx002e2dc0346b
+    echo "[SENSOR] Running on interface: $INTERFACE"
+    sudo python3 main.py "$INTERFACE"
 }
 
 # Try to run in new terminal
@@ -57,12 +60,11 @@ if command -v gnome-terminal > /dev/null 2>&1; then
     cd '$SENSOR_PATH';
     export RUN_MODE=LOCAL;
     export ENABLE_TUI=True;
-    echo '[SENSOR] Starting ZeinaGuard Sensor...';
-    sudo python3 main.py wlx002e2dc0346b;
+    echo '[SENSOR] Starting ZeinaGuard Sensor on $INTERFACE...';
+    sudo python3 main.py $INTERFACE;
     echo '[SENSOR] Stopped.';
     exec bash
     "
-
 else
     echo "[SYSTEM] gnome-terminal not found → running in same terminal"
     run_sensor

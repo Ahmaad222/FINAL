@@ -151,6 +151,13 @@ def create_app(config_object=None):
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["SQLALCHEMY_ECHO"] = False
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
+        "pool_pre_ping": True,
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECONDS", "1800")),
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "20")),
+        "max_overflow": int(os.getenv("DB_POOL_MAX_OVERFLOW", "30")),
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT_SECONDS", "30")),
+    }
 
     if config_object:
         app.config.from_object(config_object)

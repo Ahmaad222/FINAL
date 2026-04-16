@@ -45,12 +45,17 @@ def update_status(sensor_status=None, backend_status=None, message=None):
 
 
 def mark_sent(event_summary):
-    ssid = event_summary.get("ssid") or "Hidden"
-    bssid = event_summary.get("bssid") or "unknown"
-    line = f"📡 Sent: {ssid} ({bssid})"
+    batch_size = int(event_summary.get("batch_size") or 1)
+    if batch_size > 1:
+        ssid = event_summary.get("ssid") or "Hidden"
+        line = f"Sent batch: {batch_size} networks (latest {ssid})"
+    else:
+        ssid = event_summary.get("ssid") or "Hidden"
+        bssid = event_summary.get("bssid") or "unknown"
+        line = f"Sent: {ssid} ({bssid})"
 
     with lock:
-        status_state["sent_count"] += 1
+        status_state["sent_count"] += batch_size
         status_state["message"] = line
         recent_sent.appendleft(line)
 

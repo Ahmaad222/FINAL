@@ -18,6 +18,9 @@ if RUN_MODE == "DOCKER":
 else:
     DEFAULT_BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
 
+SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
+SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "1.0"))
+
 
 class WSClient:
     def __init__(self, backend_url=None, token=None, sensor_id=None):
@@ -118,23 +121,66 @@ class WSClient:
                 update_status(backend_status="degraded", message="Threat send failed")
 
     def _scan_listener(self):
+        pending_scans = []
+        next_flush_deadline = time.monotonic() + SCAN_EMIT_INTERVAL_SECONDS
+
         while self.is_running:
             try:
-                scan = scan_queue.get(timeout=0.5)
+                timeout = max(0.1, next_flush_deadline - time.monotonic())
+                scan = scan_queue.get(timeout=timeout)
             except Empty:
+                scan = None
+
+            if scan is not None:
+                payload = self._build_scan_payload(scan)
+                self.local_logger.log_scan(payload)
+                pending_scans.append(payload)
+
+            should_flush = (
+                len(pending_scans) >= SCAN_EMIT_BATCH_SIZE
+                or (pending_scans and time.monotonic() >= next_flush_deadline)
+            )
+            if not should_flush:
                 continue
 
-            payload = self._build_scan_payload(scan)
-            self.local_logger.log_scan(payload)
+            self._flush_scan_batch(pending_scans)
+            pending_scans = []
+            next_flush_deadline = time.monotonic() + SCAN_EMIT_INTERVAL_SECONDS
 
-            if not self.sio.connected:
-                continue
+    def _flush_scan_batch(self, batch):
+        if not batch or not self.sio.connected:
+            return
 
-            try:
-                self.sio.emit("network_scan", payload)
-                mark_sent(payload)
-            except Exception:
-                update_status(backend_status="degraded", message="Network send failed")
+        try:
+            self.sio.emit("network_scan", self._build_scan_batch_payload(batch))
+            self._mark_scan_batch_sent(batch)
+        except Exception:
+            update_status(backend_status="degraded", message="Network send failed")
+
+    def _build_scan_batch_payload(self, batch):
+        return {
+            "sensor_id": self.sensor_id,
+            "hostname": self.hostname,
+            "sent_at": datetime.utcnow().isoformat(),
+            "networks": [
+                {
+                    key: value
+                    for key, value in scan.items()
+                    if key not in {"sensor_id", "hostname"}
+                }
+                for scan in batch
+            ],
+        }
+
+    def _mark_scan_batch_sent(self, batch):
+        sample = batch[0]
+        mark_sent(
+            {
+                "ssid": sample.get("ssid"),
+                "bssid": sample.get("bssid"),
+                "batch_size": len(batch),
+            }
+        )
 
     def _build_scan_payload(self, scan):
         uptime = self._format_uptime()

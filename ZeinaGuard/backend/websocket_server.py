@@ -30,9 +30,10 @@ CLEANUP_LOGGER = logging.getLogger("zeinaguard.cleanup")
 UPTIME_PART_PATTERN = re.compile(r"(\d+)\s*([dhms])", re.IGNORECASE)
 connected_clients: dict[str, dict[str, Any]] = {}
 
-DEDUPE_WINDOW_SECONDS = int(os.getenv("NETWORK_DEDUPE_WINDOW_SECONDS", "30"))
-BATCH_FLUSH_INTERVAL_SECONDS = int(os.getenv("NETWORK_BATCH_FLUSH_INTERVAL_SECONDS", "5"))
+NETWORK_UPDATE_INTERVAL_SECONDS = float(os.getenv("NETWORK_UPDATE_INTERVAL_SECONDS", "7"))
+BATCH_FLUSH_INTERVAL_SECONDS = float(os.getenv("NETWORK_BATCH_FLUSH_INTERVAL_SECONDS", "1"))
 BATCH_SIZE_LIMIT = int(os.getenv("NETWORK_BATCH_SIZE_LIMIT", "200"))
+NETWORK_LOG_INTERVAL_SECONDS = float(os.getenv("NETWORK_LOG_INTERVAL_SECONDS", "30"))
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
 SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "24"))
 NETWORK_RETENTION_HOURS = int(os.getenv("WIFI_NETWORK_RETENTION_HOURS", "48"))
@@ -107,12 +108,30 @@ class BufferedNetworkUpdate:
     fingerprint: tuple[Any, ...]
 
 
+@dataclass
+class FlushResult:
+    persisted_keys: set[tuple[int, str]]
+    inserted_updates: list[BufferedNetworkUpdate]
+    inserted_count: int
+    updated_count: int
+    scan_event_count: int
+
+
 class ScanPersistenceManager:
     def __init__(self, app):
         self.app = app
         self._ingest_queue: Queue[QueuedNetworkEvent] = Queue(maxsize=max(BATCH_SIZE_LIMIT * 20, 1000))
         self._pending_updates: dict[tuple[int, str], BufferedNetworkUpdate] = {}
-        self._recent_cache: dict[tuple[int, str], tuple[float, tuple[Any, ...]]] = {}
+        self._recent_cache: dict[tuple[int, str], float] = {}
+        self._stats_lock = threading.Lock()
+        self._stats = {
+            "inserted": 0,
+            "updated": 0,
+            "scan_events": 0,
+            "dropped": 0,
+            "flushes": 0,
+        }
+        self._last_summary_log = time.monotonic()
         self._thread = threading.Thread(
             target=self._worker_loop,
             daemon=True,
@@ -125,6 +144,8 @@ class ScanPersistenceManager:
         try:
             self._ingest_queue.put_nowait(queued_event)
         except Full:
+            with self._stats_lock:
+                self._stats["dropped"] += 1
             LOGGER.warning("[WebSocket] Ingest queue is full, dropping: %s (%s)", queued_event.ssid, queued_event.bssid)
             return False
 
@@ -140,7 +161,10 @@ class ScanPersistenceManager:
         signal_strength = _safe_int(network_data.get("signal"), default=0) or None
         clients_count = _safe_int(network_data.get("clients"), default=0)
         risk_score = _safe_int(network_data.get("score"), default=0)
-        uptime_seconds = parse_uptime_to_seconds(network_data.get("uptime"))
+        uptime_seconds = _safe_int(
+            network_data.get("uptime_seconds"),
+            default=parse_uptime_to_seconds(network_data.get("uptime")),
+        )
         encryption = sanitize_input(str(network_data.get("encryption") or "UNKNOWN"), max_length=50)
         classification = sanitize_input(str(network_data.get("classification") or "UNKNOWN"), max_length=50)
         auth_type = sanitize_input(
@@ -262,7 +286,6 @@ class ScanPersistenceManager:
         cache_key = (sensor.id, queued_event.bssid)
         pending = self._pending_updates.get(cache_key)
         incoming = self._to_buffered_update(sensor.id, queued_event)
-        should_log_receive = pending is None or pending.fingerprint != incoming.fingerprint
 
         if pending is None:
             self._pending_updates[cache_key] = incoming
@@ -270,13 +293,11 @@ class ScanPersistenceManager:
             pending.seen_increment += 1
             self._merge_update(pending, incoming)
 
-        if should_log_receive:
-            LOGGER.info("[WebSocket] Received: %s (%s)", queued_event.ssid, queued_event.bssid)
-
     def flush(self) -> None:
         ready_keys = self._collect_ready_keys()
         if not ready_keys:
             self._prune_recent_cache()
+            self._log_periodic_summary()
             return
 
         batch = {key: self._pending_updates.pop(key) for key in ready_keys}
@@ -284,9 +305,10 @@ class ScanPersistenceManager:
 
         try:
             flushed_at = time.monotonic()
-            persisted_keys = self._flush_batch(batch)
-            for key in persisted_keys:
-                self._recent_cache[key] = (flushed_at, batch[key].fingerprint)
+            flush_result = self._flush_batch(batch)
+            for key in flush_result.persisted_keys:
+                self._recent_cache[key] = flushed_at
+            self._record_flush_result(flush_result)
         except Exception as exc:
             db.session.rollback()
             for key, update in batch.items():
@@ -298,25 +320,25 @@ class ScanPersistenceManager:
                     self._merge_update(existing, update)
             LOGGER.warning("[DB] Batch flush failed: %s", exc)
         finally:
+            self._log_periodic_summary()
             db.session.remove()
 
     def _collect_ready_keys(self) -> list[tuple[int, str]]:
         now = time.monotonic()
         ready_keys: list[tuple[int, str]] = []
-        for key, pending in self._pending_updates.items():
+        for key in self._pending_updates:
             last_persisted = self._recent_cache.get(key)
             if last_persisted is None:
                 ready_keys.append(key)
                 continue
 
-            elapsed = now - last_persisted[0]
-            fingerprint_changed = last_persisted[1] != pending.fingerprint
-            if elapsed >= DEDUPE_WINDOW_SECONDS or fingerprint_changed:
+            elapsed = now - last_persisted
+            if elapsed >= NETWORK_UPDATE_INTERVAL_SECONDS:
                 ready_keys.append(key)
 
         return ready_keys
 
-    def _flush_batch(self, batch: dict[tuple[int, str], BufferedNetworkUpdate]) -> set[tuple[int, str]]:
+    def _flush_batch(self, batch: dict[tuple[int, str], BufferedNetworkUpdate]) -> FlushResult:
         updates = list(batch.values())
         wifi_rows = [
             {
@@ -386,6 +408,11 @@ class ScanPersistenceManager:
         persisted_keys = set(network_id_map.keys())
         inserted_count = sum(1 for row in result_rows if row.inserted)
         updated_count = len(result_rows) - inserted_count
+        inserted_updates = [
+            batch[(row.sensor_id, row.bssid)]
+            for row in result_rows
+            if row.inserted
+        ]
 
         scan_rows = [
             {
@@ -414,17 +441,67 @@ class ScanPersistenceManager:
 
         db.session.commit()
 
-        if inserted_count:
-            LOGGER.info("[DB] New network stored x%s", inserted_count)
-        if updated_count:
-            LOGGER.info("[DB] Network updated (seen_count++) x%s", updated_count)
-        LOGGER.info("[DB] Flushed buffered updates: rows=%s events=%s", len(updates), len(scan_rows))
+        return FlushResult(
+            persisted_keys=persisted_keys,
+            inserted_updates=inserted_updates,
+            inserted_count=inserted_count,
+            updated_count=updated_count,
+            scan_event_count=len(scan_rows),
+        )
 
-        return persisted_keys
+    def _record_flush_result(self, flush_result: FlushResult) -> None:
+        with self._stats_lock:
+            self._stats["inserted"] += flush_result.inserted_count
+            self._stats["updated"] += flush_result.updated_count
+            self._stats["scan_events"] += flush_result.scan_event_count
+            self._stats["flushes"] += 1
+
+        for update in flush_result.inserted_updates:
+            LOGGER.info(
+                "[DB] New Network: sensor=%s ssid=%s bssid=%s channel=%s signal=%s classification=%s risk=%s",
+                update.sensor_id,
+                update.ssid,
+                update.bssid,
+                update.channel if update.channel is not None else "-",
+                update.signal_strength if update.signal_strength is not None else "-",
+                update.classification,
+                update.risk_score,
+            )
+
+    def _log_periodic_summary(self, force: bool = False) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_summary_log
+        if not force and elapsed < NETWORK_LOG_INTERVAL_SECONDS:
+            return
+
+        with self._stats_lock:
+            stats_snapshot = dict(self._stats)
+            if not any(stats_snapshot.values()):
+                self._last_summary_log = now
+                return
+            self._stats = {
+                "inserted": 0,
+                "updated": 0,
+                "scan_events": 0,
+                "dropped": 0,
+                "flushes": 0,
+            }
+
+        LOGGER.info(
+            "[DB] 30s summary: flushes=%s new=%s updated=%s scan_events=%s dropped=%s pending=%s queue=%s",
+            stats_snapshot["flushes"],
+            stats_snapshot["inserted"],
+            stats_snapshot["updated"],
+            stats_snapshot["scan_events"],
+            stats_snapshot["dropped"],
+            len(self._pending_updates),
+            self._ingest_queue.qsize(),
+        )
+        self._last_summary_log = now
 
     def _prune_recent_cache(self) -> None:
-        cutoff = time.monotonic() - max(DEDUPE_WINDOW_SECONDS * 4, 300)
-        stale_keys = [key for key, value in self._recent_cache.items() if value[0] < cutoff]
+        cutoff = time.monotonic() - max(NETWORK_UPDATE_INTERVAL_SECONDS * 4, 300)
+        stale_keys = [key for key, value in self._recent_cache.items() if value < cutoff]
         for key in stale_keys:
             self._recent_cache.pop(key, None)
 

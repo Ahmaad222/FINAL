@@ -2,7 +2,7 @@
 import os
 
 # Default values - can be overridden by Environment variables
-INTERFACE = os.getenv("SENSOR_INTERFACE", "wlx002e2dc0346b")
+INTERFACE = os.getenv("SENSOR_INTERFACE", "wlx00e02b2d5191")
 RUN_MODE = os.getenv("RUN_MODE", "LOCAL")
 
 if RUN_MODE == "LOCAL":
