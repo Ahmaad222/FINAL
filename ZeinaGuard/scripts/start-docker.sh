@@ -1,7 +1,14 @@
 #!/bin/bash
 
-# تعريف اسم كارت الشبكة كمتغير لتسهيل التعديل
-INTERFACE="wlx00e02b2d5191"
+
+INTERFACE=$(for iface in $(ls /sys/class/net/); do if [ -d /sys/class/net/$iface/wireless ]; then echo $iface; break; fi; done)
+
+
+if [ -z "$INTERFACE" ]; then
+    INTERFACE="wlan0"
+    echo "[WARNING] No Wi-Fi interface detected, defaulting to $INTERFACE"
+fi
+
 
 echo "[SYSTEM] Starting Docker services..."
 
@@ -68,4 +75,4 @@ if command -v gnome-terminal > /dev/null 2>&1; then
 else
     echo "[SYSTEM] gnome-terminal not found → running in same terminal"
     run_sensor
-fi
+fi  

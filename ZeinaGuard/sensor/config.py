@@ -1,8 +1,21 @@
 # config.py
 import os
-
+# select Wi-Fi Card 
 # Default values - can be overridden by Environment variables
-INTERFACE = os.getenv("SENSOR_INTERFACE", "wlx00e02b2d5191")
+def get_wireless_interface():
+    
+    try:
+        interfaces = os.listdir('/sys/class/net/')
+        for iface in interfaces:
+         
+            if os.path.exists(f'/sys/class/net/{iface}/wireless'):
+                return iface
+    except Exception:
+        pass
+    return "wlan0" 
+
+AUTO_IFACE = get_wireless_interface()
+INTERFACE = os.getenv("SENSOR_INTERFACE", AUTO_IFACE)
 RUN_MODE = os.getenv("RUN_MODE", "LOCAL")
 
 if RUN_MODE == "LOCAL":
