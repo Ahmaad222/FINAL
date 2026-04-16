@@ -1,5 +1,5 @@
 """
-WebSocket server and background maintenance for ZeinaGuard.
+WebSocket server, buffered persistence, and background maintenance for ZeinaGuard.
 """
 
 from __future__ import annotations
@@ -9,7 +9,9 @@ import os
 import re
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
+from queue import Empty, Full, Queue
 from typing import Any
 
 from flask import current_app, request
@@ -28,18 +30,20 @@ CLEANUP_LOGGER = logging.getLogger("zeinaguard.cleanup")
 UPTIME_PART_PATTERN = re.compile(r"(\d+)\s*([dhms])", re.IGNORECASE)
 connected_clients: dict[str, dict[str, Any]] = {}
 
-WRITE_THROTTLE_SECONDS = int(os.getenv("NETWORK_WRITE_THROTTLE_SECONDS", "5"))
+DEDUPE_WINDOW_SECONDS = int(os.getenv("NETWORK_DEDUPE_WINDOW_SECONDS", "30"))
+BATCH_FLUSH_INTERVAL_SECONDS = int(os.getenv("NETWORK_BATCH_FLUSH_INTERVAL_SECONDS", "5"))
+BATCH_SIZE_LIMIT = int(os.getenv("NETWORK_BATCH_SIZE_LIMIT", "200"))
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
 SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "24"))
 NETWORK_RETENTION_HOURS = int(os.getenv("WIFI_NETWORK_RETENTION_HOURS", "48"))
 ADVISORY_LOCK_ID = int(os.getenv("ZEINAGUARD_CLEANUP_LOCK_ID", "240416"))
 
-_network_write_cache: dict[tuple[int, str], float] = {}
-_network_write_cache_lock = threading.Lock()
 _sensor_id_cache: dict[str, int] = {}
 _sensor_id_cache_lock = threading.Lock()
 _cleanup_thread_started = False
 _cleanup_thread_lock = threading.Lock()
+_persistence_manager = None
+_persistence_manager_lock = threading.Lock()
 
 
 try:
@@ -49,6 +53,380 @@ try:
     )
 except Exception:
     redis_client = None
+
+
+@dataclass
+class QueuedNetworkEvent:
+    sensor_identifier: str
+    hostname: str
+    bssid: str
+    ssid: str
+    channel: int | None
+    signal_strength: int | None
+    encryption: str
+    clients_count: int
+    classification: str
+    risk_score: int
+    auth_type: str | None
+    wps_info: Any
+    manufacturer: str | None
+    device_type: str
+    uptime_seconds: int
+    raw_beacon: str | None
+    raw_data: dict[str, Any]
+    reasons: Any
+    severity: str
+    observed_at: datetime
+    fingerprint: tuple[Any, ...]
+
+
+@dataclass
+class BufferedNetworkUpdate:
+    sensor_id: int
+    bssid: str
+    ssid: str
+    channel: int | None
+    frequency: int | None
+    signal_strength: int | None
+    encryption: str
+    clients_count: int
+    classification: str
+    risk_score: int
+    auth_type: str | None
+    wps_info: Any
+    manufacturer: str | None
+    device_type: str
+    uptime_seconds: int
+    raw_beacon: str | None
+    raw_data: dict[str, Any]
+    reasons: Any
+    severity: str
+    seen_increment: int
+    first_seen: datetime
+    last_seen: datetime
+    fingerprint: tuple[Any, ...]
+
+
+class ScanPersistenceManager:
+    def __init__(self, app):
+        self.app = app
+        self._ingest_queue: Queue[QueuedNetworkEvent] = Queue(maxsize=max(BATCH_SIZE_LIMIT * 20, 1000))
+        self._pending_updates: dict[tuple[int, str], BufferedNetworkUpdate] = {}
+        self._recent_cache: dict[tuple[int, str], tuple[float, tuple[Any, ...]]] = {}
+        self._thread = threading.Thread(
+            target=self._worker_loop,
+            daemon=True,
+            name="zeinaguard-network-persistence",
+        )
+        self._thread.start()
+
+    def ingest(self, network_data: dict[str, Any]) -> bool:
+        queued_event = self._build_queued_event(network_data)
+        try:
+            self._ingest_queue.put_nowait(queued_event)
+        except Full:
+            LOGGER.warning("[WebSocket] Ingest queue is full, dropping: %s (%s)", queued_event.ssid, queued_event.bssid)
+            return False
+
+        return True
+
+    def _build_queued_event(self, network_data: dict[str, Any]) -> QueuedNetworkEvent:
+        bssid = _normalize_bssid(network_data.get("bssid"))
+        ssid = _normalize_ssid(network_data.get("ssid"))
+        if not bssid or not validate_mac_address(bssid):
+            raise ValueError(f"Invalid BSSID: {network_data.get('bssid')}")
+
+        channel = _safe_int(network_data.get("channel"), default=0) or None
+        signal_strength = _safe_int(network_data.get("signal"), default=0) or None
+        clients_count = _safe_int(network_data.get("clients"), default=0)
+        risk_score = _safe_int(network_data.get("score"), default=0)
+        uptime_seconds = parse_uptime_to_seconds(network_data.get("uptime"))
+        encryption = sanitize_input(str(network_data.get("encryption") or "UNKNOWN"), max_length=50)
+        classification = sanitize_input(str(network_data.get("classification") or "UNKNOWN"), max_length=50)
+        auth_type = sanitize_input(
+            str(network_data.get("auth_type") or network_data.get("auth") or ""),
+            max_length=50,
+        ) or None
+        manufacturer = sanitize_input(str(network_data.get("manufacturer") or ""), max_length=255) or None
+        device_type = sanitize_input(str(network_data.get("device_type") or "AP"), max_length=50) or "AP"
+        severity = sanitize_input(str(network_data.get("severity") or "INFO"), max_length=50) or "INFO"
+
+        return QueuedNetworkEvent(
+            sensor_identifier=sanitize_input(str(network_data.get("sensor_id") or ""), max_length=255) or "sensor",
+            hostname=sanitize_input(str(network_data.get("hostname") or ""), max_length=255) or "sensor",
+            bssid=bssid,
+            ssid=ssid,
+            channel=channel,
+            signal_strength=signal_strength,
+            encryption=encryption,
+            clients_count=clients_count,
+            classification=classification,
+            risk_score=risk_score,
+            auth_type=auth_type,
+            wps_info=network_data.get("wps_info") or network_data.get("wps"),
+            manufacturer=manufacturer,
+            device_type=device_type,
+            uptime_seconds=uptime_seconds,
+            raw_beacon=network_data.get("raw_beacon"),
+            raw_data=network_data,
+            reasons=network_data.get("reasons"),
+            severity=severity,
+            observed_at=datetime.utcnow(),
+            fingerprint=(
+                ssid,
+                channel,
+                signal_strength,
+                encryption,
+                clients_count,
+                classification,
+                risk_score,
+                auth_type,
+                manufacturer,
+                device_type,
+                uptime_seconds,
+            ),
+        )
+
+    def _to_buffered_update(self, sensor_id: int, event: QueuedNetworkEvent) -> BufferedNetworkUpdate:
+        return BufferedNetworkUpdate(
+            sensor_id=sensor_id,
+            bssid=event.bssid,
+            ssid=event.ssid,
+            channel=event.channel,
+            frequency=_calculate_frequency(event.channel),
+            signal_strength=event.signal_strength,
+            encryption=event.encryption,
+            clients_count=event.clients_count,
+            classification=event.classification,
+            risk_score=event.risk_score,
+            auth_type=event.auth_type,
+            wps_info=event.wps_info,
+            manufacturer=event.manufacturer,
+            device_type=event.device_type,
+            uptime_seconds=event.uptime_seconds,
+            raw_beacon=event.raw_beacon,
+            raw_data=event.raw_data,
+            reasons=event.reasons,
+            severity=event.severity,
+            seen_increment=1,
+            first_seen=event.observed_at,
+            last_seen=event.observed_at,
+            fingerprint=event.fingerprint,
+        )
+
+    def _merge_update(self, pending: BufferedNetworkUpdate, incoming: BufferedNetworkUpdate) -> None:
+        pending.ssid = incoming.ssid
+        pending.channel = incoming.channel
+        pending.frequency = incoming.frequency
+        pending.signal_strength = incoming.signal_strength
+        pending.encryption = incoming.encryption
+        pending.clients_count = incoming.clients_count
+        pending.classification = incoming.classification
+        pending.risk_score = incoming.risk_score
+        pending.auth_type = incoming.auth_type
+        pending.wps_info = incoming.wps_info
+        pending.manufacturer = incoming.manufacturer
+        pending.device_type = incoming.device_type
+        pending.uptime_seconds = incoming.uptime_seconds
+        pending.raw_beacon = incoming.raw_beacon
+        pending.raw_data = incoming.raw_data
+        pending.reasons = incoming.reasons
+        pending.severity = incoming.severity
+        pending.last_seen = incoming.last_seen
+        pending.fingerprint = incoming.fingerprint
+
+    def _worker_loop(self) -> None:
+        with self.app.app_context():
+            next_flush_deadline = time.monotonic() + BATCH_FLUSH_INTERVAL_SECONDS
+            while True:
+                timeout = max(0.1, next_flush_deadline - time.monotonic())
+
+                try:
+                    queued_event = self._ingest_queue.get(timeout=timeout)
+                    self._consume_event(queued_event)
+                except Empty:
+                    pass
+                except Exception as exc:
+                    db.session.rollback()
+                    LOGGER.warning("[WebSocket] Worker ingest failed: %s", exc)
+
+                if len(self._pending_updates) >= BATCH_SIZE_LIMIT or time.monotonic() >= next_flush_deadline:
+                    self.flush()
+                    next_flush_deadline = time.monotonic() + BATCH_FLUSH_INTERVAL_SECONDS
+
+    def _consume_event(self, queued_event: QueuedNetworkEvent) -> None:
+        sensor = _resolve_sensor(
+            sensor_identifier=queued_event.sensor_identifier,
+            hostname=queued_event.hostname,
+        )
+        cache_key = (sensor.id, queued_event.bssid)
+        pending = self._pending_updates.get(cache_key)
+        incoming = self._to_buffered_update(sensor.id, queued_event)
+        should_log_receive = pending is None or pending.fingerprint != incoming.fingerprint
+
+        if pending is None:
+            self._pending_updates[cache_key] = incoming
+        else:
+            pending.seen_increment += 1
+            self._merge_update(pending, incoming)
+
+        if should_log_receive:
+            LOGGER.info("[WebSocket] Received: %s (%s)", queued_event.ssid, queued_event.bssid)
+
+    def flush(self) -> None:
+        ready_keys = self._collect_ready_keys()
+        if not ready_keys:
+            self._prune_recent_cache()
+            return
+
+        batch = {key: self._pending_updates.pop(key) for key in ready_keys}
+        self._prune_recent_cache()
+
+        try:
+            flushed_at = time.monotonic()
+            persisted_keys = self._flush_batch(batch)
+            for key in persisted_keys:
+                self._recent_cache[key] = (flushed_at, batch[key].fingerprint)
+        except Exception as exc:
+            db.session.rollback()
+            for key, update in batch.items():
+                existing = self._pending_updates.get(key)
+                if existing is None:
+                    self._pending_updates[key] = update
+                else:
+                    existing.seen_increment += update.seen_increment
+                    self._merge_update(existing, update)
+            LOGGER.warning("[DB] Batch flush failed: %s", exc)
+        finally:
+            db.session.remove()
+
+    def _collect_ready_keys(self) -> list[tuple[int, str]]:
+        now = time.monotonic()
+        ready_keys: list[tuple[int, str]] = []
+        for key, pending in self._pending_updates.items():
+            last_persisted = self._recent_cache.get(key)
+            if last_persisted is None:
+                ready_keys.append(key)
+                continue
+
+            elapsed = now - last_persisted[0]
+            fingerprint_changed = last_persisted[1] != pending.fingerprint
+            if elapsed >= DEDUPE_WINDOW_SECONDS or fingerprint_changed:
+                ready_keys.append(key)
+
+        return ready_keys
+
+    def _flush_batch(self, batch: dict[tuple[int, str], BufferedNetworkUpdate]) -> set[tuple[int, str]]:
+        updates = list(batch.values())
+        wifi_rows = [
+            {
+                "sensor_id": update.sensor_id,
+                "ssid": update.ssid,
+                "bssid": update.bssid,
+                "channel": update.channel,
+                "frequency": update.frequency,
+                "signal_strength": update.signal_strength,
+                "encryption": update.encryption,
+                "clients_count": update.clients_count,
+                "classification": update.classification,
+                "risk_score": update.risk_score,
+                "auth_type": update.auth_type,
+                "wps_info": update.wps_info,
+                "manufacturer": update.manufacturer,
+                "device_type": update.device_type,
+                "uptime_seconds": update.uptime_seconds,
+                "seen_count": update.seen_increment,
+                "first_seen": update.first_seen,
+                "last_seen": update.last_seen,
+                "raw_beacon": update.raw_beacon,
+                "raw_data": update.raw_data,
+                "created_at": update.first_seen,
+                "updated_at": update.last_seen,
+            }
+            for update in updates
+        ]
+
+        wifi_table = WiFiNetwork.__table__
+        insert_stmt = pg_insert(wifi_table).values(wifi_rows)
+        upsert_stmt = insert_stmt.on_conflict_do_update(
+            index_elements=["sensor_id", "bssid"],
+            set_={
+                "ssid": insert_stmt.excluded.ssid,
+                "channel": insert_stmt.excluded.channel,
+                "frequency": insert_stmt.excluded.frequency,
+                "signal_strength": insert_stmt.excluded.signal_strength,
+                "encryption": insert_stmt.excluded.encryption,
+                "clients_count": insert_stmt.excluded.clients_count,
+                "classification": insert_stmt.excluded.classification,
+                "risk_score": insert_stmt.excluded.risk_score,
+                "auth_type": insert_stmt.excluded.auth_type,
+                "wps_info": insert_stmt.excluded.wps_info,
+                "manufacturer": insert_stmt.excluded.manufacturer,
+                "device_type": insert_stmt.excluded.device_type,
+                "uptime_seconds": insert_stmt.excluded.uptime_seconds,
+                "raw_beacon": insert_stmt.excluded.raw_beacon,
+                "raw_data": insert_stmt.excluded.raw_data,
+                "last_seen": insert_stmt.excluded.last_seen,
+                "updated_at": func.now(),
+                "seen_count": wifi_table.c.seen_count + insert_stmt.excluded.seen_count,
+            },
+        ).returning(
+            wifi_table.c.id,
+            wifi_table.c.sensor_id,
+            wifi_table.c.bssid,
+            wifi_table.c.seen_count,
+            literal_column("xmax = 0").label("inserted"),
+        )
+
+        result_rows = db.session.execute(upsert_stmt).all()
+        network_id_map = {
+            (row.sensor_id, row.bssid): row.id
+            for row in result_rows
+        }
+        persisted_keys = set(network_id_map.keys())
+        inserted_count = sum(1 for row in result_rows if row.inserted)
+        updated_count = len(result_rows) - inserted_count
+
+        scan_rows = [
+            {
+                "sensor_id": update.sensor_id,
+                "network_id": network_id_map[(update.sensor_id, update.bssid)],
+                "event_type": update.classification or "SCAN",
+                "severity": update.severity,
+                "risk_score": update.risk_score,
+                "signal_strength": update.signal_strength,
+                "channel": update.channel,
+                "metadata": {
+                    "ssid": update.ssid,
+                    "bssid": update.bssid,
+                    "uptime_seconds": update.uptime_seconds,
+                    "seen_increment": update.seen_increment,
+                    "raw_data": update.raw_data,
+                },
+                "reasons": update.reasons,
+                "scanned_at": update.last_seen,
+            }
+            for update in updates
+        ]
+
+        if scan_rows:
+            db.session.execute(NetworkScanEvent.__table__.insert(), scan_rows)
+
+        db.session.commit()
+
+        if inserted_count:
+            LOGGER.info("[DB] New network stored x%s", inserted_count)
+        if updated_count:
+            LOGGER.info("[DB] Network updated (seen_count++) x%s", updated_count)
+        LOGGER.info("[DB] Flushed buffered updates: rows=%s events=%s", len(updates), len(scan_rows))
+
+        return persisted_keys
+
+    def _prune_recent_cache(self) -> None:
+        cutoff = time.monotonic() - max(DEDUPE_WINDOW_SECONDS * 4, 300)
+        stale_keys = [key for key, value in self._recent_cache.items() if value[0] < cutoff]
+        for key in stale_keys:
+            self._recent_cache.pop(key, None)
 
 
 def configure_socket_logging() -> None:
@@ -187,154 +565,13 @@ def _normalize_network_events(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-def _should_write_network(sensor_id: int, bssid: str) -> bool:
-    cache_key = (sensor_id, bssid)
-    now = time.monotonic()
+def _get_persistence_manager(app) -> ScanPersistenceManager:
+    global _persistence_manager
 
-    with _network_write_cache_lock:
-        last_seen = _network_write_cache.get(cache_key)
-        if last_seen is not None and (now - last_seen) < WRITE_THROTTLE_SECONDS:
-            return False
-        _network_write_cache[cache_key] = now
-        return True
-
-
-def _mark_write_failed(sensor_id: int, bssid: str) -> None:
-    with _network_write_cache_lock:
-        _network_write_cache.pop((sensor_id, bssid), None)
-
-
-def _prune_write_cache(max_age_seconds: int = 3600) -> None:
-    cutoff = time.monotonic() - max_age_seconds
-    with _network_write_cache_lock:
-        expired_keys = [key for key, seen_at in _network_write_cache.items() if seen_at < cutoff]
-        for key in expired_keys:
-            _network_write_cache.pop(key, None)
-
-
-def _upsert_wifi_network(network_data: dict[str, Any], sensor_id: int, ssid: str, bssid: str) -> tuple[int, bool, int]:
-    now = datetime.utcnow()
-    uptime_seconds = parse_uptime_to_seconds(network_data.get("uptime"))
-    channel = _safe_int(network_data.get("channel"), default=0) or None
-    signal_strength = _safe_int(network_data.get("signal"), default=0) or None
-    clients_count = _safe_int(network_data.get("clients"), default=0)
-    risk_score = _safe_int(network_data.get("score"), default=0)
-
-    payload = {
-        "sensor_id": sensor_id,
-        "ssid": ssid,
-        "bssid": bssid,
-        "channel": channel,
-        "frequency": _calculate_frequency(channel),
-        "signal_strength": signal_strength,
-        "encryption": sanitize_input(str(network_data.get("encryption") or "UNKNOWN"), max_length=50),
-        "clients_count": clients_count,
-        "classification": sanitize_input(
-            str(network_data.get("classification") or "UNKNOWN"),
-            max_length=50,
-        ),
-        "risk_score": risk_score,
-        "auth_type": sanitize_input(str(network_data.get("auth_type") or network_data.get("auth") or ""), max_length=50)
-        or None,
-        "wps_info": network_data.get("wps_info") or network_data.get("wps"),
-        "manufacturer": sanitize_input(str(network_data.get("manufacturer") or ""), max_length=255) or None,
-        "device_type": sanitize_input(str(network_data.get("device_type") or "AP"), max_length=50) or "AP",
-        "uptime_seconds": uptime_seconds,
-        "first_seen": now,
-        "last_seen": now,
-        "raw_beacon": network_data.get("raw_beacon"),
-        "raw_data": network_data,
-        "created_at": now,
-        "updated_at": now,
-    }
-
-    table = WiFiNetwork.__table__
-    insert_stmt = pg_insert(table).values(**payload)
-    upsert_stmt = insert_stmt.on_conflict_do_update(
-        index_elements=["sensor_id", "bssid"],
-        set_={
-            "ssid": insert_stmt.excluded.ssid,
-            "channel": insert_stmt.excluded.channel,
-            "frequency": insert_stmt.excluded.frequency,
-            "signal_strength": insert_stmt.excluded.signal_strength,
-            "encryption": insert_stmt.excluded.encryption,
-            "clients_count": insert_stmt.excluded.clients_count,
-            "classification": insert_stmt.excluded.classification,
-            "risk_score": insert_stmt.excluded.risk_score,
-            "auth_type": insert_stmt.excluded.auth_type,
-            "wps_info": insert_stmt.excluded.wps_info,
-            "manufacturer": insert_stmt.excluded.manufacturer,
-            "device_type": insert_stmt.excluded.device_type,
-            "uptime_seconds": insert_stmt.excluded.uptime_seconds,
-            "raw_beacon": insert_stmt.excluded.raw_beacon,
-            "raw_data": insert_stmt.excluded.raw_data,
-            "last_seen": func.now(),
-            "updated_at": func.now(),
-            "seen_count": table.c.seen_count + 1,
-        },
-    ).returning(
-        table.c.id,
-        table.c.seen_count,
-        literal_column("xmax = 0").label("inserted"),
-    )
-
-    row = db.session.execute(upsert_stmt).one()
-    return row.id, bool(row.inserted), int(row.seen_count or 1)
-
-
-def _insert_scan_event(network_data: dict[str, Any], sensor_id: int, network_id: int) -> None:
-    now = datetime.utcnow()
-    scan_insert = NetworkScanEvent.__table__.insert().values(
-        sensor_id=sensor_id,
-        network_id=network_id,
-        event_type=sanitize_input(str(network_data.get("classification") or "SCAN"), max_length=50) or "SCAN",
-        severity=sanitize_input(str(network_data.get("severity") or "INFO"), max_length=50) or "INFO",
-        risk_score=_safe_int(network_data.get("score"), default=0),
-        signal_strength=_safe_int(network_data.get("signal"), default=0) or None,
-        channel=_safe_int(network_data.get("channel"), default=0) or None,
-        reasons=network_data.get("reasons"),
-        metadata={
-            "ssid": _normalize_ssid(network_data.get("ssid")),
-            "bssid": _normalize_bssid(network_data.get("bssid")),
-            "uptime_seconds": parse_uptime_to_seconds(network_data.get("uptime")),
-            "raw_data": network_data,
-        },
-        scanned_at=now,
-    )
-    db.session.execute(scan_insert)
-
-
-def _store_network_scan(network_data: dict[str, Any]) -> str:
-    sensor = _resolve_sensor(
-        sensor_identifier=network_data.get("sensor_id"),
-        hostname=network_data.get("hostname"),
-    )
-
-    bssid = _normalize_bssid(network_data.get("bssid"))
-    ssid = _normalize_ssid(network_data.get("ssid"))
-    if not bssid or not validate_mac_address(bssid):
-        raise ValueError(f"Invalid BSSID: {network_data.get('bssid')}")
-
-    if not _should_write_network(sensor.id, bssid):
-        return "skipped"
-
-    LOGGER.info("[WebSocket] Received: %s (%s)", ssid, bssid)
-
-    try:
-        network_id, inserted, seen_count = _upsert_wifi_network(network_data, sensor.id, ssid, bssid)
-        _insert_scan_event(network_data, sensor.id, network_id)
-        db.session.commit()
-    except Exception:
-        db.session.rollback()
-        _mark_write_failed(sensor.id, bssid)
-        raise
-
-    if inserted:
-        LOGGER.info("[DB] New network stored")
-        return "stored"
-
-    LOGGER.info("[DB] Network updated (seen_count=%s)", seen_count)
-    return "updated"
+    with _persistence_manager_lock:
+        if _persistence_manager is None:
+            _persistence_manager = ScanPersistenceManager(app)
+        return _persistence_manager
 
 
 def _try_acquire_cleanup_lock() -> bool:
@@ -375,7 +612,6 @@ def run_cleanup_cycle() -> tuple[int, int]:
             .delete(synchronize_session=False)
         )
         db.session.commit()
-        _prune_write_cache()
     except Exception:
         db.session.rollback()
         raise
@@ -437,6 +673,7 @@ def init_socketio(app):
     )
 
     start_cleanup_thread(app)
+    persistence_manager = _get_persistence_manager(app)
 
     @socketio.on("connect")
     def handle_connect():
@@ -475,24 +712,23 @@ def init_socketio(app):
     def handle_network_scan(payload):
         network_events = _normalize_network_events(payload)
         if not network_events:
-            emit("network_scan_ack", {"status": "ignored", "processed": 0})
+            emit("network_scan_ack", {"status": "ignored", "queued": 0})
             return
 
-        processed = 0
+        queued = 0
         for network_data in network_events:
             try:
-                result = _store_network_scan(network_data)
-                if result != "skipped":
-                    processed += 1
+                if persistence_manager.ingest(network_data):
+                    queued += 1
             except Exception as exc:
                 db.session.rollback()
-                LOGGER.warning("[WebSocket] Failed to persist network scan: %s", exc)
+                LOGGER.warning("[WebSocket] Failed to ingest network scan: %s", exc)
 
         emit(
             "network_scan_ack",
             {
                 "status": "ok",
-                "processed": processed,
+                "queued": queued,
             },
         )
 
