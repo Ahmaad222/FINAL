@@ -7,7 +7,7 @@ from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import (
     String, Integer, Float, Boolean, Text, DateTime,
-    LargeBinary, ForeignKey, JSON, UniqueConstraint,
+    ForeignKey, JSON, UniqueConstraint,
     Index
 )
 from sqlalchemy.orm import relationship
@@ -133,11 +133,6 @@ class SensorHealth(db.Model):
 # ==================== WiFi Networks (NEW - Optimized for high-frequency scans) ====================
 
 class WiFiNetwork(db.Model):
-    """
-    Optimized storage for WiFi network scans.
-    Uses SSID + BSSID + sensor_id as unique key to prevent duplicates.
-    Updates existing records instead of creating new ones.
-    """
     __tablename__ = 'wifi_networks'
 
     id = db.Column(Integer, primary_key=True)
@@ -174,13 +169,10 @@ class WiFiNetwork(db.Model):
     created_at = db.Column(DateTime, default=datetime.utcnow)
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Indexes for efficient queries
     __table_args__ = (
-        # Composite unique index for deduplication
         UniqueConstraint('sensor_id', 'bssid', name='uq_wifi_networks_sensor_bssid'),
-        # Index for time-based queries
         Index('idx_wifi_networks_sensor_last_seen', 'sensor_id', 'last_seen'),
-        # Index for signal strength tracking
+        Index('idx_wifi_networks_last_seen', 'last_seen'),
         Index('idx_wifi_networks_signal', 'signal_strength'),
         Index('idx_wifi_networks_bssid', 'bssid'),
     )
@@ -188,65 +180,10 @@ class WiFiNetwork(db.Model):
     def __repr__(self):
         return f'<WiFiNetwork {self.ssid} ({self.bssid})>'
 
-    @classmethod
-    def upsert_network(cls, session, sensor_id, bssid, ssid, **kwargs):
-        """
-        Efficient upsert: update existing record or create new one.
-        Returns tuple: (network_instance, is_new)
-        """
-        existing = cls.query.filter_by(sensor_id=sensor_id, bssid=bssid).first()
-
-        if existing:
-            # Update existing record
-            existing.seen_count = (existing.seen_count or 0) + 1
-            existing.last_seen = datetime.utcnow()
-            existing.ssid = ssid  # SSID might change for hidden networks
-            existing.signal_strength = kwargs.get('signal_strength', existing.signal_strength)
-            existing.channel = kwargs.get('channel', existing.channel)
-            existing.frequency = kwargs.get('frequency', existing.frequency)
-            existing.encryption = kwargs.get('encryption', existing.encryption)
-            existing.clients_count = kwargs.get('clients_count', existing.clients_count)
-            existing.classification = kwargs.get('classification', existing.classification)
-            existing.risk_score = kwargs.get('risk_score', existing.risk_score)
-            existing.auth_type = kwargs.get('auth_type', existing.auth_type)
-            existing.wps_info = kwargs.get('wps_info', existing.wps_info)
-            existing.manufacturer = kwargs.get('manufacturer', existing.manufacturer)
-            existing.uptime_seconds = kwargs.get('uptime_seconds', existing.uptime_seconds)
-            existing.raw_beacon = kwargs.get('raw_beacon', existing.raw_beacon)
-            existing.raw_data = kwargs.get('raw_data', existing.raw_data)
-            return existing, False
-        else:
-            # Create new record
-            network = cls(
-                sensor_id=sensor_id,
-                bssid=bssid,
-                ssid=ssid,
-                signal_strength=kwargs.get('signal_strength'),
-                channel=kwargs.get('channel'),
-                frequency=kwargs.get('frequency'),
-                encryption=kwargs.get('encryption', 'UNKNOWN'),
-                clients_count=kwargs.get('clients_count', 0),
-                classification=kwargs.get('classification', 'UNKNOWN'),
-                risk_score=kwargs.get('risk_score', 0),
-                auth_type=kwargs.get('auth_type'),
-                wps_info=kwargs.get('wps_info'),
-                manufacturer=kwargs.get('manufacturer'),
-                uptime_seconds=kwargs.get('uptime_seconds'),
-                raw_beacon=kwargs.get('raw_beacon'),
-                raw_data=kwargs.get('raw_data'),
-            )
-            session.add(network)
-            return network, True
-
 
 # ==================== Network Scan Events (Time-Series for history) ====================
 
 class NetworkScanEvent(db.Model):
-    """
-    Time-series table for network scan events.
-    Stores individual scan events with TTL-based cleanup.
-    Used for historical analysis and trend detection.
-    """
     __tablename__ = 'network_scan_events'
 
     id = db.Column(Integer, primary_key=True)
@@ -266,15 +203,12 @@ class NetworkScanEvent(db.Model):
     reasons = db.Column(JSON)  # Why this was flagged (if applicable)
     scan_metadata = db.Column('metadata', JSON)  # Additional scan metadata
 
-    # Timestamp
     scanned_at = db.Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-
-    # Cleanup marker
     is_purged = db.Column(Boolean, default=False)  # Marked for cleanup
 
-    # Indexes for time-series queries
     __table_args__ = (
         Index('idx_scan_events_sensor_time', 'sensor_id', 'scanned_at'),
+        Index('idx_scan_events_scanned_at', 'scanned_at'),
         Index('idx_scan_events_network', 'network_id'),
         Index('idx_scan_events_severity', 'severity'),
         Index('idx_scan_events_purged', 'is_purged'),

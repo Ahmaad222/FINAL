@@ -1,32 +1,45 @@
 """
-WebSocket Server for ZeinaGuard Pro.
-Handles communication between sensors and the dashboard.
+WebSocket server and background maintenance for ZeinaGuard.
 """
+
+from __future__ import annotations
 
 import logging
 import os
 import re
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
 from flask import current_app, request
 from flask_socketio import SocketIO, emit
 from redis import Redis
+from sqlalchemy import func, literal_column, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from models import Sensor, Threat, WiFiNetwork, db
+from models import NetworkScanEvent, Sensor, Threat, WiFiNetwork, db
 from security import sanitize_input, validate_mac_address
 
 
 LOGGER = logging.getLogger("zeinaguard.websocket")
-if not LOGGER.handlers:
-    handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(message)s"))
-    LOGGER.addHandler(handler)
-LOGGER.setLevel(logging.INFO)
-LOGGER.propagate = False
+CLEANUP_LOGGER = logging.getLogger("zeinaguard.cleanup")
 
 UPTIME_PART_PATTERN = re.compile(r"(\d+)\s*([dhms])", re.IGNORECASE)
 connected_clients: dict[str, dict[str, Any]] = {}
+
+WRITE_THROTTLE_SECONDS = int(os.getenv("NETWORK_WRITE_THROTTLE_SECONDS", "5"))
+CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
+SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "24"))
+NETWORK_RETENTION_HOURS = int(os.getenv("WIFI_NETWORK_RETENTION_HOURS", "48"))
+ADVISORY_LOCK_ID = int(os.getenv("ZEINAGUARD_CLEANUP_LOCK_ID", "240416"))
+
+_network_write_cache: dict[tuple[int, str], float] = {}
+_network_write_cache_lock = threading.Lock()
+_sensor_id_cache: dict[str, int] = {}
+_sensor_id_cache_lock = threading.Lock()
+_cleanup_thread_started = False
+_cleanup_thread_lock = threading.Lock()
 
 
 try:
@@ -41,6 +54,8 @@ except Exception:
 def configure_socket_logging() -> None:
     logging.getLogger("engineio").setLevel(logging.WARNING)
     logging.getLogger("socketio").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
 
 
 def parse_uptime_to_seconds(uptime_str: str) -> int:
@@ -53,19 +68,19 @@ def parse_uptime_to_seconds(uptime_str: str) -> int:
     if not isinstance(uptime_str, str):
         return 0
 
-    uptime_str = uptime_str.strip()
-    if not uptime_str:
+    value = uptime_str.strip()
+    if not value:
         return 0
 
-    if uptime_str.isdigit():
-        return int(uptime_str)
+    if value.isdigit():
+        return max(int(value), 0)
 
     total_seconds = 0
     found_any = False
 
-    for value, unit in UPTIME_PART_PATTERN.findall(uptime_str):
+    for amount_str, unit in UPTIME_PART_PATTERN.findall(value):
         found_any = True
-        amount = int(value)
+        amount = int(amount_str)
         unit = unit.lower()
 
         if unit == "d":
@@ -77,10 +92,7 @@ def parse_uptime_to_seconds(uptime_str: str) -> int:
         elif unit == "s":
             total_seconds += amount
 
-    if not found_any:
-        return 0
-
-    return total_seconds
+    return total_seconds if found_any else 0
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -93,9 +105,7 @@ def _safe_int(value: Any, default: int = 0) -> int:
 def _normalize_bssid(value: Any) -> str:
     if value is None:
         return ""
-
-    bssid = str(value).strip().upper().replace("-", ":")
-    return bssid
+    return str(value).strip().upper().replace("-", ":")
 
 
 def _normalize_ssid(value: Any) -> str:
@@ -104,9 +114,33 @@ def _normalize_ssid(value: Any) -> str:
     return sanitize_input(str(value), max_length=255) or "Hidden"
 
 
+def _calculate_frequency(channel: Any) -> int | None:
+    channel_value = _safe_int(channel, default=0)
+    if channel_value <= 0:
+        return None
+    if 1 <= channel_value <= 14:
+        return 2407 + (channel_value * 5)
+    return 5000 + (channel_value * 5)
+
+
+def _cache_sensor_id(sensor_id: int, *keys: str) -> None:
+    with _sensor_id_cache_lock:
+        for key in keys:
+            if key:
+                _sensor_id_cache[key] = sensor_id
+
+
 def _resolve_sensor(sensor_identifier: Any, hostname: Any = None) -> Sensor:
     sensor_key = sanitize_input(str(sensor_identifier or hostname or "sensor"), max_length=255)
     host_key = sanitize_input(str(hostname or sensor_key), max_length=255)
+
+    with _sensor_id_cache_lock:
+        cached_id = _sensor_id_cache.get(sensor_key) or _sensor_id_cache.get(host_key)
+
+    if cached_id:
+        sensor = db.session.get(Sensor, cached_id)
+        if sensor is not None:
+            return sensor
 
     sensor = None
     if sensor_key.isdigit():
@@ -128,6 +162,7 @@ def _resolve_sensor(sensor_identifier: Any, hostname: Any = None) -> Sensor:
         db.session.add(sensor)
         db.session.flush()
 
+    _cache_sensor_id(sensor.id, sensor_key, host_key, str(sensor.id))
     return sensor
 
 
@@ -138,21 +173,138 @@ def _normalize_network_events(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
         networks = payload.get("networks")
         if isinstance(networks, list):
-            metadata = {key: value for key, value in payload.items() if key != "networks"}
-            normalized = []
+            shared = {key: value for key, value in payload.items() if key != "networks"}
+            merged_networks = []
             for item in networks:
                 if not isinstance(item, dict):
                     continue
-                merged = metadata.copy()
+                merged = shared.copy()
                 merged.update(item)
-                normalized.append(merged)
-            return normalized
+                merged_networks.append(merged)
+            return merged_networks
         return [payload]
 
     return []
 
 
-def _store_network_scan(network_data: dict[str, Any]) -> None:
+def _should_write_network(sensor_id: int, bssid: str) -> bool:
+    cache_key = (sensor_id, bssid)
+    now = time.monotonic()
+
+    with _network_write_cache_lock:
+        last_seen = _network_write_cache.get(cache_key)
+        if last_seen is not None and (now - last_seen) < WRITE_THROTTLE_SECONDS:
+            return False
+        _network_write_cache[cache_key] = now
+        return True
+
+
+def _mark_write_failed(sensor_id: int, bssid: str) -> None:
+    with _network_write_cache_lock:
+        _network_write_cache.pop((sensor_id, bssid), None)
+
+
+def _prune_write_cache(max_age_seconds: int = 3600) -> None:
+    cutoff = time.monotonic() - max_age_seconds
+    with _network_write_cache_lock:
+        expired_keys = [key for key, seen_at in _network_write_cache.items() if seen_at < cutoff]
+        for key in expired_keys:
+            _network_write_cache.pop(key, None)
+
+
+def _upsert_wifi_network(network_data: dict[str, Any], sensor_id: int, ssid: str, bssid: str) -> tuple[int, bool, int]:
+    now = datetime.utcnow()
+    uptime_seconds = parse_uptime_to_seconds(network_data.get("uptime"))
+    channel = _safe_int(network_data.get("channel"), default=0) or None
+    signal_strength = _safe_int(network_data.get("signal"), default=0) or None
+    clients_count = _safe_int(network_data.get("clients"), default=0)
+    risk_score = _safe_int(network_data.get("score"), default=0)
+
+    payload = {
+        "sensor_id": sensor_id,
+        "ssid": ssid,
+        "bssid": bssid,
+        "channel": channel,
+        "frequency": _calculate_frequency(channel),
+        "signal_strength": signal_strength,
+        "encryption": sanitize_input(str(network_data.get("encryption") or "UNKNOWN"), max_length=50),
+        "clients_count": clients_count,
+        "classification": sanitize_input(
+            str(network_data.get("classification") or "UNKNOWN"),
+            max_length=50,
+        ),
+        "risk_score": risk_score,
+        "auth_type": sanitize_input(str(network_data.get("auth_type") or network_data.get("auth") or ""), max_length=50)
+        or None,
+        "wps_info": network_data.get("wps_info") or network_data.get("wps"),
+        "manufacturer": sanitize_input(str(network_data.get("manufacturer") or ""), max_length=255) or None,
+        "device_type": sanitize_input(str(network_data.get("device_type") or "AP"), max_length=50) or "AP",
+        "uptime_seconds": uptime_seconds,
+        "first_seen": now,
+        "last_seen": now,
+        "raw_beacon": network_data.get("raw_beacon"),
+        "raw_data": network_data,
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    table = WiFiNetwork.__table__
+    insert_stmt = pg_insert(table).values(**payload)
+    upsert_stmt = insert_stmt.on_conflict_do_update(
+        index_elements=["sensor_id", "bssid"],
+        set_={
+            "ssid": insert_stmt.excluded.ssid,
+            "channel": insert_stmt.excluded.channel,
+            "frequency": insert_stmt.excluded.frequency,
+            "signal_strength": insert_stmt.excluded.signal_strength,
+            "encryption": insert_stmt.excluded.encryption,
+            "clients_count": insert_stmt.excluded.clients_count,
+            "classification": insert_stmt.excluded.classification,
+            "risk_score": insert_stmt.excluded.risk_score,
+            "auth_type": insert_stmt.excluded.auth_type,
+            "wps_info": insert_stmt.excluded.wps_info,
+            "manufacturer": insert_stmt.excluded.manufacturer,
+            "device_type": insert_stmt.excluded.device_type,
+            "uptime_seconds": insert_stmt.excluded.uptime_seconds,
+            "raw_beacon": insert_stmt.excluded.raw_beacon,
+            "raw_data": insert_stmt.excluded.raw_data,
+            "last_seen": func.now(),
+            "updated_at": func.now(),
+            "seen_count": table.c.seen_count + 1,
+        },
+    ).returning(
+        table.c.id,
+        table.c.seen_count,
+        literal_column("xmax = 0").label("inserted"),
+    )
+
+    row = db.session.execute(upsert_stmt).one()
+    return row.id, bool(row.inserted), int(row.seen_count or 1)
+
+
+def _insert_scan_event(network_data: dict[str, Any], sensor_id: int, network_id: int) -> None:
+    now = datetime.utcnow()
+    scan_insert = NetworkScanEvent.__table__.insert().values(
+        sensor_id=sensor_id,
+        network_id=network_id,
+        event_type=sanitize_input(str(network_data.get("classification") or "SCAN"), max_length=50) or "SCAN",
+        severity=sanitize_input(str(network_data.get("severity") or "INFO"), max_length=50) or "INFO",
+        risk_score=_safe_int(network_data.get("score"), default=0),
+        signal_strength=_safe_int(network_data.get("signal"), default=0) or None,
+        channel=_safe_int(network_data.get("channel"), default=0) or None,
+        reasons=network_data.get("reasons"),
+        metadata={
+            "ssid": _normalize_ssid(network_data.get("ssid")),
+            "bssid": _normalize_bssid(network_data.get("bssid")),
+            "uptime_seconds": parse_uptime_to_seconds(network_data.get("uptime")),
+            "raw_data": network_data,
+        },
+        scanned_at=now,
+    )
+    db.session.execute(scan_insert)
+
+
+def _store_network_scan(network_data: dict[str, Any]) -> str:
     sensor = _resolve_sensor(
         sensor_identifier=network_data.get("sensor_id"),
         hostname=network_data.get("hostname"),
@@ -160,52 +312,107 @@ def _store_network_scan(network_data: dict[str, Any]) -> None:
 
     bssid = _normalize_bssid(network_data.get("bssid"))
     ssid = _normalize_ssid(network_data.get("ssid"))
-
     if not bssid or not validate_mac_address(bssid):
         raise ValueError(f"Invalid BSSID: {network_data.get('bssid')}")
 
-    uptime_seconds = parse_uptime_to_seconds(network_data.get("uptime"))
-    now = datetime.utcnow()
+    if not _should_write_network(sensor.id, bssid):
+        return "skipped"
 
-    LOGGER.info("[WebSocket] 📡 Received: %s (%s)", ssid, bssid)
+    LOGGER.info("[WebSocket] Received: %s (%s)", ssid, bssid)
 
-    network = WiFiNetwork.query.filter_by(sensor_id=sensor.id, bssid=bssid).first()
+    try:
+        network_id, inserted, seen_count = _upsert_wifi_network(network_data, sensor.id, ssid, bssid)
+        _insert_scan_event(network_data, sensor.id, network_id)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        _mark_write_failed(sensor.id, bssid)
+        raise
 
-    if network is None:
-        network = WiFiNetwork(
-            sensor_id=sensor.id,
-            ssid=ssid,
-            bssid=bssid,
-            first_seen=now,
-            seen_count=1,
+    if inserted:
+        LOGGER.info("[DB] New network stored")
+        return "stored"
+
+    LOGGER.info("[DB] Network updated (seen_count=%s)", seen_count)
+    return "updated"
+
+
+def _try_acquire_cleanup_lock() -> bool:
+    try:
+        return bool(
+            db.session.execute(
+                text("SELECT pg_try_advisory_xact_lock(:lock_id)"),
+                {"lock_id": ADVISORY_LOCK_ID},
+            ).scalar()
         )
-        db.session.add(network)
-        action = "stored"
-    else:
-        network.seen_count += 1
-        action = "updated"
+    except Exception:
+        db.session.rollback()
+        return False
 
-    network.ssid = ssid
-    network.channel = _safe_int(network_data.get("channel"), default=0) or None
-    network.signal_strength = _safe_int(network_data.get("signal"), default=0) or None
-    network.encryption = sanitize_input(str(network_data.get("encryption") or "UNKNOWN"), max_length=50)
-    network.clients_count = _safe_int(network_data.get("clients"), default=0)
-    network.classification = sanitize_input(
-        str(network_data.get("classification") or "UNKNOWN"),
-        max_length=50,
-    )
-    network.risk_score = _safe_int(network_data.get("score"), default=0)
-    network.uptime_seconds = uptime_seconds
-    network.last_seen = now
-    network.raw_data = network_data
 
-    db.session.commit()
+def run_cleanup_cycle() -> tuple[int, int]:
+    deleted_scan_events = 0
+    deleted_networks = 0
 
-    if action == "stored":
-        LOGGER.info("[WebSocket] ✅ Stored network: %s (%s)", ssid, bssid)
-        LOGGER.info("[WebSocket] ✅ Stored: %s", ssid)
-    else:
-        LOGGER.info("[WebSocket] 🔄 Updated: %s (seen_count=%s)", ssid, network.seen_count)
+    if not _try_acquire_cleanup_lock():
+        return deleted_scan_events, deleted_networks
+
+    try:
+        deleted_scan_events = (
+            db.session.query(NetworkScanEvent)
+            .filter(
+                NetworkScanEvent.scanned_at
+                < func.now() - text(f"INTERVAL '{SCAN_RETENTION_HOURS} hours'")
+            )
+            .delete(synchronize_session=False)
+        )
+        deleted_networks = (
+            db.session.query(WiFiNetwork)
+            .filter(
+                WiFiNetwork.last_seen
+                < func.now() - text(f"INTERVAL '{NETWORK_RETENTION_HOURS} hours'")
+            )
+            .delete(synchronize_session=False)
+        )
+        db.session.commit()
+        _prune_write_cache()
+    except Exception:
+        db.session.rollback()
+        raise
+
+    if deleted_scan_events:
+        CLEANUP_LOGGER.info("[Cleanup] Deleted %s old scan records", deleted_scan_events)
+    if deleted_networks:
+        CLEANUP_LOGGER.info("[Cleanup] Deleted %s stale wifi networks", deleted_networks)
+    return deleted_scan_events, deleted_networks
+
+
+def _cleanup_loop(app) -> None:
+    while True:
+        time.sleep(CLEANUP_INTERVAL_SECONDS)
+        with app.app_context():
+            try:
+                run_cleanup_cycle()
+            except Exception as exc:
+                db.session.rollback()
+                CLEANUP_LOGGER.warning("[Cleanup] Failed: %s", exc)
+
+
+def start_cleanup_thread(app) -> None:
+    global _cleanup_thread_started
+
+    with _cleanup_thread_lock:
+        if _cleanup_thread_started:
+            return
+
+        cleanup_thread = threading.Thread(
+            target=_cleanup_loop,
+            args=(app,),
+            daemon=True,
+            name="zeinaguard-cleanup",
+        )
+        cleanup_thread.start()
+        _cleanup_thread_started = True
 
 
 def _resolve_async_mode() -> str:
@@ -229,19 +436,19 @@ def init_socketio(app):
         engineio_logger=False,
     )
 
+    start_cleanup_thread(app)
+
     @socketio.on("connect")
     def handle_connect():
         client_id = request.sid
         connected_clients[client_id] = {
             "connected_at": datetime.utcnow().isoformat(),
         }
-        LOGGER.info("[WebSocket] Connected client: %s", client_id)
 
     @socketio.on("disconnect")
     def handle_disconnect():
         client_id = request.sid
         connected_clients.pop(client_id, None)
-        LOGGER.info("[WebSocket] Disconnected client: %s", client_id)
 
     @socketio.on("sensor_register")
     def handle_sensor_register(data):
@@ -251,7 +458,6 @@ def init_socketio(app):
                 hostname=(data or {}).get("hostname"),
             )
             db.session.commit()
-            LOGGER.info("[WebSocket] Sensor registered: %s", sensor.hostname or sensor.name)
             emit(
                 "registration_success",
                 {
@@ -262,67 +468,59 @@ def init_socketio(app):
             )
         except Exception as exc:
             db.session.rollback()
-            LOGGER.error("[WebSocket] ❌ Sensor registration failed: %s", exc)
             emit("registration_error", {"status": "error", "message": "registration_failed"})
+            LOGGER.warning("[WebSocket] Sensor registration failed: %s", exc)
 
     @socketio.on("network_scan")
     def handle_network_scan(payload):
         network_events = _normalize_network_events(payload)
-
         if not network_events:
-            LOGGER.warning("[WebSocket] Ignored empty network_scan payload")
-            emit("network_scan_ack", {"status": "ignored"})
+            emit("network_scan_ack", {"status": "ignored", "processed": 0})
             return
 
-        stored_count = 0
+        processed = 0
         for network_data in network_events:
             try:
-                _store_network_scan(network_data)
-                stored_count += 1
+                result = _store_network_scan(network_data)
+                if result != "skipped":
+                    processed += 1
             except Exception as exc:
                 db.session.rollback()
-                LOGGER.error("[WebSocket] ❌ Failed to store network scan: %s", exc)
+                LOGGER.warning("[WebSocket] Failed to persist network scan: %s", exc)
 
         emit(
             "network_scan_ack",
             {
-                "status": "ok" if stored_count else "failed",
-                "stored_count": stored_count,
+                "status": "ok",
+                "processed": processed,
             },
         )
 
     @socketio.on("new_threat")
     def handle_new_threat(payload):
         ssid = _normalize_ssid((payload or {}).get("ssid"))
-        LOGGER.info("[WebSocket] 🚨 Received Threat: %s", ssid)
-
-        with app.app_context():
-            try:
-                new_threat = Threat(
-                    threat_type=(payload or {}).get("threat_type", "UNKNOWN"),
-                    severity=(payload or {}).get("severity", "HIGH"),
-                    source_mac=(payload or {}).get("source_mac"),
-                    ssid=(payload or {}).get("ssid"),
-                    description="Detected via Sensor WebSocket",
-                )
-
-                db.session.add(new_threat)
-                db.session.commit()
-
-                socketio.emit(
-                    "threat_event",
-                    {
-                        "id": new_threat.id,
-                        "type": "threat_detected",
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "data": payload,
-                    },
-                )
-
-                LOGGER.info("[WebSocket] ✅ Stored threat: %s", ssid)
-            except Exception as exc:
-                db.session.rollback()
-                LOGGER.error("[WebSocket] ❌ Error saving threat: %s", exc)
+        try:
+            new_threat = Threat(
+                threat_type=(payload or {}).get("threat_type", "UNKNOWN"),
+                severity=(payload or {}).get("severity", "HIGH"),
+                source_mac=(payload or {}).get("source_mac"),
+                ssid=(payload or {}).get("ssid"),
+                description="Detected via Sensor WebSocket",
+            )
+            db.session.add(new_threat)
+            db.session.commit()
+            socketio.emit(
+                "threat_event",
+                {
+                    "id": new_threat.id,
+                    "type": "threat_detected",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "data": payload,
+                },
+            )
+        except Exception as exc:
+            db.session.rollback()
+            LOGGER.warning("[WebSocket] Failed to store threat for %s: %s", ssid, exc)
 
     return socketio
 
@@ -330,10 +528,8 @@ def init_socketio(app):
 def broadcast_threat_event(threat_data):
     socketio = current_app.socketio
     socketio.emit("threat_event", threat_data)
-    LOGGER.info("[WebSocket] 📡 Threat broadcasted to dashboard")
 
 
 def broadcast_sensor_status(sensor_data):
     socketio = current_app.socketio
     socketio.emit("sensor_status", sensor_data)
-    LOGGER.info("[WebSocket] 📡 Sensor status broadcasted")

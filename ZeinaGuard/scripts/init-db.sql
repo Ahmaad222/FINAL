@@ -79,19 +79,40 @@ CREATE TABLE IF NOT EXISTS wifi_networks (
     ssid VARCHAR(255) NOT NULL DEFAULT 'Hidden',
     bssid VARCHAR(17) NOT NULL,
     channel INTEGER,
+    frequency INTEGER,
     signal_strength INTEGER,
     encryption VARCHAR(50),
     clients_count INTEGER DEFAULT 0,
     classification VARCHAR(50) DEFAULT 'UNKNOWN',
     risk_score INTEGER DEFAULT 0,
+    auth_type VARCHAR(50),
+    wps_info JSON,
+    manufacturer VARCHAR(255),
+    device_type VARCHAR(50) DEFAULT 'AP',
     uptime_seconds INTEGER NOT NULL DEFAULT 0,
     seen_count INTEGER NOT NULL DEFAULT 1,
     first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    raw_data JSONB,
+    raw_beacon TEXT,
+    raw_data JSON,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_wifi_networks_sensor_bssid UNIQUE (sensor_id, bssid)
+);
+
+CREATE TABLE IF NOT EXISTS network_scan_events (
+    id SERIAL PRIMARY KEY,
+    sensor_id INTEGER NOT NULL REFERENCES sensors(id) ON DELETE CASCADE,
+    network_id INTEGER REFERENCES wifi_networks(id) ON DELETE CASCADE,
+    event_type VARCHAR(50) DEFAULT 'SCAN',
+    severity VARCHAR(50) DEFAULT 'INFO',
+    risk_score FLOAT,
+    signal_strength INTEGER,
+    channel INTEGER,
+    reasons JSON,
+    metadata JSON,
+    scanned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    is_purged BOOLEAN DEFAULT FALSE
 );
 
 -- Network Topology
@@ -220,18 +241,24 @@ CREATE TABLE IF NOT EXISTS blocked_devices (
 );
 
 -- Create indexes for performance
-CREATE INDEX idx_threats_created_at ON threats(created_at);
-CREATE INDEX idx_threats_severity ON threats(severity);
-CREATE INDEX idx_threats_sensor ON threats(detected_by);
-CREATE INDEX idx_sensor_health_sensor ON sensor_health(sensor_id);
-CREATE INDEX idx_sensor_health_created ON sensor_health(created_at);
-CREATE INDEX idx_wifi_networks_sensor_last_seen ON wifi_networks(sensor_id, last_seen);
-CREATE INDEX idx_wifi_networks_bssid ON wifi_networks(bssid);
-CREATE INDEX idx_alert_rules_enabled ON alert_rules(is_enabled);
-CREATE INDEX idx_alerts_threat ON alerts(threat_id);
-CREATE INDEX idx_incidents_status ON incidents(status);
-CREATE INDEX idx_audit_logs_user ON audit_logs(user_id);
-CREATE INDEX idx_audit_logs_created ON audit_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_threats_created_at ON threats(created_at);
+CREATE INDEX IF NOT EXISTS idx_threats_severity ON threats(severity);
+CREATE INDEX IF NOT EXISTS idx_threats_sensor ON threats(detected_by);
+CREATE INDEX IF NOT EXISTS idx_sensor_health_sensor ON sensor_health(sensor_id);
+CREATE INDEX IF NOT EXISTS idx_sensor_health_created ON sensor_health(created_at);
+CREATE INDEX IF NOT EXISTS idx_wifi_networks_sensor_last_seen ON wifi_networks(sensor_id, last_seen);
+CREATE INDEX IF NOT EXISTS idx_wifi_networks_last_seen ON wifi_networks(last_seen);
+CREATE INDEX IF NOT EXISTS idx_wifi_networks_signal ON wifi_networks(signal_strength);
+CREATE INDEX IF NOT EXISTS idx_wifi_networks_bssid ON wifi_networks(bssid);
+CREATE INDEX IF NOT EXISTS idx_scan_events_sensor_time ON network_scan_events(sensor_id, scanned_at);
+CREATE INDEX IF NOT EXISTS idx_scan_events_scanned_at ON network_scan_events(scanned_at);
+CREATE INDEX IF NOT EXISTS idx_scan_events_network ON network_scan_events(network_id);
+CREATE INDEX IF NOT EXISTS idx_scan_events_purged ON network_scan_events(is_purged);
+CREATE INDEX IF NOT EXISTS idx_alert_rules_enabled ON alert_rules(is_enabled);
+CREATE INDEX IF NOT EXISTS idx_alerts_threat ON alerts(threat_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at);
 
 -- Create some default roles
 INSERT INTO roles (name, description) VALUES
