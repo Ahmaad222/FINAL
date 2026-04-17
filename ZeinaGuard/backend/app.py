@@ -33,10 +33,10 @@ def configure_logging() -> logging.Logger:
         force=True,
     )
 
-    logging.getLogger("engineio").setLevel(logging.WARNING)
-    logging.getLogger("socketio").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+    logging.getLogger("engineio").setLevel(logging.ERROR)
+    logging.getLogger("socketio").setLevel(logging.ERROR)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
     logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
     app_logger = logging.getLogger("zeinaguard")

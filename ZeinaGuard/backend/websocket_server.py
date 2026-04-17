@@ -10,14 +10,14 @@ import re
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from queue import Empty, Full, Queue
 from typing import Any
 
 from flask import current_app, request
 from flask_socketio import SocketIO, emit
 from redis import Redis
-from sqlalchemy import func, literal_column, text
+from sqlalchemy import func, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from models import NetworkScanEvent, Sensor, Threat, WiFiNetwork, db
@@ -35,8 +35,13 @@ BATCH_FLUSH_INTERVAL_SECONDS = float(os.getenv("NETWORK_BATCH_FLUSH_INTERVAL_SEC
 BATCH_SIZE_LIMIT = int(os.getenv("NETWORK_BATCH_SIZE_LIMIT", "200"))
 NETWORK_LOG_INTERVAL_SECONDS = float(os.getenv("NETWORK_LOG_INTERVAL_SECONDS", "30"))
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
-SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "24"))
+SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "6"))
+THREAT_RETENTION_HOURS = int(os.getenv("THREAT_RETENTION_HOURS", "24"))
 NETWORK_RETENTION_HOURS = int(os.getenv("WIFI_NETWORK_RETENTION_HOURS", "48"))
+THREAT_DEDUPE_WINDOW_SECONDS = int(os.getenv("THREAT_DEDUPE_WINDOW_SECONDS", "60"))
+THREAT_MAX_ROWS = int(os.getenv("THREAT_MAX_ROWS", "50000"))
+SCAN_EVENT_MAX_ROWS = int(os.getenv("NETWORK_SCAN_EVENT_MAX_ROWS", "250000"))
+WIFI_NETWORK_MAX_ROWS = int(os.getenv("WIFI_NETWORK_MAX_ROWS", "50000"))
 ADVISORY_LOCK_ID = int(os.getenv("ZEINAGUARD_CLEANUP_LOCK_ID", "240416"))
 
 _sensor_id_cache: dict[str, int] = {}
@@ -457,7 +462,7 @@ class ScanPersistenceManager:
             self._stats["flushes"] += 1
 
         for update in flush_result.inserted_updates:
-            LOGGER.info(
+            LOGGER.debug(
                 "[DB] New Network: sensor=%s ssid=%s bssid=%s channel=%s signal=%s classification=%s risk=%s",
                 update.sensor_id,
                 update.ssid,
@@ -507,10 +512,10 @@ class ScanPersistenceManager:
 
 
 def configure_socket_logging() -> None:
-    logging.getLogger("engineio").setLevel(logging.WARNING)
-    logging.getLogger("socketio").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-    logging.getLogger("sqlalchemy.pool").setLevel(logging.WARNING)
+    logging.getLogger("engineio").setLevel(logging.ERROR)
+    logging.getLogger("socketio").setLevel(logging.ERROR)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.ERROR)
+    logging.getLogger("sqlalchemy.pool").setLevel(logging.ERROR)
 
 
 def parse_uptime_to_seconds(uptime_str: str) -> int:
@@ -567,6 +572,26 @@ def _normalize_ssid(value: Any) -> str:
     if not value:
         return "Hidden"
     return sanitize_input(str(value), max_length=255) or "Hidden"
+
+
+def _normalize_threat_type(value: Any) -> str:
+    return sanitize_input(str(value or "UNKNOWN"), max_length=100) or "UNKNOWN"
+
+
+def _find_recent_duplicate_threat(threat_type: str, source_mac: str | None) -> Threat | None:
+    if not source_mac:
+        return None
+
+    cutoff = datetime.utcnow() - timedelta(seconds=THREAT_DEDUPE_WINDOW_SECONDS)
+    return (
+        Threat.query.filter(
+            Threat.source_mac == source_mac,
+            Threat.threat_type == threat_type,
+            Threat.created_at >= cutoff,
+        )
+        .order_by(Threat.created_at.desc())
+        .first()
+    )
 
 
 def _calculate_frequency(channel: Any) -> int | None:
@@ -666,14 +691,46 @@ def _try_acquire_cleanup_lock() -> bool:
         return False
 
 
-def run_cleanup_cycle() -> tuple[int, int]:
+def _apply_row_cap(model, time_column, max_rows: int) -> int:
+    if max_rows <= 0:
+        return 0
+
+    total_rows = db.session.query(func.count(model.id)).scalar() or 0
+    overflow = total_rows - max_rows
+    if overflow <= 0:
+        return 0
+
+    oldest_rows = (
+        select(model.id)
+        .order_by(time_column.asc(), model.id.asc())
+        .limit(overflow)
+        .subquery()
+    )
+
+    return (
+        db.session.query(model)
+        .filter(model.id.in_(select(oldest_rows.c.id)))
+        .delete(synchronize_session=False)
+    )
+
+
+def run_cleanup_cycle() -> tuple[int, int, int]:
+    deleted_threats = 0
     deleted_scan_events = 0
     deleted_networks = 0
 
     if not _try_acquire_cleanup_lock():
-        return deleted_scan_events, deleted_networks
+        return deleted_threats, deleted_scan_events, deleted_networks
 
     try:
+        deleted_threats = (
+            db.session.query(Threat)
+            .filter(
+                Threat.created_at
+                < func.now() - text(f"INTERVAL '{THREAT_RETENTION_HOURS} hours'")
+            )
+            .delete(synchronize_session=False)
+        )
         deleted_scan_events = (
             db.session.query(NetworkScanEvent)
             .filter(
@@ -690,16 +747,25 @@ def run_cleanup_cycle() -> tuple[int, int]:
             )
             .delete(synchronize_session=False)
         )
+        deleted_threats += _apply_row_cap(Threat, Threat.created_at, THREAT_MAX_ROWS)
+        deleted_scan_events += _apply_row_cap(
+            NetworkScanEvent,
+            NetworkScanEvent.scanned_at,
+            SCAN_EVENT_MAX_ROWS,
+        )
+        deleted_networks += _apply_row_cap(WiFiNetwork, WiFiNetwork.last_seen, WIFI_NETWORK_MAX_ROWS)
         db.session.commit()
     except Exception:
         db.session.rollback()
         raise
 
+    if deleted_threats:
+        CLEANUP_LOGGER.info("[Cleanup] Deleted %s old threat records", deleted_threats)
     if deleted_scan_events:
         CLEANUP_LOGGER.info("[Cleanup] Deleted %s old scan records", deleted_scan_events)
     if deleted_networks:
         CLEANUP_LOGGER.info("[Cleanup] Deleted %s stale wifi networks", deleted_networks)
-    return deleted_scan_events, deleted_networks
+    return deleted_threats, deleted_scan_events, deleted_networks
 
 
 def _cleanup_loop(app) -> None:
@@ -818,11 +884,22 @@ def init_socketio(app):
         payload = sanitize_json_payload(payload or {})
         ssid = _normalize_ssid(payload.get("ssid"))
         try:
+            threat_type = _normalize_threat_type(payload.get("threat_type"))
+            source_mac = _normalize_bssid(payload.get("source_mac"))
+            duplicate_threat = _find_recent_duplicate_threat(threat_type, source_mac)
+            if duplicate_threat is not None:
+                LOGGER.info(
+                    "[WebSocket] Suppressed duplicate threat: %s %s",
+                    threat_type,
+                    source_mac,
+                )
+                return
+
             new_threat = Threat(
-                threat_type=payload.get("threat_type", "UNKNOWN"),
+                threat_type=threat_type,
                 severity=payload.get("severity", "HIGH"),
-                source_mac=payload.get("source_mac"),
-                ssid=payload.get("ssid"),
+                source_mac=source_mac or None,
+                ssid=ssid,
                 description="Detected via Sensor WebSocket",
             )
             db.session.add(new_threat)

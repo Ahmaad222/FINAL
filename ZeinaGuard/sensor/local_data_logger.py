@@ -23,12 +23,18 @@ class LocalDataLogger:
         "uptime_seconds",
     ]
 
-    def __init__(self, base_dir: Path | None = None, max_bytes: int = 50 * 1024 * 1024, rotation_seconds: int = 3600):
+    def __init__(
+        self,
+        base_dir: Path | None = None,
+        max_bytes: int | None = None,
+        rotation_seconds: int | None = None,
+    ):
         self.base_dir = Path(base_dir or Path(__file__).resolve().parent / "data-logs")
         os.makedirs(self.base_dir, exist_ok=True)
 
-        self.max_bytes = max_bytes
-        self.rotation_seconds = rotation_seconds
+        # Rotate aggressively so long-running sensors stay bounded on disk.
+        self.max_bytes = int(max_bytes or os.getenv("SENSOR_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+        self.rotation_seconds = int(rotation_seconds or os.getenv("SENSOR_LOG_ROTATION_SECONDS", "300"))
         self._lock = threading.Lock()
         self._csv_path: Path | None = None
         self._json_path: Path | None = None
@@ -78,10 +84,10 @@ class LocalDataLogger:
         if (time.time() - self._opened_at) >= self.rotation_seconds:
             return True
 
-        if self._csv_path and self._csv_path.exists() and self._csv_path.stat().st_size > self.max_bytes:
+        if self._csv_path and self._csv_path.exists() and self._csv_path.stat().st_size >= self.max_bytes:
             return True
 
-        if self._json_path and self._json_path.exists() and self._json_path.stat().st_size > self.max_bytes:
+        if self._json_path and self._json_path.exists() and self._json_path.stat().st_size >= self.max_bytes:
             return True
 
         return False

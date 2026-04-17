@@ -19,7 +19,9 @@ else:
     DEFAULT_BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
 
 SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
-SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "1.0"))
+SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
+SCAN_DEDUP_SIGNAL_DELTA = int(os.getenv("SCAN_DEDUP_SIGNAL_DELTA", "5"))
+SCAN_DEDUP_MAX_AGE_SECONDS = float(os.getenv("SCAN_DEDUP_MAX_AGE_SECONDS", "30"))
 
 
 class WSClient:
@@ -30,6 +32,8 @@ class WSClient:
         self.sensor_id = sensor_id or os.getenv("ZEINAGUARD_SENSOR_ID", self.hostname)
         self.started_at = time.time()
         self.is_running = False
+        self.last_sent_cache = {}
+        self.send_buffer = []
 
         self.local_logger = LocalDataLogger()
         self.sio = socketio.Client(
@@ -121,7 +125,6 @@ class WSClient:
                 update_status(backend_status="degraded", message="Threat send failed")
 
     def _scan_listener(self):
-        pending_scans = []
         next_flush_deadline = time.monotonic() + SCAN_EMIT_INTERVAL_SECONDS
 
         while self.is_running:
@@ -132,20 +135,65 @@ class WSClient:
                 scan = None
 
             if scan is not None:
+                if not self._should_process_scan(scan):
+                    continue
+
                 payload = self._build_scan_payload(scan)
                 self.local_logger.log_scan(payload)
-                pending_scans.append(payload)
+                self.send_buffer.append(payload)
+                self._update_last_sent_cache(payload)
 
             should_flush = (
-                len(pending_scans) >= SCAN_EMIT_BATCH_SIZE
-                or (pending_scans and time.monotonic() >= next_flush_deadline)
+                len(self.send_buffer) >= SCAN_EMIT_BATCH_SIZE
+                or (self.send_buffer and time.monotonic() >= next_flush_deadline)
             )
             if not should_flush:
                 continue
 
-            self._flush_scan_batch(pending_scans)
-            pending_scans = []
+            self._flush_scan_batch(self.send_buffer)
+            self.send_buffer = []
             next_flush_deadline = time.monotonic() + SCAN_EMIT_INTERVAL_SECONDS
+
+    def _should_process_scan(self, scan):
+        bssid = str(scan.get("bssid") or "").strip().upper()
+        if not bssid:
+            return False
+
+        now = time.time()
+        current_signal = scan.get("signal")
+        current_classification = scan.get("classification", "UNKNOWN")
+        cached = self.last_sent_cache.get(bssid)
+
+        if cached is None:
+            return True
+
+        if self._signal_changed(cached.get("signal"), current_signal):
+            return True
+
+        if cached.get("classification") != current_classification:
+            return True
+
+        return (now - cached.get("last_sent", 0)) > SCAN_DEDUP_MAX_AGE_SECONDS
+
+    def _signal_changed(self, previous_signal, current_signal):
+        if previous_signal is None or current_signal is None:
+            return previous_signal != current_signal
+
+        try:
+            return abs(int(current_signal) - int(previous_signal)) >= SCAN_DEDUP_SIGNAL_DELTA
+        except (TypeError, ValueError):
+            return previous_signal != current_signal
+
+    def _update_last_sent_cache(self, payload):
+        bssid = str(payload.get("bssid") or "").strip().upper()
+        if not bssid:
+            return
+
+        self.last_sent_cache[bssid] = {
+            "signal": payload.get("signal"),
+            "classification": payload.get("classification", "UNKNOWN"),
+            "last_sent": time.time(),
+        }
 
     def _flush_scan_batch(self, batch):
         if not batch or not self.sio.connected:

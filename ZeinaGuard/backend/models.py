@@ -245,6 +245,7 @@ class Threat(db.Model):
         Index('idx_threats_created_at', 'created_at'),
         Index('idx_threats_severity', 'severity'),
         Index('idx_threats_sensor', 'detected_by'),
+        Index('idx_threats_source_type_created', 'source_mac', 'threat_type', 'created_at'),
     )
 
     def __repr__(self):
