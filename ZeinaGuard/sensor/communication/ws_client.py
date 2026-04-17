@@ -25,15 +25,8 @@ SCAN_DEDUP_MAX_AGE_SECONDS = float(os.getenv("SCAN_DEDUP_MAX_AGE_SECONDS", "30")
 
 
 class WSClient:
-<<<<<<< HEAD
-
-    def __init__(self, backend_url="http://192.168.201.131:8000", token=None):
-
-        self.backend_url = backend_url
-=======
     def __init__(self, backend_url=None, token=None, sensor_id=None):
         self.backend_url = backend_url or DEFAULT_BACKEND_URL
->>>>>>> 9a9205d6e57dcda0558284f3501b9296130ac64f
         self.token = token
         self.hostname = socket.gethostname()
         self.sensor_id = sensor_id or os.getenv("ZEINAGUARD_SENSOR_ID", self.hostname)

@@ -2,17 +2,8 @@ import requests
 
 
 class APIClient:
-<<<<<<< HEAD
-    def __init__(self):
-
-        # Backend URL
-        self.backend_url = "http://192.168.201.131:8000"
-
-        # Credentials
-=======
     def __init__(self, backend_url=None):
         self.backend_url = (backend_url or "http://localhost:5000").rstrip("/")
->>>>>>> 9a9205d6e57dcda0558284f3501b9296130ac64f
         self.username = "admin"
         self.password = "admin123"
         self.token = None
