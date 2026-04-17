@@ -13,9 +13,15 @@ const nextConfig = {
   },
   allowedDevOrigins: ["*.replit.dev", "*.replit.app", "*.janeway.replit.dev"],
   async rewrites() {
-    const target = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+    // Use BACKEND_URL (server-side only env var) if available, 
+    // otherwise fallback to NEXT_PUBLIC_API_URL or localhost
+    const target = process.env.BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+    
+    // Safety check: if target is a relative path (like '/backend-api'), fallback to localhost
+    const finalTarget = target.startsWith('http') ? target : 'http://localhost:5000';
+    
     return [
-      { source: '/backend-api/:path*', destination: `${target}/:path*` },
+      { source: '/backend-api/:path*', destination: `${finalTarget}/:path*` },
     ];
   },
 }

@@ -1,14 +1,11 @@
-version: '3.9'
-
 services:
-  # PostgreSQL with TimescaleDB extension
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: zeinaguard_postgres
     environment:
-      POSTGRES_USER: zeinaguard_user
-      POSTGRES_PASSWORD: secure_password_change_me
-      POSTGRES_DB: zeinaguard_db
+      POSTGRES_USER: ${DB_USER:-zeinaguard_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secure_password_change_me}
+      POSTGRES_DB: ${DB_NAME:-zeinaguard_db}
       POSTGRES_INITDB_ARGS: "-c shared_preload_libraries=timescaledb"
     ports:
       - "5432:5432"
@@ -19,16 +16,17 @@ services:
     networks:
       - zeinaguard_network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zeinaguard_user -d zeinaguard_db"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
 
-  # Redis for message queue and caching
   redis:
     image: redis:7-alpine
     container_name: zeinaguard_redis
-    command: redis-server --appendonly yes --requirepass redis_password_change_me
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-redis_password_change_me}
     ports:
       - "6379:6379"
     volumes:
@@ -36,12 +34,12 @@ services:
     networks:
       - zeinaguard_network
     healthcheck:
-      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "redis_password_change_me", "ping"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis_password_change_me}", "ping"]
+      interval: 5s
+      timeout: 3s
       retries: 5
+    restart: unless-stopped
 
-  # Flask Backend (API + Socket.IO on port 5000)
   flask-backend:
     build:
       context: .
@@ -49,16 +47,17 @@ services:
     container_name: zeinaguard_flask
     environment:
       FLASK_APP: app.py
-      FLASK_ENV: development
+      FLASK_ENV: production
       FLASK_PORT: 5000
-      DATABASE_URL: postgresql://zeinaguard_user:secure_password_change_me@postgres:5432/zeinaguard_db
-      REDIS_URL: redis://:redis_password_change_me@redis:6379/0
-      JWT_SECRET_KEY: your_jwt_secret_key_change_me
-      FLASK_DEBUG: 1
+      SOCKETIO_ASYNC_MODE: eventlet
+      DATABASE_URL: postgresql://${DB_USER:-zeinaguard_user}:${DB_PASSWORD:-secure_password_change_me}@postgres:5432/${DB_NAME:-zeinaguard_db}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_password_change_me}@redis:6379/0
+      JWT_SECRET_KEY: super_secure_very_long_secret_key_123456789_very_secure
+      FLASK_DEBUG: 0
     ports:
       - "5000:5000"
     volumes:
-      - ./backend:/app
+      - ./backend:/app:ro
     networks:
       - zeinaguard_network
     depends_on:
@@ -66,27 +65,28 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: python app.py
+    command: gunicorn --worker-class eventlet --workers 1 --bind 0.0.0.0:5000 --timeout 120 app:app
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/ready')"]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
 
-  # Next.js Frontend (host:3000 -> container:5000, Next.js dev listens on 5000)
   next-frontend:
     build:
       context: .
       dockerfile: Dockerfile.nextjs
     container_name: zeinaguard_nextjs
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NEXT_PUBLIC_API_URL: /backend-api
       NEXT_PUBLIC_SOCKET_URL: http://localhost:5000
+      BACKEND_URL: http://flask-backend:5000
     ports:
-      - "3000:5000"
+      - "3000:3000"
     volumes:
-      - .:/app
+      - .:/app:ro
       - /app/node_modules
       - /app/.next
     networks:
@@ -94,14 +94,14 @@ services:
     depends_on:
       flask-backend:
         condition: service_healthy
+    restart: unless-stopped
 
-  # PgAdmin for database management
   pgadmin:
     image: dpage/pgadmin4:latest
     container_name: zeinaguard_pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.local
-      PGADMIN_DEFAULT_PASSWORD: admin_password_change_me
+      PGADMIN_DEFAULT_EMAIL: admin@zeinaguard.com
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password_change_me}
     ports:
       - "5050:80"
     volumes:
@@ -109,7 +109,9 @@ services:
     networks:
       - zeinaguard_network
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   postgres_data:

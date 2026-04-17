@@ -1,17 +1,41 @@
 # config.py
+import os
+# select Wi-Fi Card 
+# Default values - can be overridden by Environment variables
+def get_wireless_interface():
+    
+    try:
+        interfaces = os.listdir('/sys/class/net/')
+        for iface in interfaces:
+         
+            if os.path.exists(f'/sys/class/net/{iface}/wireless'):
+                return iface
+    except Exception:
+        pass
+    return "wlan0" 
 
-INTERFACE = "wlx002e2dc0346b"
+AUTO_IFACE = get_wireless_interface()
+INTERFACE = os.getenv("SENSOR_INTERFACE", AUTO_IFACE)
+RUN_MODE = os.getenv("RUN_MODE", "LOCAL")
+
+if RUN_MODE == "LOCAL":
+    BACKEND_URL = "http://localhost:5000"
+else:
+    BACKEND_URL = "http://flask-backend:5000"
+
+# Legacy support
+BACKEND_HOST = "localhost" if "localhost" in BACKEND_URL else "flask-backend"
+BACKEND_PORT = 5000
 
 LOCKED_CHANNEL = None
 
 TRUSTED_APS = {
-    "Orange-RoQa": {
-        "bssid": "1E:3C:D4:2A:3C:1C",
-        "channel": 7 ,
+    "WE_EDF20C": {
+        "bssid": "20:E8:82:ED:F2:0C",
+        "channel": 3 ,
         "encryption": "SECURED" }
 }
 
-ENABLE_ACTIVE_CONTAINMENT = True   
-DEAUTH_COUNT = 40               # عدد الإطارات
-DEAUTH_INTERVAL = 0.1              # زمن بين الإرسال
-
+ENABLE_ACTIVE_CONTAINMENT = os.getenv("ENABLE_CONTAINMENT", "True").lower() == "true"
+DEAUTH_COUNT = int(os.getenv("DEAUTH_COUNT", "40"))
+DEAUTH_INTERVAL = float(os.getenv("DEAUTH_INTERVAL", "0.1"))

@@ -1,88 +1,132 @@
-from flask import Blueprint, jsonify, request
-from auth import token_required
-from models import db, Sensor
+"""
+Sensors API Routes for ZeinaGuard Pro
+Handles sensor registration and monitoring metrics
+"""
 
-sensors_bp = Blueprint(
-    "sensors",
-    __name__,
-    url_prefix="/api/sensors"
-)
+from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required
+from models import db, Sensor, SensorHealth
+from datetime import datetime
+from sqlalchemy import desc
+
+sensors_bp = Blueprint('sensors', __name__, url_prefix='/api/sensors')
 
 
-# -----------------------------
-# Register Sensor
-# -----------------------------
-@sensors_bp.route("/register", methods=["POST"])
-@token_required
-def register_sensor(current_user):
+@sensors_bp.route('/', methods=['GET'])
+@jwt_required(optional=True)
+def get_sensors():
+    try:
+        sensors = Sensor.query.all()
+        result = []
 
-    data = request.get_json()
+        for s in sensors:
+            health = SensorHealth.query.filter_by(sensor_id=s.id)\
+                .order_by(desc(SensorHealth.created_at)).first()
 
-    sensor_id = data.get("id")
+            status = health.status if health else ('online' if s.is_active else 'offline')
 
-    name = data.get("name")
+            result.append({
+                'id': s.id,
+                'hostname': s.hostname or s.name,
+                'name': s.name,
+                'location': s.location or 'Unknown',
+                'status': status,
+                'signal_strength': health.signal_strength if health else -100,
+                'cpu_usage': health.cpu_usage if health else 0,
+                'memory_usage': health.memory_usage if health else 0,
+                'uptime_percent': 100,
+                'last_seen': (
+                    health.last_heartbeat.isoformat()
+                    if health and health.last_heartbeat
+                    else s.updated_at.isoformat()
+                ),
+                'packet_count': 0,
+                'coverage_area': 'Standard Room'
+            })
 
-    location = data.get("location", "unknown")
+        return jsonify(result), 200
 
-    if not sensor_id or not name:
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@sensors_bp.route('/register', methods=['POST'])
+@jwt_required(optional=True)
+def register_sensor():
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Missing JSON'}), 400
+
+        name = data.get('name')
+        hostname = data.get('hostname')
+        ip_address = data.get('ip_address')
+        mac_address = data.get('mac_address')
+        location = data.get('location')
+
+        if not name or not hostname:
+            return jsonify({'error': 'Name and hostname are required'}), 400
+
+        sensor = Sensor.query.filter_by(hostname=hostname).first()
+
+        if sensor:
+            sensor.name = name
+            sensor.ip_address = ip_address
+            sensor.mac_address = mac_address
+            sensor.location = location
+            sensor.updated_at = datetime.utcnow()
+        else:
+            sensor = Sensor(
+                name=name,
+                hostname=hostname,
+                ip_address=ip_address,
+                mac_address=mac_address,
+                location=location,
+                is_active=True
+            )
+            db.session.add(sensor)
+
+        db.session.commit()
 
         return jsonify({
+            'message': 'Sensor registered successfully',
+            'sensor_id': sensor.id
+        }), 200
 
-            "error": "sensor id and name required"
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
-        }), 400
 
-    sensor = Sensor.query.get(sensor_id)
+@sensors_bp.route('/<int:sensor_id>/health', methods=['POST'])
+@jwt_required(optional=True)
+def update_sensor_health(sensor_id):
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'Missing JSON'}), 400
 
-    if not sensor:
-
-        sensor = Sensor(
-
-            id=sensor_id,
-            name=name,
-            location=location,
-            is_active=True
-
+        health = SensorHealth(
+            sensor_id=sensor_id,
+            status=data.get('status', 'online'),
+            signal_strength=data.get('signal_strength'),
+            cpu_usage=data.get('cpu_usage'),
+            memory_usage=data.get('memory_usage'),
+            uptime=data.get('uptime'),
+            last_heartbeat=datetime.utcnow()
         )
 
-        db.session.add(sensor)
+        db.session.add(health)
 
-    else:
+        sensor = Sensor.query.get(sensor_id)
+        if sensor:
+            sensor.is_active = (health.status == 'online')
+            sensor.updated_at = datetime.utcnow()
 
-        sensor.name = name
-        sensor.location = location
-        sensor.is_active = True
+        db.session.commit()
 
-    db.session.commit()
+        return jsonify({'message': 'Sensor health updated'}), 200
 
-    return jsonify({
-
-        "message": "sensor registered",
-        "id": sensor_id
-
-    })
-
-
-# -----------------------------
-# Get Sensors
-# -----------------------------
-@sensors_bp.route("/", methods=["GET"])
-@token_required
-def get_sensors(current_user):
-
-    sensors = Sensor.query.all()
-
-    return jsonify([
-
-        {
-
-            "id": s.id,
-            "name": s.name,
-            "location": s.location,
-            "status": "online" if s.is_active else "offline"
-
-        }
-
-        for s in sensors
-
-    ])
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500

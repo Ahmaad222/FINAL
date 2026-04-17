@@ -72,7 +72,9 @@ def sanitize_input(user_input: str, max_length: int = 255) -> str:
     """Sanitize user input to prevent injection attacks"""
     if not isinstance(user_input, str):
         return ""
-    
+
+    user_input = user_input.replace("\x00", "")
+
     # Limit length
     user_input = user_input[:max_length]
     
@@ -83,6 +85,29 @@ def sanitize_input(user_input: str, max_length: int = 255) -> str:
     user_input = user_input.replace("'", '&#x27;')
     
     return user_input.strip()
+
+
+def sanitize_json_payload(data):
+    """Recursively remove null bytes from JSON-like payloads."""
+    if isinstance(data, str):
+        return data.replace("\x00", "")
+
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="ignore").replace("\x00", "")
+
+    if isinstance(data, dict):
+        return {
+            sanitize_json_payload(key) if isinstance(key, (str, bytes)) else key: sanitize_json_payload(value)
+            for key, value in data.items()
+        }
+
+    if isinstance(data, list):
+        return [sanitize_json_payload(item) for item in data]
+
+    if isinstance(data, tuple):
+        return tuple(sanitize_json_payload(item) for item in data)
+
+    return data
 
 
 def add_security_headers(response):

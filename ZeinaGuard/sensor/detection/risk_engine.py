@@ -69,7 +69,13 @@ class RiskEngine:
             "channel": channel,
             "signal": signal,
             "encryption": encryption,
-            "clients": clients
+            "clients": clients,
+            "manufacturer": event.get("manufacturer", "Unknown"),
+            "uptime": event.get("uptime", ""),
+            "auth": event.get("auth", ""),
+            "wps": event.get("wps", ""),
+            "distance": event.get("distance", -1),
+            "raw_beacon": event.get("raw_beacon", ""),
         }
 
         return event_summary

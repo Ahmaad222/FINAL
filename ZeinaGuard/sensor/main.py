@@ -1,10 +1,8 @@
+import os
 import subprocess
 import sys
-import os
+import threading
 
-# --------------------------------
-# 🔍 Check & Install Dependencies
-# --------------------------------
 
 REQUIRED_PACKAGES = {
     "flask": "flask",
@@ -15,7 +13,7 @@ REQUIRED_PACKAGES = {
     "scapy": "scapy",
     "rich": "rich",
     "readchar": "readchar",
-    "flask-sqlalchemy": "flask_sqlalchemy"
+    "flask-sqlalchemy": "flask_sqlalchemy",
 }
 
 
@@ -28,124 +26,57 @@ def install_missing_packages():
         except ImportError:
             missing.append(package)
 
-    if missing:
-        print("⚠️ Missing packages detected:")
-        for pkg in missing:
-            print(f" - {pkg}")
+    if not missing:
+        return
 
-        choice = input("❓ Install missing packages now? (y/n): ").lower()
+    for pkg in missing:
+        print(f"Missing package: {pkg}")
 
-        if choice == "y":
-            try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
-                print("✅ Packages installed successfully\n")
-            except Exception as e:
-                print("❌ Failed to install packages:", e)
-                sys.exit(1)
-        else:
-            print("❌ Cannot continue without required packages.")
-            sys.exit(1)
+    choice = input("Install missing packages now? (y/n): ").lower()
+    if choice != "y":
+        sys.exit(1)
 
-
-install_missing_packages()
-
-# --------------------------------
-# ⚠️ Root Check (for scapy)
-# --------------------------------
-if os.geteuid() != 0:
-    print("⚠️ Warning: You are not running as root.")
-    print("👉 Scapy may not work correctly.")
-    print("👉 Run with: sudo python3 main.py\n")
-
-# --------------------------------
-# باقي imports
-# --------------------------------
-
-import threading
-
-from monitoring.sniffer import start_monitoring
-from detection.threat_manager import ThreatManager
-from prevention.response_engine import ResponseEngine
-from communication.ws_client import WSClient
-from communication.api_client import APIClient
-
-# 🔥 Terminal UI
-from ui.terminal_ui import run_terminal_ui
+    subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
 
 
 def main():
+    install_missing_packages()
 
-    print("🚀 Starting ZeinaGuard Sensor...")
+    from communication.api_client import APIClient
+    from communication.ws_client import WSClient
+    from detection.threat_manager import ThreatManager
+    from monitoring.sniffer import start_monitoring
+    from prevention.response_engine import ResponseEngine
+    from ui.terminal_ui import run_terminal_ui, update_status
 
-    # --------------------------------
-    # Try Backend Authentication
-    # --------------------------------
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        print("Warning: not running as root. Packet capture may fail.")
+
+    ui_thread = threading.Thread(target=run_terminal_ui, daemon=True, name="TerminalUI")
+    ui_thread.start()
+    update_status(sensor_status="starting", backend_status="connecting", message="Booting sensor")
 
     token = None
-    ws = None
-
     try:
         api = APIClient()
         token = api.authenticate_sensor()
+        update_status(
+            backend_status="authenticated" if token else "offline",
+            message="Backend authenticated" if token else "Offline mode: local logging only",
+        )
+    except Exception:
+        update_status(backend_status="offline", message="Backend unavailable: local logging only")
 
-        if token:
-            print("✅ Sensor authenticated with backend")
-
-            ws = WSClient(token=token)
-
-            ws_thread = threading.Thread(
-                target=ws.connect_to_server,
-                daemon=True
-            )
-            ws_thread.start()
-
-        else:
-            print("⚠️ Backend not available — running in OFFLINE MODE")
-
-    except Exception as e:
-        print("⚠️ Backend connection failed — running OFFLINE")
-        print(e)
-
-    # --------------------------------
-    # 🔥 Terminal UI Thread
-    # --------------------------------
-
-    ui_thread = threading.Thread(
-        target=run_terminal_ui,
-        daemon=True
-    )
-    ui_thread.start()
-
-    # --------------------------------
-    # Threat Manager
-    # --------------------------------
+    ws_client = WSClient(token=token)
+    threading.Thread(target=ws_client.start, daemon=True, name="WSClient").start()
 
     threat_manager = ThreatManager()
-
-    t1 = threading.Thread(
-        target=threat_manager.start,
-        daemon=True
-    )
-    t1.start()
-
-    # --------------------------------
-    # Response Engine
-    # --------------------------------
+    threading.Thread(target=threat_manager.start, daemon=True, name="ThreatManager").start()
 
     response_engine = ResponseEngine()
+    threading.Thread(target=response_engine.start, daemon=True, name="ResponseEngine").start()
 
-    t2 = threading.Thread(
-        target=response_engine.start,
-        daemon=True
-    )
-    t2.start()
-
-    # --------------------------------
-    # Monitoring (Sniffer)
-    # --------------------------------
-
-    print("📡 Starting wireless monitoring...")
-
+    update_status(sensor_status="monitoring", message="Wireless monitoring active")
     start_monitoring()
 
 

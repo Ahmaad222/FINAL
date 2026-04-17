@@ -2,60 +2,58 @@ import requests
 
 
 class APIClient:
+<<<<<<< HEAD
     def __init__(self):
 
         # Backend URL
         self.backend_url = "http://192.168.201.131:8000"
 
         # Credentials
+=======
+    def __init__(self, backend_url=None):
+        self.backend_url = (backend_url or "http://localhost:5000").rstrip("/")
+>>>>>>> 9a9205d6e57dcda0558284f3501b9296130ac64f
         self.username = "admin"
         self.password = "admin123"
-
         self.token = None
 
     def authenticate_sensor(self):
-        """
-        Authenticate with backend and receive JWT token
-        """
+        from ui.terminal_ui import update_status
 
         url = f"{self.backend_url}/api/auth/login"
-
         payload = {
             "username": self.username,
-            "password": self.password
+            "password": self.password,
         }
 
         try:
-            print(f"[API] Authenticating with {url} ...")
-
+            update_status(backend_status="authenticating", message="Authenticating with backend")
             response = requests.post(url, json=payload, timeout=5)
 
             if response.status_code != 200:
-                print(f"[API] ❌ Auth Failed: {response.status_code}")
-                print(response.text)
+                update_status(
+                    backend_status="offline",
+                    message=f"Authentication failed ({response.status_code})",
+                )
                 return None
 
             data = response.json()
-
-            self.token = data.get("access_token")
-
+            self.token = data.get("access_token") or data.get("token")
             if not self.token:
-                print("[API] ❌ No token received")
+                update_status(backend_status="offline", message="No token in backend response")
                 return None
 
-            print("[API] ✅ Authentication Successful!")
-
+            update_status(backend_status="authenticated", message="Authentication successful")
             return self.token
-
-        except requests.exceptions.RequestException as e:
-            print(f"[API] ❌ Connection Error: {e}")
+        except requests.exceptions.RequestException as exc:
+            update_status(backend_status="offline", message=f"Backend connection error: {exc}")
             return None
 
     def get_headers(self):
-
         if not self.token:
             return {}
 
         return {
-            "Authorization": f"Bearer {self.token}"
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
         }
