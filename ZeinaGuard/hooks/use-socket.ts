@@ -69,11 +69,21 @@ export interface AttackAckEvent {
   timestamp: string;
 }
 
+export interface AttackCommandAckEvent {
+  status: 'ok' | 'error';
+  sensor_id?: number;
+  target_bssid?: string;
+  channel?: number | null;
+  message?: string | null;
+  timestamp: string;
+}
+
 interface UseSocketOptions {
   onNetworkScan?: (event: LiveNetworkEvent) => void;
   onNetworkUpdate?: (event: LiveNetworkEvent) => void;
   onThreatDetected?: (event: LiveNetworkEvent) => void;
   onAttackCommand?: (event: AttackCommandEvent) => void;
+  onAttackCommandAck?: (event: AttackCommandAckEvent) => void;
   onAttackAck?: (event: AttackAckEvent) => void;
   onSensorStatus?: (event: SensorStatusEvent) => void;
   onThreatEvent?: (event: ThreatEvent) => void;
@@ -86,8 +96,10 @@ const SOCKET_EVENTS = [
   'network_update',
   'threat_detected',
   'attack_command',
+  'attack_command_ack',
   'attack_ack',
   'sensor_status',
+  'threat_event',
 ] as const;
 
 
@@ -102,6 +114,7 @@ export function useSocket(options: UseSocketOptions = {}) {
     onNetworkUpdate,
     onThreatDetected,
     onAttackCommand,
+    onAttackCommandAck,
     onAttackAck,
     onSensorStatus,
     onThreatEvent,
@@ -115,6 +128,7 @@ export function useSocket(options: UseSocketOptions = {}) {
     onNetworkUpdate,
     onThreatDetected,
     onAttackCommand,
+    onAttackCommandAck,
     onAttackAck,
     onSensorStatus,
     onThreatEvent,
@@ -126,11 +140,12 @@ export function useSocket(options: UseSocketOptions = {}) {
       onNetworkUpdate,
       onThreatDetected,
       onAttackCommand,
+      onAttackCommandAck,
       onAttackAck,
       onSensorStatus,
       onThreatEvent,
     };
-  }, [onAttackAck, onAttackCommand, onNetworkScan, onNetworkUpdate, onSensorStatus, onThreatDetected, onThreatEvent]);
+  }, [onAttackAck, onAttackCommand, onAttackCommandAck, onNetworkScan, onNetworkUpdate, onSensorStatus, onThreatDetected, onThreatEvent]);
 
   const connect = useCallback(() => {
     if (socketRef.current) {
@@ -191,6 +206,11 @@ export function useSocket(options: UseSocketOptions = {}) {
     socket.on('attack_command', (event: AttackCommandEvent) => {
       console.log('[EVENT RECEIVED] attack_command', event);
       handlersRef.current.onAttackCommand?.(event);
+    });
+
+    socket.on('attack_command_ack', (event: AttackCommandAckEvent) => {
+      console.log('[EVENT RECEIVED] attack_command_ack', event);
+      handlersRef.current.onAttackCommandAck?.(event);
     });
 
     socket.on('attack_ack', (event: AttackAckEvent) => {

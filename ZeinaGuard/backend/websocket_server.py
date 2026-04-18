@@ -1320,6 +1320,9 @@ def init_socketio(app):
                 "attack_command_ack",
                 {
                     "status": "error",
+                    "sensor_id": sensor_id or None,
+                    "target_bssid": target_bssid or None,
+                    "channel": channel,
                     "message": str(exc),
                     "timestamp": datetime.utcnow().isoformat(),
                 },

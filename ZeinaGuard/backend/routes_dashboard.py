@@ -3,6 +3,7 @@ Dashboard API Routes
 Provides analytics and metrics for the dashboard
 """
 
+import os
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from models import (
 )
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
+SENSOR_HEARTBEAT_STALE_SECONDS = int(os.getenv('SENSOR_HEARTBEAT_STALE_SECONDS', '15'))
 
 
 def _format_live_network(network: WiFiNetwork):
@@ -34,6 +36,23 @@ def _format_live_network(network: WiFiNetwork):
         'timestamp': network.last_seen.isoformat() if network.last_seen else None,
         'manufacturer': manufacturer,
     }
+
+
+def _effective_sensor_status(sensor: Sensor, latest_health: SensorHealth | None):
+    if latest_health is None:
+        return 'offline'
+
+    heartbeat = latest_health.last_heartbeat
+    if heartbeat is None:
+        return 'offline'
+
+    if (datetime.utcnow() - heartbeat).total_seconds() > SENSOR_HEARTBEAT_STALE_SECONDS:
+        return 'offline'
+
+    if not sensor.is_active:
+        return 'offline'
+
+    return latest_health.status or 'offline'
 
 
 @dashboard_bp.route('/overview', methods=['GET'])
@@ -274,11 +293,12 @@ def get_sensor_health():
                 .first()
             
             if latest_health:
+                effective_status = _effective_sensor_status(sensor, latest_health)
                 sensors_health.append({
                     'sensor_id': sensor.id,
                     'name': sensor.name,
                     'location': sensor.location,
-                    'status': latest_health.status,
+                    'status': effective_status,
                     'signal_strength': latest_health.signal_strength,
                     'cpu_usage': latest_health.cpu_usage,
                     'memory_usage': latest_health.memory_usage,

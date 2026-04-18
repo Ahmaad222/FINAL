@@ -9,6 +9,7 @@ import {
   useSocket,
   type AttackAckEvent,
   type AttackCommandEvent,
+  type AttackCommandAckEvent,
   type LiveNetworkEvent,
   type SensorStatusEvent,
 } from '@/hooks/use-socket';
@@ -23,6 +24,8 @@ interface ActivityItem {
   detail: string;
   timestamp: string;
 }
+
+const SENSOR_HEARTBEAT_STALE_MS = 15000;
 
 
 function estimateDistance(signal: number | null) {
@@ -83,6 +86,15 @@ function signalBarWidth(signal: number | null) {
     return 0;
   }
   return Math.max(0, Math.min(100, ((signal + 100) / 70) * 100));
+}
+
+
+function effectiveSensorStatus(sensor: SensorStatusEvent) {
+  const heartbeat = Date.parse(sensor.last_heartbeat || '');
+  if (!Number.isFinite(heartbeat) || (Date.now() - heartbeat) > SENSOR_HEARTBEAT_STALE_MS) {
+    return 'offline';
+  }
+  return sensor.status || 'offline';
 }
 
 
@@ -172,6 +184,32 @@ export function LiveNetworkConsole() {
         timestamp: event.timestamp || new Date().toISOString(),
       });
       pendingAttackStateRef.current = `${event.action} command ${event.status || 'queued'} for ${event.target_bssid}`;
+      markDirty();
+    },
+    onAttackCommandAck: (event: AttackCommandAckEvent) => {
+      const target = event.target_bssid || 'unknown target';
+      const detailParts = [
+        event.sensor_id ? `Sensor #${event.sensor_id}` : null,
+        target,
+        event.message || null,
+      ].filter(Boolean);
+
+      appendBufferedActivity({
+        id: `dispatch-${event.sensor_id || 'unknown'}-${target}-${event.timestamp}`,
+        type: 'command',
+        title: event.status === 'ok' ? 'Attack dispatch confirmed' : 'Attack dispatch rejected',
+        detail: detailParts.join(' | '),
+        timestamp: event.timestamp,
+      });
+
+      if (event.status === 'ok') {
+        pendingAttackStateRef.current = `Dispatch confirmed for ${target}`;
+      } else {
+        pendingAttackStateRef.current = event.message || `Attack dispatch rejected for ${target}`;
+        toast.error('Attack dispatch rejected', {
+          description: event.message || `Backend rejected the command for ${target}`,
+        });
+      }
       markDirty();
     },
     onAttackAck: (event: AttackAckEvent) => {
@@ -314,10 +352,18 @@ export function LiveNetworkConsole() {
   const rogueCount = Object.values(networks).filter((network) => network.classification === 'ROGUE').length;
   const suspiciousCount = Object.values(networks).filter((network) => network.classification === 'SUSPICIOUS').length;
   const legitCount = Object.values(networks).filter((network) => network.classification === 'LEGIT').length;
-  const onlineSensors = Object.values(sensorStatuses).filter((sensor) => sensor.status !== 'offline').length;
+  const onlineSensors = Object.values(sensorStatuses).filter((sensor) => effectiveSensorStatus(sensor) !== 'offline').length;
 
   const handleAttack = (network: LiveNetworkEvent) => {
     try {
+      const sensorStatus = sensorStatuses[network.sensor_id];
+      if (sensorStatus && effectiveSensorStatus(sensorStatus) === 'offline') {
+        const message = `Sensor #${network.sensor_id} is offline, so the attack cannot be dispatched`;
+        setAttackState(message);
+        toast.error('Sensor offline', { description: message });
+        return;
+      }
+
       const payload: AttackCommandEvent = {
         sensor_id: network.sensor_id,
         action: 'deauth',
@@ -541,14 +587,16 @@ export function LiveNetworkConsole() {
               ) : (
                 Object.values(sensorStatuses)
                   .sort((left, right) => left.sensor_id - right.sensor_id)
-                  .map((sensor) => (
-                    <div key={sensor.sensor_id} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+                  .map((sensor) => {
+                    const status = effectiveSensorStatus(sensor);
+                    return (
+                      <div key={sensor.sensor_id} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
                       <div className="flex items-center justify-between">
                         <div className="font-medium text-white">Sensor #{sensor.sensor_id}</div>
                         <div className={`rounded-full px-2 py-1 text-xs ${
-                          sensor.status === 'offline' ? 'bg-red-950 text-red-100' : 'bg-emerald-950 text-emerald-100'
+                          status === 'offline' ? 'bg-red-950 text-red-100' : 'bg-emerald-950 text-emerald-100'
                         }`}>
-                          {sensor.status}
+                          {status}
                         </div>
                       </div>
                       <div className="mt-2 text-xs text-slate-400">
@@ -565,8 +613,9 @@ export function LiveNetworkConsole() {
                           UP {sensor.uptime}s
                         </div>
                       </div>
-                    </div>
-                  ))
+                      </div>
+                    );
+                  })
               )}
             </CardContent>
           </Card>

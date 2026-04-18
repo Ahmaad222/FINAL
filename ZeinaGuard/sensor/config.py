@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -52,6 +53,24 @@ def get_interface():
     return INTERFACE
 
 
+def _default_interface(interfaces):
+    configured = (INTERFACE or "").strip()
+    if configured and configured in interfaces:
+        return configured
+    if "wlan0" in interfaces:
+        return "wlan0"
+    return interfaces[0] if interfaces else "wlan0"
+
+
+def _can_prompt_for_interface():
+    if os.getenv("ZEINAGUARD_NONINTERACTIVE", "").strip() == "1":
+        return False
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
 def select_wireless_interface():
     interfaces = list_wireless_interfaces()
 
@@ -60,14 +79,22 @@ def select_wireless_interface():
         set_interface("wlan0")
         return INTERFACE
 
+    selected = _default_interface(interfaces)
+
+    if not _can_prompt_for_interface():
+        print(f"Using wireless interface without prompt: {selected}")
+        set_interface(selected)
+        return INTERFACE
+
     print("Available wireless interfaces:")
     for index, interface_name in enumerate(interfaces, start=1):
         default_label = " (default)" if interface_name == INTERFACE else ""
         print(f"  {index}. {interface_name}{default_label}")
 
-    choice = input(f"Choose interface [1-{len(interfaces)}] or press Enter for wlan0: ").strip()
+    choice = input(
+        f"Choose interface [1-{len(interfaces)}] or press Enter for {selected}: "
+    ).strip()
     if not choice:
-        selected = "wlan0"
         print(f"Using interface: {selected}")
         set_interface(selected)
         return INTERFACE
@@ -75,7 +102,7 @@ def select_wireless_interface():
     try:
         selected = interfaces[int(choice) - 1]
     except (ValueError, IndexError):
-        selected = INTERFACE if INTERFACE in interfaces else "wlan0"
+        selected = choice if choice in interfaces else _default_interface(interfaces)
 
     print(f"Using interface: {selected}")
     set_interface(selected)

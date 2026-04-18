@@ -276,6 +276,7 @@ start_sensor() {
       sudo \
       -E \
       env \
+      "ZEINAGUARD_NONINTERACTIVE=1" \
       "BACKEND_URL=${BACKEND_URL:-http://localhost:5000}" \
       "$sensor_python" \
       "$ROOT_DIR/sensor/main.py"
@@ -285,6 +286,7 @@ start_sensor() {
       "sensor" \
       "$ROOT_DIR/sensor" \
       env \
+      "ZEINAGUARD_NONINTERACTIVE=1" \
       "BACKEND_URL=${BACKEND_URL:-http://localhost:5000}" \
       "$sensor_python" \
       "$ROOT_DIR/sensor/main.py"
