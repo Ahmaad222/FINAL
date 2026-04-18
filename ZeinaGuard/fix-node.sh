@@ -81,6 +81,7 @@ fix_node_ensure_node20() {
     fix_node_install_nvm
   fi
 
+  fix_node_log "Loading nvm from $NVM_DIR"
   fix_node_load_nvm
   major_version="$(fix_node_current_major)"
 
@@ -90,18 +91,23 @@ fix_node_ensure_node20() {
     fix_node_log "Ensuring Node.js $REQUIRED_NODE_MAJOR is active through nvm."
   fi
 
-  nvm install "$REQUIRED_NODE_MAJOR" --latest-npm >/dev/null
-  nvm alias default "$REQUIRED_NODE_MAJOR" >/dev/null
-  nvm use "$REQUIRED_NODE_MAJOR" >/dev/null
+  nvm install "$REQUIRED_NODE_MAJOR" --latest-npm
+  fix_node_log "Setting Node.js $REQUIRED_NODE_MAJOR as default"
+  nvm alias default "$REQUIRED_NODE_MAJOR"
+  fix_node_log "Activating Node.js $REQUIRED_NODE_MAJOR"
+  nvm use "$REQUIRED_NODE_MAJOR"
   hash -r
 }
 
 fix_node_ensure_npm_and_pnpm() {
+  fix_node_log "Cleaning npm cache"
   npm cache clean --force >/dev/null 2>&1 || true
+  fix_node_log "Updating npm"
   if ! npm install -g npm@latest >/dev/null 2>&1; then
     fix_node_warn "Failed to upgrade npm to the latest version; continuing with the bundled npm."
   fi
-  npm install -g pnpm >/dev/null
+  fix_node_log "Installing pnpm globally"
+  npm install -g pnpm
   hash -r
 }
 

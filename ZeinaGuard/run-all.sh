@@ -70,9 +70,17 @@ ensure_runtime_dirs() {
 }
 
 fix_project_permissions() {
-  if [ -n "${USER:-}" ]; then
-    run_maybe_sudo chown -R "$USER:$USER" "$ROOT_DIR" || true
+  if [ -z "${USER:-}" ]; then
+    return
   fi
+
+  if [ -w "$ROOT_DIR" ] && { [ ! -d "$ROOT_DIR/node_modules" ] || [ -w "$ROOT_DIR/node_modules" ]; }; then
+    log "Project ownership looks okay; skipping recursive chown"
+    return
+  fi
+
+  log "Fixing project ownership for $ROOT_DIR"
+  run_maybe_sudo chown -R "$USER:$USER" "$ROOT_DIR" || true
 }
 
 pid_file_for() {
@@ -201,13 +209,18 @@ wait_for_http() {
 
 prepare_frontend() {
   log "Preparing frontend toolchain"
+  log "Loading Node helper"
   # shellcheck source=/dev/null
   source "$ROOT_DIR/fix-node.sh"
+  log "Ensuring Node.js 20, npm, and pnpm"
   ensure_zeinaguard_node_toolchain
 
+  log "Checking project ownership"
   fix_project_permissions
+  log "Cleaning npm cache"
   npm cache clean --force >/dev/null 2>&1 || true
 
+  log "Removing old frontend install artifacts"
   rm -rf "$ROOT_DIR/node_modules"
   rm -f "$ROOT_DIR/package-lock.json"
 
