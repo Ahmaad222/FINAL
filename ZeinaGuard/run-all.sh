@@ -203,6 +203,7 @@ prepare_frontend() {
   log "Preparing frontend toolchain"
   # shellcheck source=/dev/null
   source "$ROOT_DIR/fix-node.sh"
+  ensure_zeinaguard_node_toolchain
 
   fix_project_permissions
   npm cache clean --force >/dev/null 2>&1 || true

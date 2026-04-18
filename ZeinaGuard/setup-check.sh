@@ -109,6 +109,10 @@ start_service_if_available() {
   return 1
 }
 
+run_postgres_command() {
+  run_maybe_sudo -u postgres bash -lc "cd /tmp && $1"
+}
+
 sql_escape() {
   printf "%s" "$1" | sed "s/'/''/g"
 }
@@ -135,29 +139,26 @@ ensure_postgres_role_and_db() {
 
   log "Ensuring PostgreSQL role and database exist"
   role_exists="$(
-    run_maybe_sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '${postgres_user_escaped}'" postgres \
+    run_postgres_command "psql -tAc \"SELECT 1 FROM pg_roles WHERE rolname = '${postgres_user_escaped}'\" postgres" \
       | tr -d '[:space:]'
   )"
 
   if [ "$role_exists" = "1" ]; then
-    run_maybe_sudo -u postgres psql -v ON_ERROR_STOP=1 -d postgres \
-      -c "ALTER ROLE \"${POSTGRES_USER:-zeinaguard_user}\" WITH LOGIN PASSWORD '${postgres_password_escaped}';"
+    run_postgres_command "psql -v ON_ERROR_STOP=1 -d postgres -c \"ALTER ROLE \\\"${POSTGRES_USER:-zeinaguard_user}\\\" WITH LOGIN PASSWORD '${postgres_password_escaped}';\""
   else
-    run_maybe_sudo -u postgres psql -v ON_ERROR_STOP=1 -d postgres \
-      -c "CREATE ROLE \"${POSTGRES_USER:-zeinaguard_user}\" LOGIN PASSWORD '${postgres_password_escaped}';"
+    run_postgres_command "psql -v ON_ERROR_STOP=1 -d postgres -c \"CREATE ROLE \\\"${POSTGRES_USER:-zeinaguard_user}\\\" LOGIN PASSWORD '${postgres_password_escaped}';\""
   fi
 
   db_exists="$(
-    run_maybe_sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = '${postgres_db_escaped}'" postgres \
+    run_postgres_command "psql -tAc \"SELECT 1 FROM pg_database WHERE datname = '${postgres_db_escaped}'\" postgres" \
       | tr -d '[:space:]'
   )"
 
   if [ "$db_exists" != "1" ]; then
-    run_maybe_sudo -u postgres createdb -O "${POSTGRES_USER:-zeinaguard_user}" "${POSTGRES_DB:-zeinaguard_db}"
+    run_postgres_command "createdb -O \"${POSTGRES_USER:-zeinaguard_user}\" \"${POSTGRES_DB:-zeinaguard_db}\""
   fi
 
-  run_maybe_sudo -u postgres psql -v ON_ERROR_STOP=1 -d postgres \
-    -c "GRANT ALL PRIVILEGES ON DATABASE \"${POSTGRES_DB:-zeinaguard_db}\" TO \"${POSTGRES_USER:-zeinaguard_user}\";"
+  run_postgres_command "psql -v ON_ERROR_STOP=1 -d postgres -c \"GRANT ALL PRIVILEGES ON DATABASE \\\"${POSTGRES_DB:-zeinaguard_db}\\\" TO \\\"${POSTGRES_USER:-zeinaguard_user}\\\";\""
 }
 
 ensure_redis_state() {
