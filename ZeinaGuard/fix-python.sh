@@ -56,9 +56,36 @@ fix_permissions() {
   fi
 }
 
+remove_virtualenv() {
+  if [ ! -e "$VENV_DIR" ]; then
+    return
+  fi
+
+  log "Removing existing virtual environment at $VENV_DIR"
+  run_maybe_sudo chmod -R u+rwX "$VENV_DIR" 2>/dev/null || true
+  run_maybe_sudo rm -rf "$VENV_DIR" || true
+
+  if [ -e "$VENV_DIR" ]; then
+    log "Standard removal was incomplete; retrying with Python shutil"
+    run_maybe_sudo python3 - "$VENV_DIR" <<'PY'
+import shutil
+import sys
+from pathlib import Path
+
+target = Path(sys.argv[1])
+if target.exists():
+    shutil.rmtree(target, ignore_errors=False)
+PY
+  fi
+
+  if [ -e "$VENV_DIR" ]; then
+    fail "Failed to remove existing virtual environment at $VENV_DIR"
+  fi
+}
+
 recreate_virtualenv() {
   log "Recreating virtual environment in $VENV_DIR"
-  rm -rf "$VENV_DIR"
+  remove_virtualenv
   python3 -m venv "$VENV_DIR"
 }
 
