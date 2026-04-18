@@ -29,7 +29,13 @@ def _venv_python_path():
 def ensure_virtualenv():
     import shutil
 
-    if os.environ.get(BOOTSTRAP_FLAG) == "1":
+    def running_inside_target_venv():
+        try:
+            return Path(sys.prefix).resolve() == VENV_DIR.resolve()
+        except OSError:
+            return Path(sys.prefix) == VENV_DIR
+
+    if os.environ.get(BOOTSTRAP_FLAG) == "1" and running_inside_target_venv():
         return
 
     marker = VENV_DIR / ".requirements-installed"
@@ -188,8 +194,7 @@ def ensure_virtualenv():
         log("[Bootstrap] All dependencies loaded successfully")
         marker.write_text("ok\n", encoding="utf-8")
 
-        current_python = Path(sys.executable).resolve()
-        if current_python != venv_python.resolve():
+        if not running_inside_target_venv():
             log("[Bootstrap] Sensor environment ready")
             env = dict(os.environ)
             env[BOOTSTRAP_FLAG] = "1"
