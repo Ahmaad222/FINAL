@@ -373,7 +373,7 @@ export function LiveNetworkConsole() {
           {isConnected() ? <Wifi className="h-4 w-4" /> : <WifiOff className="h-4 w-4" />}
           <span className="font-medium">{isConnected() ? 'Realtime pipeline connected' : 'Realtime pipeline reconnecting'}</span>
         </div>
-        <span className="text-sm opacity-80">Sensor -> Backend -> Dashboard</span>
+        <span className="text-sm opacity-80">Sensor {'->'} Backend {'->'} Dashboard</span>
       </div>
 
       {loadError && (
