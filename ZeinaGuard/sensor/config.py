@@ -4,10 +4,10 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
+BACKEND_URL = os.getenv("BACKEND_URL", os.getenv("ZEINAGUARD_BACKEND_URL", "http://localhost:8000"))
 _parsed_backend_url = urlparse(BACKEND_URL)
 BACKEND_HOST = _parsed_backend_url.hostname or "localhost"
-BACKEND_PORT = _parsed_backend_url.port or 5000
+BACKEND_PORT = _parsed_backend_url.port or 8000
 
 LOCKED_CHANNEL = None
 INTERFACE = os.getenv("SENSOR_INTERFACE", "wlan0")

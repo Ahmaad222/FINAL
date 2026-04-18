@@ -53,6 +53,7 @@ THREAT_DETECTED_EVENT = "threat_detected"
 ATTACK_COMMAND_EVENT = "attack_command"
 ATTACK_ACK_EVENT = "attack_ack"
 SENSOR_STATUS_EVENT = "sensor_status"
+SENSOR_HEARTBEAT_EVENT = "sensor_heartbeat"
 DASHBOARD_ROOM = "dashboards"
 
 _sensor_id_cache: dict[str, int] = {}
@@ -63,6 +64,8 @@ _persistence_manager = None
 _persistence_manager_lock = threading.Lock()
 _recent_threat_event_cache: dict[tuple[int, str], float] = {}
 _oui_db: dict[str, str] = {}
+_connected_sensors: dict[int, dict[str, Any]] = {}
+_connected_sensors_lock = threading.Lock()
 REDIS_AVAILABLE = False
 
 
@@ -93,9 +96,15 @@ def _build_redis_client():
 
 
 def get_realtime_status() -> dict[str, str]:
+    connected_count = sum(
+        1
+        for snapshot in get_connected_sensors_snapshot().values()
+        if snapshot.get("connected")
+    )
     return {
         "redis": "available" if REDIS_AVAILABLE else "unavailable",
         "queue": "in-memory",
+        "connected_sensors": str(connected_count),
     }
 
 
@@ -772,6 +781,66 @@ def _sensor_room(sensor_id: int) -> str:
     return f"sensor:{sensor_id}"
 
 
+def _mark_sensor_status(
+    sensor_id: int,
+    payload: dict[str, Any] | None = None,
+    *,
+    sid: str | None = None,
+    connected: bool = True,
+) -> dict[str, Any]:
+    payload = sanitize_json_payload(payload or {})
+    heartbeat_time = datetime.utcnow()
+    status = sanitize_input(str(payload.get("status") or ("online" if connected else "offline")), max_length=50)
+    status = status or ("online" if connected else "offline")
+
+    snapshot = {
+        "sensor_id": sensor_id,
+        "sid": sid,
+        "connected": connected,
+        "status": status,
+        "signal_strength": _safe_int(payload.get("signal_strength"), default=0),
+        "cpu": _safe_float(payload.get("cpu_usage", payload.get("cpu")), default=0.0),
+        "cpu_usage": _safe_float(payload.get("cpu_usage", payload.get("cpu")), default=0.0),
+        "memory": _safe_float(payload.get("memory_usage", payload.get("memory")), default=0.0),
+        "memory_usage": _safe_float(payload.get("memory_usage", payload.get("memory")), default=0.0),
+        "uptime": _safe_int(payload.get("uptime"), default=0),
+        "message": sanitize_input(str(payload.get("message") or ""), max_length=255) or None,
+        "interface": sanitize_input(str(payload.get("interface") or ""), max_length=255) or None,
+        "hostname": sanitize_input(str(payload.get("hostname") or ""), max_length=255) or None,
+        "last_heartbeat": heartbeat_time.isoformat(),
+        "updated_at": heartbeat_time.isoformat(),
+    }
+
+    with _connected_sensors_lock:
+        existing = _connected_sensors.get(sensor_id, {}).copy()
+        existing.update({key: value for key, value in snapshot.items() if value is not None})
+        if sid is not None:
+            existing["sid"] = sid
+        existing["connected"] = connected
+        existing["sensor_id"] = sensor_id
+        if not connected:
+            existing["status"] = "offline"
+            existing["message"] = snapshot["message"] or "Sensor disconnected"
+        _connected_sensors[sensor_id] = existing
+        return existing.copy()
+
+
+def _unmark_sensor_status(sensor_id: int, sid: str | None = None, message: str | None = None) -> dict[str, Any] | None:
+    payload = {"status": "offline", "message": message or "Sensor disconnected"}
+    return _mark_sensor_status(sensor_id, payload, sid=sid, connected=False)
+
+
+def get_connected_sensors_snapshot() -> dict[int, dict[str, Any]]:
+    with _connected_sensors_lock:
+        return {sensor_id: snapshot.copy() for sensor_id, snapshot in _connected_sensors.items()}
+
+
+def is_sensor_connected(sensor_id: int) -> bool:
+    with _connected_sensors_lock:
+        snapshot = _connected_sensors.get(sensor_id)
+        return bool(snapshot and snapshot.get("connected"))
+
+
 def _log_emit(event_name: str, payload: Any, room: str | None = None) -> None:
     if isinstance(payload, dict):
         preview = {
@@ -873,6 +942,7 @@ def _persist_sensor_status(sensor_id: int, payload: dict[str, Any]) -> dict[str,
         raise ValueError(f"Unknown sensor_id: {sensor_id}")
 
     status = sanitize_input(str(payload.get("status") or "online"), max_length=50) or "online"
+    heartbeat_at = datetime.utcnow()
     heartbeat = SensorHealth(
         sensor_id=sensor_id,
         status=status,
@@ -880,10 +950,11 @@ def _persist_sensor_status(sensor_id: int, payload: dict[str, Any]) -> dict[str,
         cpu_usage=_safe_float(payload.get("cpu_usage", payload.get("cpu")), default=0.0),
         memory_usage=_safe_float(payload.get("memory_usage", payload.get("memory")), default=0.0),
         uptime=_safe_int(payload.get("uptime"), default=0),
-        last_heartbeat=datetime.utcnow(),
+        last_heartbeat=heartbeat_at,
     )
     db.session.add(heartbeat)
     sensor.is_active = status != "offline"
+    sensor.last_heartbeat = heartbeat_at
     sensor.updated_at = datetime.utcnow()
     db.session.commit()
 
@@ -897,10 +968,53 @@ def _persist_sensor_status(sensor_id: int, payload: dict[str, Any]) -> dict[str,
         "memory": heartbeat.memory_usage,
         "memory_usage": heartbeat.memory_usage,
         "uptime": heartbeat.uptime,
-        "last_heartbeat": heartbeat.last_heartbeat.isoformat(),
+        "last_heartbeat": heartbeat_at.isoformat(),
         "message": sanitize_input(str(payload.get("message") or ""), max_length=255) or None,
         "interface": sanitize_input(str(payload.get("interface") or ""), max_length=255) or None,
     }
+
+
+def _resolve_sensor_id_from_payload(payload: dict[str, Any], sid: str | None = None) -> int:
+    sensor_id = _safe_int(payload.get("sensor_id"), default=0)
+    if sensor_id:
+        return sensor_id
+
+    sensor_info = connected_clients.get(sid or request.sid) or {}
+    sensor_id = _safe_int(sensor_info.get("sensor_id"), default=0)
+    if sensor_id:
+        return sensor_id
+
+    sensor_identifier = payload.get("sensor_id") or payload.get("registration_key") or payload.get("hostname")
+    hostname = payload.get("hostname")
+    if sensor_identifier or hostname:
+        sensor = _resolve_sensor(sensor_identifier=sensor_identifier, hostname=hostname)
+        db.session.commit()
+        return sensor.id
+
+    return 0
+
+
+def _handle_sensor_presence(socketio: SocketIO, payload: dict[str, Any], *, sid: str, status_event_name: str) -> dict[str, Any]:
+    sensor_id = _resolve_sensor_id_from_payload(payload, sid=sid)
+    if not sensor_id:
+        raise ValueError(f"{status_event_name} missing sensor_id")
+
+    live_snapshot = _mark_sensor_status(sensor_id, payload, sid=sid, connected=payload.get("status") != "offline")
+    status_payload = _persist_sensor_status(sensor_id, payload)
+    merged_payload = {
+        **status_payload,
+        "connected": live_snapshot.get("connected", True),
+        "hostname": live_snapshot.get("hostname"),
+    }
+
+    if sid in connected_clients:
+        connected_clients[sid]["sensor_id"] = sensor_id
+        connected_clients[sid]["client_type"] = "sensor"
+        if live_snapshot.get("hostname"):
+            connected_clients[sid]["hostname"] = live_snapshot["hostname"]
+
+    _emit_socket_event(socketio, SENSOR_STATUS_EVENT, merged_payload, room=DASHBOARD_ROOM)
+    return merged_payload
 
 
 def _normalize_network_events(payload: Any) -> list[dict[str, Any]]:
@@ -1101,6 +1215,11 @@ def init_socketio(app):
         sensor_id = client_info.get("sensor_id")
         if client_info.get("client_type") == "sensor" and sensor_id:
             try:
+                live_snapshot = _unmark_sensor_status(
+                    int(sensor_id),
+                    sid=client_id,
+                    message="Sensor disconnected",
+                )
                 status_payload = _persist_sensor_status(
                     int(sensor_id),
                     {
@@ -1108,6 +1227,13 @@ def init_socketio(app):
                         "message": "Sensor disconnected",
                     },
                 )
+                if live_snapshot:
+                    status_payload.update(
+                        {
+                            "connected": live_snapshot.get("connected", False),
+                            "hostname": live_snapshot.get("hostname"),
+                        }
+                    )
                 _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
             except Exception as exc:
                 db.session.rollback()
@@ -1140,14 +1266,18 @@ def init_socketio(app):
                     "timestamp": datetime.utcnow().isoformat(),
                 },
             )
-            status_payload = _persist_sensor_status(
-                sensor.id,
+            _handle_sensor_presence(
+                socketio,
                 {
+                    "sensor_id": sensor.id,
+                    "hostname": sensor.hostname,
                     "status": "online",
                     "message": "Sensor registered",
+                    "interface": data.get("interface"),
                 },
+                sid=request.sid,
+                status_event_name="sensor_register",
             )
-            _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
         except Exception as exc:
             db.session.rollback()
             _emit_context_event("registration_error", {"status": "error", "message": "registration_failed"})
@@ -1255,21 +1385,30 @@ def init_socketio(app):
         payload = sanitize_json_payload(payload or {})
         try:
             _log_received_from_sensor(SENSOR_STATUS_EVENT, payload)
-            sensor_id = _safe_int(payload.get("sensor_id"), default=0)
-            if not sensor_id:
-                sensor_info = connected_clients.get(request.sid) or {}
-                sensor_id = _safe_int(sensor_info.get("sensor_id"), default=0)
-            if not sensor_id:
-                raise ValueError("sensor_status missing sensor_id")
-
-            status_payload = _persist_sensor_status(sensor_id, payload)
-            if request.sid in connected_clients:
-                connected_clients[request.sid]["sensor_id"] = sensor_id
-                connected_clients[request.sid]["client_type"] = "sensor"
-            _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
+            _handle_sensor_presence(
+                socketio,
+                payload,
+                sid=request.sid,
+                status_event_name=SENSOR_STATUS_EVENT,
+            )
         except Exception as exc:
             db.session.rollback()
             LOGGER.warning("[WebSocket] Failed to persist sensor status: %s", exc)
+
+    @socketio.on(SENSOR_HEARTBEAT_EVENT)
+    def handle_sensor_heartbeat(payload):
+        payload = sanitize_json_payload(payload or {})
+        try:
+            _log_received_from_sensor(SENSOR_HEARTBEAT_EVENT, payload)
+            _handle_sensor_presence(
+                socketio,
+                payload,
+                sid=request.sid,
+                status_event_name=SENSOR_HEARTBEAT_EVENT,
+            )
+        except Exception as exc:
+            db.session.rollback()
+            LOGGER.warning("[WebSocket] Failed to persist sensor heartbeat: %s", exc)
 
     @socketio.on(ATTACK_COMMAND_EVENT)
     def handle_attack_command(payload):
@@ -1291,10 +1430,7 @@ def init_socketio(app):
                 raise ValueError(f"Sensor {sensor_id} does not exist")
 
             room = _sensor_room(sensor_id)
-            if not any(
-                client.get("client_type") == "sensor" and _safe_int(client.get("sensor_id"), default=0) == sensor_id
-                for client in connected_clients.values()
-            ):
+            if not is_sensor_connected(sensor_id):
                 raise ValueError(f"Sensor {sensor_id} is not connected")
             command_payload = {
                 "sensor_id": sensor_id,

@@ -18,7 +18,7 @@ from runtime_state import get_status_snapshot, log_attack, mark_sent, update_sta
 
 LOGGER = logging.getLogger("zeinaguard.sensor.ws")
 
-DEFAULT_BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
+DEFAULT_BACKEND_URL = os.getenv("BACKEND_URL", os.getenv("ZEINAGUARD_BACKEND_URL", "http://localhost:8000"))
 
 SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
 SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
@@ -64,6 +64,7 @@ class WSClient:
                 {
                     "sensor_id": self.sensor_registration_key,
                     "hostname": self.hostname,
+                    "interface": config.get_interface(),
                 },
             )
 
@@ -275,7 +276,7 @@ class WSClient:
     def _status_publisher(self):
         while self.is_running:
             payload = self._build_sensor_status_payload()
-            self._enqueue_event("sensor_status", payload)
+            self._enqueue_event("sensor_heartbeat", payload)
             time.sleep(SENSOR_STATUS_INTERVAL_SECONDS)
 
     def _should_process_scan(self, scan):
@@ -356,6 +357,8 @@ class WSClient:
         return {
             "event": "sensor_status",
             "sensor_id": self._sensor_id_value(),
+            "registration_key": self.sensor_registration_key,
+            "hostname": self.hostname,
             "status": status_snapshot.get("sensor_status", "monitoring"),
             "signal_strength": 0,
             "cpu": cpu_percent,

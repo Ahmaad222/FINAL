@@ -12,6 +12,7 @@ from models import (
     Threat, ThreatEvent, Sensor, SensorHealth, WiFiNetwork,
     Incident, Alert, User, AlertRule, db
 )
+from websocket_server import get_connected_sensors_snapshot
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
 SENSOR_HEARTBEAT_STALE_SECONDS = int(os.getenv('SENSOR_HEARTBEAT_STALE_SECONDS', '15'))
@@ -38,7 +39,19 @@ def _format_live_network(network: WiFiNetwork):
     }
 
 
-def _effective_sensor_status(sensor: Sensor, latest_health: SensorHealth | None):
+def _effective_sensor_status(sensor: Sensor, latest_health: SensorHealth | None, realtime_status: dict | None = None):
+    if realtime_status:
+        realtime_heartbeat = realtime_status.get('last_heartbeat')
+        if realtime_heartbeat:
+            try:
+                heartbeat = datetime.fromisoformat(realtime_heartbeat)
+            except ValueError:
+                heartbeat = None
+            if heartbeat and (datetime.utcnow() - heartbeat).total_seconds() <= SENSOR_HEARTBEAT_STALE_SECONDS:
+                status = (realtime_status.get('status') or 'online').lower()
+                if realtime_status.get('connected', True) and status != 'offline':
+                    return status
+
     if latest_health is None:
         return 'offline'
 
@@ -72,10 +85,24 @@ def get_overview():
         today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         today_threats = Threat.query.filter(Threat.created_at >= today_start).count()
         
+        realtime_sensors = get_connected_sensors_snapshot()
+        sensor_rows = Sensor.query.all()
+        effective_statuses = {}
+        for sensor in sensor_rows:
+            latest_health = SensorHealth.query\
+                .filter_by(sensor_id=sensor.id)\
+                .order_by(desc(SensorHealth.created_at))\
+                .first()
+            effective_statuses[sensor.id] = _effective_sensor_status(
+                sensor,
+                latest_health,
+                realtime_sensors.get(sensor.id),
+            )
+
         # Sensor metrics
         total_sensors = Sensor.query.count()
-        online_sensors = Sensor.query.filter_by(is_active=True).count()
-        offline_sensors = Sensor.query.filter_by(is_active=False).count()
+        online_sensors = sum(1 for status in effective_statuses.values() if status != 'offline')
+        offline_sensors = max(total_sensors - online_sensors, 0)
         
         # Get latest sensor health
         latest_health = db.session.query(
@@ -285,25 +312,48 @@ def get_sensor_health():
         # Get latest health for each sensor
         sensors_health = []
         sensors = Sensor.query.all()
-        
+        realtime_sensors = get_connected_sensors_snapshot()
+
         for sensor in sensors:
             latest_health = SensorHealth.query\
                 .filter_by(sensor_id=sensor.id)\
                 .order_by(desc(SensorHealth.created_at))\
                 .first()
-            
-            if latest_health:
-                effective_status = _effective_sensor_status(sensor, latest_health)
+            realtime_status = realtime_sensors.get(sensor.id)
+
+            if latest_health or realtime_status:
+                effective_status = _effective_sensor_status(sensor, latest_health, realtime_status)
                 sensors_health.append({
                     'sensor_id': sensor.id,
                     'name': sensor.name,
                     'location': sensor.location,
                     'status': effective_status,
-                    'signal_strength': latest_health.signal_strength,
-                    'cpu_usage': latest_health.cpu_usage,
-                    'memory_usage': latest_health.memory_usage,
-                    'uptime': latest_health.uptime,
-                    'last_heartbeat': latest_health.last_heartbeat.isoformat() if latest_health.last_heartbeat else None
+                    'signal_strength': (
+                        realtime_status.get('signal_strength')
+                        if realtime_status is not None
+                        else latest_health.signal_strength if latest_health else 0
+                    ),
+                    'cpu_usage': (
+                        realtime_status.get('cpu_usage')
+                        if realtime_status is not None
+                        else latest_health.cpu_usage if latest_health else 0
+                    ),
+                    'memory_usage': (
+                        realtime_status.get('memory_usage')
+                        if realtime_status is not None
+                        else latest_health.memory_usage if latest_health else 0
+                    ),
+                    'uptime': (
+                        realtime_status.get('uptime')
+                        if realtime_status is not None
+                        else latest_health.uptime if latest_health else 0
+                    ),
+                    'interface': realtime_status.get('interface') if realtime_status is not None else None,
+                    'last_heartbeat': (
+                        realtime_status.get('last_heartbeat')
+                        if realtime_status is not None
+                        else latest_health.last_heartbeat.isoformat() if latest_health and latest_health.last_heartbeat else None
+                    )
                 })
         
         # Calculate averages

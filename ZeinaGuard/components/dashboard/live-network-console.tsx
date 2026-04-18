@@ -94,7 +94,7 @@ function effectiveSensorStatus(sensor: SensorStatusEvent) {
   if (!Number.isFinite(heartbeat) || (Date.now() - heartbeat) > SENSOR_HEARTBEAT_STALE_MS) {
     return 'offline';
   }
-  return sensor.status || 'offline';
+  return sensor.status === 'offline' ? 'offline' : 'online';
 }
 
 
@@ -276,7 +276,10 @@ export function LiveNetworkConsole() {
   }, []);
 
   useEffect(() => {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+    const apiBase =
+      process.env.NEXT_PUBLIC_API_URL ||
+      process.env.NEXT_PUBLIC_BACKEND_URL ||
+      'http://localhost:8000';
 
     const bootstrap = async () => {
       try {
@@ -356,14 +359,6 @@ export function LiveNetworkConsole() {
 
   const handleAttack = (network: LiveNetworkEvent) => {
     try {
-      const sensorStatus = sensorStatuses[network.sensor_id];
-      if (sensorStatus && effectiveSensorStatus(sensorStatus) === 'offline') {
-        const message = `Sensor #${network.sensor_id} is offline, so the attack cannot be dispatched`;
-        setAttackState(message);
-        toast.error('Sensor offline', { description: message });
-        return;
-      }
-
       const payload: AttackCommandEvent = {
         sensor_id: network.sensor_id,
         action: 'deauth',
@@ -371,7 +366,7 @@ export function LiveNetworkConsole() {
         channel: network.channel,
       };
       sendAttackCommand(payload);
-      setAttackState(`Dispatched deauth command for ${network.bssid} via sensor #${network.sensor_id}`);
+      setAttackState(`Dispatching deauth command for ${network.bssid} via sensor #${network.sensor_id}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to send attack command';
       setAttackState(message);

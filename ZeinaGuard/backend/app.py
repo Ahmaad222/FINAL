@@ -117,6 +117,7 @@ def register_routes(app):
                 "socketio": "initialized" if getattr(app, "socketio", None) else "not_initialized",
                 "redis": realtime_status["redis"],
                 "queue": realtime_status["queue"],
+                "connected_sensors": realtime_status["connected_sensors"],
             }
         ), 200
 
@@ -195,7 +196,7 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("FLASK_PORT", "5000"))
+    port = int(os.getenv("FLASK_PORT", "8000"))
     debug = os.getenv("FLASK_DEBUG", "0") == "1"
     app.socketio.run(
         app,

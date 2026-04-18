@@ -95,6 +95,7 @@ class Sensor(db.Model):
     location = db.Column(String(255))
     is_active = db.Column(Boolean, default=True)
     firmware_version = db.Column(String(50))
+    last_heartbeat = db.Column(DateTime)
     created_at = db.Column(DateTime, default=datetime.utcnow)
     updated_at = db.Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

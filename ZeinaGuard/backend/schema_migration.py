@@ -13,6 +13,7 @@ LOGGER = logging.getLogger("zeinaguard.schema")
 
 
 SCHEMA_STATEMENTS = [
+    "ALTER TABLE sensors ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMP",
     """
     CREATE TABLE IF NOT EXISTS wifi_networks (
         id SERIAL PRIMARY KEY,
