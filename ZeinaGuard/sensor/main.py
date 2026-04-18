@@ -110,9 +110,8 @@ def ensure_virtualenv():
         is_valid, reason, venv_python = validate_venv()
 
         if not is_valid and reason != "missing":
-            log("[Bootstrap] Existing venv is broken → recreating...")
+            log("[Bootstrap] Existing venv is broken -> recreating...")
             remove_venv()
-            is_valid = False
 
         if not VENV_DIR.exists():
             create_venv()
@@ -127,7 +126,7 @@ def ensure_virtualenv():
         except RuntimeError:
             install_system_dependencies()
             if VENV_DIR.exists():
-                log("[Bootstrap] Existing venv is broken → recreating...")
+                log("[Bootstrap] Existing venv is broken -> recreating...")
                 remove_venv()
             create_venv()
             venv_python = _venv_python_path()
@@ -140,7 +139,7 @@ def ensure_virtualenv():
         if not pip_available(venv_python):
             install_system_dependencies()
             if VENV_DIR.exists():
-                log("[Bootstrap] Existing venv is broken → recreating...")
+                log("[Bootstrap] Existing venv is broken -> recreating...")
                 remove_venv()
             create_venv()
             venv_python = _venv_python_path()
@@ -152,7 +151,7 @@ def ensure_virtualenv():
             if not pip_available(venv_python):
                 raise RuntimeError("pip is still unavailable after recreating the virtual environment")
 
-        log("[Bootstrap] Installing Python dependencies...")
+        log("[Bootstrap] Installing dependencies...")
         run_command(
             [str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"],
             "Failed to upgrade pip, setuptools, and wheel",
@@ -161,6 +160,32 @@ def ensure_virtualenv():
             [str(venv_python), "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
             "Failed to install sensor requirements",
         )
+
+        log("[Bootstrap] Verifying dependencies...")
+        verification_script = (
+            "import psutil\n"
+            "import requests\n"
+            "import rich\n"
+            "import socketio\n"
+            "import websocket\n"
+            "from scapy.all import sniff\n"
+        )
+        try:
+            run_command(
+                [str(venv_python), "-c", verification_script],
+                "Failed to verify installed sensor dependencies",
+            )
+        except RuntimeError:
+            log("[Bootstrap] Missing dependency detected -> reinstalling requirements...")
+            run_command(
+                [str(venv_python), "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
+                "Failed to reinstall sensor requirements",
+            )
+            run_command(
+                [str(venv_python), "-c", verification_script],
+                "Failed to verify installed sensor dependencies after reinstall",
+            )
+        log("[Bootstrap] All dependencies loaded successfully")
         marker.write_text("ok\n", encoding="utf-8")
 
         current_python = Path(sys.executable).resolve()
