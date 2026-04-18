@@ -25,7 +25,7 @@ export function SensorHeatmap() {
       try {
         setLoading(true);
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/sensors/health`,
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/sensors/health`,
           { headers: { 'Content-Type': 'application/json' } }
         );
 

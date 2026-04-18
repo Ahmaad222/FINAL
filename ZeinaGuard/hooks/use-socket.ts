@@ -92,21 +92,7 @@ const SOCKET_EVENTS = [
 
 
 function resolveSocketUrl(): string {
-  const explicitSocketUrl = process.env.NEXT_PUBLIC_SOCKET_URL;
-  if (explicitSocketUrl) {
-    return explicitSocketUrl;
-  }
-
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-  if (apiUrl && apiUrl.startsWith('http')) {
-    return apiUrl;
-  }
-
-  if (typeof window !== 'undefined') {
-    return window.location.origin;
-  }
-
-  return 'http://localhost:5000';
+  return process.env.NEXT_PUBLIC_SOCKET_URL || 'http://localhost:5000';
 }
 
 

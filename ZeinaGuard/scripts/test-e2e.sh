@@ -1,6 +1,6 @@
 #!/bin/bash
 # ZeinaGuard Pro - E2E Health Check Script
-# Run after starting services: ./scripts/start-docker.sh
+# Run after starting services locally: ./run-all.sh
 
 set -e
 

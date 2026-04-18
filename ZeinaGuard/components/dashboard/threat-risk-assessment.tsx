@@ -23,7 +23,7 @@ export function ThreatRiskAssessment() {
       try {
         setLoading(true);
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/dashboard/threat-assessment`,
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/dashboard/threat-assessment`,
           { headers: { 'Content-Type': 'application/json' } }
         );
 

@@ -189,7 +189,7 @@ zeina-guard-sensor/
 - **TypeScript** — Type-safe UI development
 
 ### Infrastructure
-- **Docker** — Containerized backend deployment
+- **Local backend services** — Flask, PostgreSQL, and Redis running on the same machine or LAN
 - **Raspberry Pi** — Edge sensor hardware
 - **Monitor-mode USB WiFi adapter** (e.g., Alfa AWUS036ACH, TP-Link TL-WN722N v1)
 

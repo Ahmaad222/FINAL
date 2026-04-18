@@ -238,7 +238,7 @@ export function LiveNetworkConsole() {
   }, []);
 
   useEffect(() => {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL || '/backend-api';
+    const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
     const bootstrap = async () => {
       try {

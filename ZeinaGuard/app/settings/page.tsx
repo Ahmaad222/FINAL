@@ -25,6 +25,7 @@ import { useTheme } from "next-themes";
 import { useState, useEffect } from "react";
 
 export default function SettingsPage() {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
   const { theme, setTheme } = useTheme();
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [debugOverlay, setDebugOverlay] = useState(false);
@@ -161,8 +162,6 @@ export default function SettingsPage() {
       setLoading('restart');
       
       // Get the API URL from environment variables, or fallback to localhost:5000
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
-      
       // Call the actual health check endpoint we verified earlier
       const response = await fetch(`${apiUrl}/health`, {
         method: 'GET',
@@ -197,7 +196,7 @@ export default function SettingsPage() {
 
     try {
       setLoading('purge');
-      const response = await fetch('/api/events/purge', {
+      const response = await fetch(`${apiUrl}/api/events/purge`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
       });

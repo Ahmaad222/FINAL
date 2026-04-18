@@ -66,8 +66,15 @@ _oui_db: dict[str, str] = {}
 
 
 try:
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        redis_host = os.getenv("REDIS_HOST", "localhost")
+        redis_port = os.getenv("REDIS_PORT", "6379")
+        redis_password = os.getenv("REDIS_PASSWORD", "")
+        credentials = f":{redis_password}@" if redis_password else ""
+        redis_url = f"redis://{credentials}{redis_host}:{redis_port}/0"
     redis_client = Redis.from_url(
-        os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        redis_url,
         decode_responses=True,
     )
 except Exception:

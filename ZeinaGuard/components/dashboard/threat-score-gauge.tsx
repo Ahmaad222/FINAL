@@ -22,7 +22,7 @@ export function ThreatScoreGauge() {
       try {
         setLoading(true);
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/dashboard/system-metrics`,
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/dashboard/system-metrics`,
           { headers: { 'Content-Type': 'application/json' } }
         );
 

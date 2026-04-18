@@ -3,7 +3,7 @@
  * Handles all HTTP requests to Flask backend
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || '/backend-api';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
 
 // Token storage keys
 const ACCESS_TOKEN_KEY = 'zeinaguard_access_token';

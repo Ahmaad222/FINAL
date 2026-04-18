@@ -1,14 +1,12 @@
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 
-RUN_MODE = os.getenv("RUN_MODE", "LOCAL")
-BACKEND_URL = os.getenv(
-    "BACKEND_URL",
-    "http://localhost:5000" if RUN_MODE == "LOCAL" else "http://flask-backend:5000",
-)
-BACKEND_HOST = "localhost" if "localhost" in BACKEND_URL else "flask-backend"
-BACKEND_PORT = 5000
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
+_parsed_backend_url = urlparse(BACKEND_URL)
+BACKEND_HOST = _parsed_backend_url.hostname or "localhost"
+BACKEND_PORT = _parsed_backend_url.port or 5000
 
 LOCKED_CHANNEL = None
 INTERFACE = os.getenv("SENSOR_INTERFACE", "wlan0")

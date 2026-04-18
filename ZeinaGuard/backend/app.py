@@ -46,10 +46,23 @@ def configure_logging() -> logging.Logger:
 
 logger = configure_logging()
 
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 DB_CONNECT_RETRIES = int(os.getenv("DB_CONNECT_RETRIES", "15"))
 DB_CONNECT_DELAY_SECONDS = float(os.getenv("DB_CONNECT_DELAY_SECONDS", "2"))
+
+
+def build_database_url() -> str:
+    explicit_url = os.getenv("DATABASE_URL")
+    if explicit_url:
+        return explicit_url
+
+    user = os.getenv("POSTGRES_USER", "zeinaguard_user")
+    password = os.getenv("POSTGRES_PASSWORD", "secure_password")
+    host = os.getenv("POSTGRES_HOST", "localhost")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    database = os.getenv("POSTGRES_DB", "zeinaguard_db")
+    return f"postgresql://{user}:{password}@{host}:{port}/{database}"
 
 
 def initialize_database():
@@ -145,10 +158,7 @@ def create_app(config_object=None):
     app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
     app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=24)
     app.config["JSON_SORT_KEYS"] = False
-    app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv(
-        "DATABASE_URL",
-        "postgresql://zeinaguard_user:secure_password_change_me@postgres:5432/zeinaguard_db",
-    )
+    app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", build_database_url())
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["SQLALCHEMY_ECHO"] = False
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {

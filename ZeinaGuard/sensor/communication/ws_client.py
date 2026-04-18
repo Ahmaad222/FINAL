@@ -18,12 +18,7 @@ from runtime_state import get_status_snapshot, log_attack, mark_sent, update_sta
 
 LOGGER = logging.getLogger("zeinaguard.sensor.ws")
 
-RUN_MODE = os.getenv("RUN_MODE", "LOCAL")
-DEFAULT_BACKEND_URL = (
-    "http://flask-backend:5000"
-    if RUN_MODE == "DOCKER"
-    else os.getenv("BACKEND_URL", "http://localhost:5000")
-)
+DEFAULT_BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:5000")
 
 SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
 SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
@@ -38,8 +33,8 @@ class WSClient:
         self.backend_url = backend_url or DEFAULT_BACKEND_URL
         self.token = token
         self.hostname = socket.gethostname()
-        self.sensor_identifier = sensor_id or os.getenv("ZEINAGUARD_SENSOR_ID", self.hostname)
-        self.registered_sensor_id = None
+        self.sensor_registration_key = sensor_id or os.getenv("ZEINAGUARD_SENSOR_ID", self.hostname)
+        self.sensor_id = None
         self.started_at = time.time()
         self.is_running = False
         self.local_logger = LocalDataLogger()
@@ -67,7 +62,7 @@ class WSClient:
             self._enqueue_event(
                 "sensor_register",
                 {
-                    "sensor_id": self.sensor_identifier,
+                    "sensor_id": self.sensor_registration_key,
                     "hostname": self.hostname,
                 },
             )
@@ -82,10 +77,10 @@ class WSClient:
 
         @self.sio.on("registration_success")
         def registration_success(data):
-            self.registered_sensor_id = data.get("sensor_id")
+            self.sensor_id = self._safe_int(data.get("sensor_id"), default=0) or None
             update_status(
                 backend_status="registered",
-                message=f"Sensor registered as #{self.registered_sensor_id}",
+                message=f"Sensor registered as #{self.sensor_id}",
             )
 
         @self.sio.on("attack_command")
@@ -376,7 +371,7 @@ class WSClient:
     def _handle_attack_command(self, payload):
         payload = payload or {}
         requested_sensor_id = self._safe_int(payload.get("sensor_id"), default=0)
-        actual_sensor_id = self._safe_int(self.registered_sensor_id, default=0)
+        actual_sensor_id = self._safe_int(self.sensor_id, default=0)
         target_bssid = str(payload.get("target_bssid") or "").strip().upper()
         channel = payload.get("channel")
 
@@ -434,7 +429,7 @@ class WSClient:
         self._enqueue_event("attack_ack", payload)
 
     def _sensor_id_value(self):
-        return self.registered_sensor_id or self.sensor_identifier
+        return self.sensor_id or self.sensor_registration_key
 
     def _safe_int(self, value, default=0):
         try:

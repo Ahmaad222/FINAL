@@ -11,6 +11,7 @@ import { toast } from 'sonner';
 import { soundService } from '@/lib/sound-service';
 
 export function NotificationSettings() {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
   const [soundsEnabled, setSoundsEnabled] = useState(!soundService.getMuteState());
   const [webhookUrl, setWebhookUrl] = useState('');
   const [alertEmail, setAlertEmail] = useState('');
@@ -49,7 +50,7 @@ export function NotificationSettings() {
       }
       
       // Mock API call
-      const response = await fetch('/api/notifications/webhook-test', {
+      const response = await fetch(`${apiUrl}/api/notifications/webhook-test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: webhookUrl }),
@@ -85,7 +86,7 @@ export function NotificationSettings() {
       }
       
       // Mock API call
-      const response = await fetch('/api/notifications/email-test', {
+      const response = await fetch(`${apiUrl}/api/notifications/email-test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: alertEmail }),

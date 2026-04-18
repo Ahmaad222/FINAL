@@ -56,7 +56,7 @@ export function RealTimeEventFeed() {
       try {
         setLoading(true);
         const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/dashboard/threat-events?limit=10`,
+          `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/dashboard/threat-events?limit=10`,
           { headers: { 'Content-Type': 'application/json' } }
         );
 
@@ -80,7 +80,7 @@ export function RealTimeEventFeed() {
     try {
       setBlockingId(event.id);
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || '/backend-api'}/api/threats/${event.id}/block`,
+        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000'}/api/threats/${event.id}/block`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

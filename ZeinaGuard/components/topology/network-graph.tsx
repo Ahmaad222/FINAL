@@ -26,6 +26,7 @@ interface TopologyData {
 }
 
 export function NetworkGraph() {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [loading, setLoading] = useState(true);
@@ -44,7 +45,7 @@ export function NetworkGraph() {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch('/api/topology');
+      const response = await fetch(`${apiUrl}/api/topology`);
       
       if (!response.ok) throw new Error('Failed to fetch topology');
       
