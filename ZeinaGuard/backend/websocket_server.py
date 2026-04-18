@@ -63,22 +63,43 @@ _persistence_manager = None
 _persistence_manager_lock = threading.Lock()
 _recent_threat_event_cache: dict[tuple[int, str], float] = {}
 _oui_db: dict[str, str] = {}
+REDIS_AVAILABLE = False
 
 
-try:
-    redis_url = os.getenv("REDIS_URL")
-    if not redis_url:
-        redis_host = os.getenv("REDIS_HOST", "localhost")
-        redis_port = os.getenv("REDIS_PORT", "6379")
-        redis_password = os.getenv("REDIS_PASSWORD", "")
-        credentials = f":{redis_password}@" if redis_password else ""
-        redis_url = f"redis://{credentials}{redis_host}:{redis_port}/0"
-    redis_client = Redis.from_url(
-        redis_url,
-        decode_responses=True,
-    )
-except Exception:
-    redis_client = None
+def _build_redis_client():
+    global REDIS_AVAILABLE
+
+    try:
+        redis_url = os.getenv("REDIS_URL")
+        if not redis_url:
+            redis_host = os.getenv("REDIS_HOST", "localhost")
+            redis_port = os.getenv("REDIS_PORT", "6379")
+            redis_password = os.getenv("REDIS_PASSWORD", "")
+            credentials = f":{redis_password}@" if redis_password else ""
+            redis_url = f"redis://{credentials}{redis_host}:{redis_port}/0"
+
+        client = Redis.from_url(
+            redis_url,
+            decode_responses=True,
+        )
+        client.ping()
+        REDIS_AVAILABLE = True
+        LOGGER.info("[Realtime] Redis detected; local mode continues to use the in-memory queue")
+        return client
+    except Exception as exc:
+        REDIS_AVAILABLE = False
+        LOGGER.warning("[Realtime] Redis unavailable (%s); using in-memory queue", exc)
+        return None
+
+
+def get_realtime_status() -> dict[str, str]:
+    return {
+        "redis": "available" if REDIS_AVAILABLE else "unavailable",
+        "queue": "in-memory",
+    }
+
+
+redis_client = _build_redis_client()
 
 
 @dataclass

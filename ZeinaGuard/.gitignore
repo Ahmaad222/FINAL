@@ -18,6 +18,7 @@ __pycache__/
 *$py.class
 venv/
 .pytest_cache/
+.zeinaguard-runtime/
 
 # --- Docker & Databases (بيانات الداتا بيز الخاصة بجهازك) ---
 postgres_data/

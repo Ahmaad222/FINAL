@@ -22,7 +22,7 @@ from werkzeug.security import generate_password_hash
 from models import User, db
 from routes import register_blueprints
 from schema_migration import apply_runtime_migrations
-from websocket_server import init_socketio
+from websocket_server import get_realtime_status, init_socketio
 
 
 def configure_logging() -> logging.Logger:
@@ -109,11 +109,14 @@ def initialize_database():
 def register_routes(app):
     @app.route("/health", methods=["GET"])
     def health():
+        realtime_status = get_realtime_status()
         return jsonify(
             {
                 "status": "healthy",
                 "service": "zeinaguard-backend",
                 "socketio": "initialized" if getattr(app, "socketio", None) else "not_initialized",
+                "redis": realtime_status["redis"],
+                "queue": realtime_status["queue"],
             }
         ), 200
 

@@ -1,5 +1,5 @@
 setup:
-	bash scripts/setup.sh
+	bash setup-check.sh
 
 run:
 	bash run-all.sh
