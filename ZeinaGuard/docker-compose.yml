@@ -85,10 +85,6 @@ services:
       BACKEND_URL: http://flask-backend:5000
     ports:
       - "3000:3000"
-    volumes:
-      - .:/app:ro
-      - /app/node_modules
-      - /app/.next
     networks:
       - zeinaguard_network
     depends_on:

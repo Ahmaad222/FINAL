@@ -2,23 +2,13 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Install pnpm globally
-RUN npm install -g pnpm
+COPY package.json pnpm-lock.yaml ./
+RUN npm install -g pnpm && pnpm install
 
-# Copy package files
-COPY package.json pnpm-lock.yaml* ./
-
-# Install dependencies with pnpm
-RUN pnpm install --no-frozen-lockfile
-
-# Copy app code
 COPY . .
 
-# Build Next.js
-RUN pnpm run build
+RUN pnpm build
 
-# Expose port
-EXPOSE 5000
+EXPOSE 3000
 
-# Run development server
-CMD ["pnpm", "run", "dev"]
+CMD ["pnpm", "start"]
