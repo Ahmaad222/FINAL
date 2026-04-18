@@ -14,7 +14,6 @@ ZeinaGuard now runs fully locally without Docker.
 
 - Python 3
 - Node.js + npm
-- pnpm
 - PostgreSQL
 - Redis
 - Linux shell for the helper scripts
@@ -107,9 +106,10 @@ The sensor bootstraps its own virtual environment automatically and connects to 
 
 - The frontend uses `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_SOCKET_URL` directly, so no reverse proxy is required.
 - The backend builds its PostgreSQL and Redis connection settings from the root `.env`.
+- The frontend launcher prefers `pnpm`, but automatically falls back to `npm` when `pnpm` is not installed.
 - If PostgreSQL or Redis are not running, restart them with:
 
 ```bash
 sudo service postgresql start
-sudo service redis-server start
+sudo service redis-server start || sudo service redis start
 ```
