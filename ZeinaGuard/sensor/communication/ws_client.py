@@ -24,7 +24,7 @@ SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
 SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
 SCAN_DEDUP_SIGNAL_DELTA = int(os.getenv("SCAN_DEDUP_SIGNAL_DELTA", "5"))
 SCAN_DEDUP_MAX_AGE_SECONDS = float(os.getenv("SCAN_DEDUP_MAX_AGE_SECONDS", "30"))
-SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "5"))
+SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "10"))
 OUTBOUND_QUEUE_MAXSIZE = int(os.getenv("SENSOR_OUTBOUND_QUEUE_MAXSIZE", "4000"))
 
 
@@ -83,6 +83,11 @@ class WSClient:
                 backend_status="registered",
                 message=f"Sensor registered as #{self.sensor_id}",
             )
+
+        @self.sio.on("execute_attack")
+        def execute_attack(payload):
+            LOGGER.info("[COMMAND RECEIVED] execute_attack=%s", payload)
+            self._handle_attack_command(payload)
 
         @self.sio.on("attack_command")
         def attack_command(payload):

@@ -52,6 +52,10 @@ def _effective_sensor_status(sensor: Sensor, latest_health: SensorHealth | None,
                 if realtime_status.get('connected', True) and status != 'offline':
                     return status
 
+    if sensor.last_heartbeat is not None:
+        if (datetime.utcnow() - sensor.last_heartbeat).total_seconds() <= SENSOR_HEARTBEAT_STALE_SECONDS and sensor.is_active:
+            return 'online'
+
     if latest_health is None:
         return 'offline'
 
@@ -352,7 +356,8 @@ def get_sensor_health():
                     'last_heartbeat': (
                         realtime_status.get('last_heartbeat')
                         if realtime_status is not None
-                        else latest_health.last_heartbeat.isoformat() if latest_health and latest_health.last_heartbeat else None
+                        else latest_health.last_heartbeat.isoformat() if latest_health and latest_health.last_heartbeat
+                        else sensor.last_heartbeat.isoformat() if sensor.last_heartbeat else None
                     )
                 })
         

@@ -52,6 +52,7 @@ NETWORK_UPDATE_EVENT = "network_update"
 THREAT_DETECTED_EVENT = "threat_detected"
 ATTACK_COMMAND_EVENT = "attack_command"
 ATTACK_ACK_EVENT = "attack_ack"
+EXECUTE_ATTACK_EVENT = "execute_attack"
 SENSOR_STATUS_EVENT = "sensor_status"
 SENSOR_HEARTBEAT_EVENT = "sensor_heartbeat"
 DASHBOARD_ROOM = "dashboards"
@@ -808,6 +809,7 @@ def _mark_sensor_status(
         "interface": sanitize_input(str(payload.get("interface") or ""), max_length=255) or None,
         "hostname": sanitize_input(str(payload.get("hostname") or ""), max_length=255) or None,
         "last_heartbeat": heartbeat_time.isoformat(),
+        "last_seen": heartbeat_time.isoformat(),
         "updated_at": heartbeat_time.isoformat(),
     }
 
@@ -839,6 +841,18 @@ def is_sensor_connected(sensor_id: int) -> bool:
     with _connected_sensors_lock:
         snapshot = _connected_sensors.get(sensor_id)
         return bool(snapshot and snapshot.get("connected"))
+
+
+def get_sensor_socket_id(sensor_id: int) -> str | None:
+    with _connected_sensors_lock:
+        snapshot = _connected_sensors.get(sensor_id)
+        if snapshot and snapshot.get("connected") and snapshot.get("sid"):
+            return str(snapshot["sid"])
+
+    for sid, client in connected_clients.items():
+        if client.get("client_type") == "sensor" and _safe_int(client.get("sensor_id"), default=0) == sensor_id:
+            return sid
+    return None
 
 
 def _log_emit(event_name: str, payload: Any, room: str | None = None) -> None:
@@ -974,6 +988,20 @@ def _persist_sensor_status(sensor_id: int, payload: dict[str, Any]) -> dict[str,
     }
 
 
+def _touch_sensor_record(sensor_id: int, payload: dict[str, Any]) -> datetime:
+    sensor = db.session.get(Sensor, sensor_id)
+    if sensor is None:
+        raise ValueError(f"Unknown sensor_id: {sensor_id}")
+
+    status = sanitize_input(str(payload.get("status") or "online"), max_length=50) or "online"
+    heartbeat_at = datetime.utcnow()
+    sensor.is_active = status != "offline"
+    sensor.last_heartbeat = heartbeat_at
+    sensor.updated_at = heartbeat_at
+    db.session.commit()
+    return heartbeat_at
+
+
 def _resolve_sensor_id_from_payload(payload: dict[str, Any], sid: str | None = None) -> int:
     sensor_id = _safe_int(payload.get("sensor_id"), default=0)
     if sensor_id:
@@ -1012,9 +1040,49 @@ def _handle_sensor_presence(socketio: SocketIO, payload: dict[str, Any], *, sid:
         connected_clients[sid]["client_type"] = "sensor"
         if live_snapshot.get("hostname"):
             connected_clients[sid]["hostname"] = live_snapshot["hostname"]
+        connected_clients[sid]["last_seen"] = merged_payload["last_heartbeat"]
 
     _emit_socket_event(socketio, SENSOR_STATUS_EVENT, merged_payload, room=DASHBOARD_ROOM)
     return merged_payload
+
+
+def _touch_sensor_activity(socketio: SocketIO, payload: dict[str, Any], *, sid: str, status_event_name: str) -> dict[str, Any]:
+    sensor_id = _resolve_sensor_id_from_payload(payload, sid=sid)
+    if not sensor_id:
+        raise ValueError(f"{status_event_name} missing sensor_id")
+
+    normalized_payload = {
+        **payload,
+        "status": payload.get("status") or "online",
+    }
+    live_snapshot = _mark_sensor_status(sensor_id, normalized_payload, sid=sid, connected=True)
+    heartbeat_at = _touch_sensor_record(sensor_id, normalized_payload)
+
+    status_payload = {
+        "event": "sensor_status",
+        "sensor_id": sensor_id,
+        "status": "online",
+        "signal_strength": live_snapshot.get("signal_strength", 0),
+        "cpu": live_snapshot.get("cpu_usage", 0.0),
+        "cpu_usage": live_snapshot.get("cpu_usage", 0.0),
+        "memory": live_snapshot.get("memory_usage", 0.0),
+        "memory_usage": live_snapshot.get("memory_usage", 0.0),
+        "uptime": live_snapshot.get("uptime", 0),
+        "last_heartbeat": heartbeat_at.isoformat(),
+        "last_seen": heartbeat_at.isoformat(),
+        "connected": True,
+        "message": live_snapshot.get("message"),
+        "interface": live_snapshot.get("interface"),
+        "hostname": live_snapshot.get("hostname"),
+    }
+
+    if sid in connected_clients:
+        connected_clients[sid]["sensor_id"] = sensor_id
+        connected_clients[sid]["client_type"] = "sensor"
+        connected_clients[sid]["last_seen"] = heartbeat_at.isoformat()
+
+    _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
+    return status_payload
 
 
 def _normalize_network_events(payload: Any) -> list[dict[str, Any]]:
@@ -1291,6 +1359,23 @@ def init_socketio(app):
             _emit_context_event("network_scan_ack", {"status": "ignored", "queued": 0})
             return
 
+        try:
+            _touch_sensor_activity(
+                socketio,
+                {
+                    "sensor_id": payload.get("sensor_id"),
+                    "registration_key": payload.get("registration_key"),
+                    "hostname": payload.get("hostname"),
+                    "status": "online",
+                    "message": "Receiving network scan batches",
+                },
+                sid=request.sid,
+                status_event_name=NETWORK_SCAN_EVENT,
+            )
+        except Exception as exc:
+            db.session.rollback()
+            LOGGER.warning("[WebSocket] Failed to refresh sensor presence on network_scan: %s", exc)
+
         queued = 0
         for network_data in network_events:
             try:
@@ -1413,6 +1498,9 @@ def init_socketio(app):
     @socketio.on(ATTACK_COMMAND_EVENT)
     def handle_attack_command(payload):
         payload = sanitize_json_payload(payload or {})
+        sensor_id = None
+        target_bssid = None
+        channel = None
         try:
             sensor_id = _safe_int(payload.get("sensor_id"), default=0)
             target_bssid = _normalize_bssid(payload.get("target_bssid") or payload.get("bssid"))
@@ -1429,8 +1517,8 @@ def init_socketio(app):
             if sensor is None:
                 raise ValueError(f"Sensor {sensor_id} does not exist")
 
-            room = _sensor_room(sensor_id)
-            if not is_sensor_connected(sensor_id):
+            sensor_sid = get_sensor_socket_id(sensor_id)
+            if not sensor_sid or not is_sensor_connected(sensor_id):
                 raise ValueError(f"Sensor {sensor_id} is not connected")
             command_payload = {
                 "sensor_id": sensor_id,
@@ -1439,7 +1527,7 @@ def init_socketio(app):
                 "channel": channel,
             }
             _emit_socket_event(socketio, ATTACK_COMMAND_EVENT, {**command_payload, "sensor_id": sensor_id, "timestamp": datetime.utcnow().isoformat(), "status": "dispatched"}, room=DASHBOARD_ROOM)
-            _emit_socket_event(socketio, ATTACK_COMMAND_EVENT, command_payload, room=room)
+            _emit_socket_event(socketio, EXECUTE_ATTACK_EVENT, command_payload, room=sensor_sid)
             _emit_context_event(
                 "attack_command_ack",
                 {
