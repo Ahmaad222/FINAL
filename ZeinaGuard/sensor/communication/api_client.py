@@ -9,7 +9,7 @@ class APIClient:
         self.token = None
 
     def authenticate_sensor(self):
-        from ui.terminal_ui import update_status
+        from runtime_state import update_status
 
         url = f"{self.backend_url}/api/auth/login"
         payload = {

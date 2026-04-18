@@ -1,5 +1,5 @@
 from core.event_bus import containment_queue
-from ui.terminal_ui import log_attack, update_status
+from runtime_state import log_attack, update_status
 
 
 class ResponseEngine:

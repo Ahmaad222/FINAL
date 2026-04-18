@@ -1,8 +1,8 @@
 import time
 
-from core.event_bus import containment_queue, dashboard_queue, event_queue, scan_queue
+from core.event_bus import dashboard_queue, event_queue, scan_queue
 from detection.risk_engine import RiskEngine
-from ui.terminal_ui import remove_ap, update_ap, update_status
+from runtime_state import remove_ap, update_ap, update_status
 
 
 class ThreatManager:
@@ -90,12 +90,4 @@ class ThreatManager:
                 self.confirmed_rogues.add(bssid)
                 update_status(
                     message=f"Confirmed rogue: {event_summary['ssid']} ({event_summary['bssid']})"
-                )
-                containment_queue.put(
-                    {
-                        "status": status,
-                        "score": score,
-                        "reasons": reasons,
-                        "event": event_summary,
-                    }
                 )

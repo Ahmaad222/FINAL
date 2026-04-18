@@ -9,18 +9,20 @@ import os
 import re
 import threading
 import time
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from queue import Empty, Full, Queue
 from typing import Any
 
 from flask import current_app, request
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from redis import Redis
 from sqlalchemy import func, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from models import NetworkScanEvent, Sensor, Threat, WiFiNetwork, db
+from models import NetworkScanEvent, Sensor, SensorHealth, Threat, WiFiNetwork, db
 from security import sanitize_input, sanitize_json_payload, validate_mac_address
 
 
@@ -43,6 +45,15 @@ THREAT_MAX_ROWS = int(os.getenv("THREAT_MAX_ROWS", "50000"))
 SCAN_EVENT_MAX_ROWS = int(os.getenv("NETWORK_SCAN_EVENT_MAX_ROWS", "250000"))
 WIFI_NETWORK_MAX_ROWS = int(os.getenv("WIFI_NETWORK_MAX_ROWS", "50000"))
 ADVISORY_LOCK_ID = int(os.getenv("ZEINAGUARD_CLEANUP_LOCK_ID", "240416"))
+OUI_DB_PATH = Path(__file__).resolve().parent.parent / "sensor" / "oui_db.json"
+
+NETWORK_SCAN_EVENT = "network_scan"
+NETWORK_UPDATE_EVENT = "network_update"
+THREAT_DETECTED_EVENT = "threat_detected"
+ATTACK_COMMAND_EVENT = "attack_command"
+ATTACK_ACK_EVENT = "attack_ack"
+SENSOR_STATUS_EVENT = "sensor_status"
+DASHBOARD_ROOM = "dashboards"
 
 _sensor_id_cache: dict[str, int] = {}
 _sensor_id_cache_lock = threading.Lock()
@@ -50,6 +61,8 @@ _cleanup_thread_started = False
 _cleanup_thread_lock = threading.Lock()
 _persistence_manager = None
 _persistence_manager_lock = threading.Lock()
+_recent_threat_event_cache: dict[tuple[int, str], float] = {}
+_oui_db: dict[str, str] = {}
 
 
 try:
@@ -117,6 +130,7 @@ class BufferedNetworkUpdate:
 class FlushResult:
     persisted_keys: set[tuple[int, str]]
     inserted_updates: list[BufferedNetworkUpdate]
+    updated_updates: list[BufferedNetworkUpdate]
     inserted_count: int
     updated_count: int
     scan_event_count: int
@@ -171,14 +185,14 @@ class ScanPersistenceManager:
             default=parse_uptime_to_seconds(network_data.get("uptime")),
         )
         encryption = sanitize_input(str(network_data.get("encryption") or "UNKNOWN"), max_length=50)
-        classification = sanitize_input(str(network_data.get("classification") or "UNKNOWN"), max_length=50)
+        classification = _normalize_classification(network_data.get("classification"))
         auth_type = sanitize_input(
             str(network_data.get("auth_type") or network_data.get("auth") or ""),
             max_length=50,
         ) or None
-        manufacturer = sanitize_input(str(network_data.get("manufacturer") or ""), max_length=255) or None
+        manufacturer = _enrich_manufacturer(bssid, network_data.get("manufacturer"))
         device_type = sanitize_input(str(network_data.get("device_type") or "AP"), max_length=50) or "AP"
-        severity = sanitize_input(str(network_data.get("severity") or "INFO"), max_length=50) or "INFO"
+        severity = _normalize_severity(network_data.get("severity"), classification)
 
         return QueuedNetworkEvent(
             sensor_identifier=sanitize_input(str(network_data.get("sensor_id") or ""), max_length=255) or "sensor",
@@ -314,6 +328,7 @@ class ScanPersistenceManager:
             for key in flush_result.persisted_keys:
                 self._recent_cache[key] = flushed_at
             self._record_flush_result(flush_result)
+            self._broadcast_flush_result(flush_result)
         except Exception as exc:
             db.session.rollback()
             for key, update in batch.items():
@@ -418,6 +433,11 @@ class ScanPersistenceManager:
             for row in result_rows
             if row.inserted
         ]
+        updated_updates = [
+            batch[(row.sensor_id, row.bssid)]
+            for row in result_rows
+            if not row.inserted
+        ]
 
         scan_rows = [
             {
@@ -449,6 +469,7 @@ class ScanPersistenceManager:
         return FlushResult(
             persisted_keys=persisted_keys,
             inserted_updates=inserted_updates,
+            updated_updates=updated_updates,
             inserted_count=inserted_count,
             updated_count=updated_count,
             scan_event_count=len(scan_rows),
@@ -472,6 +493,17 @@ class ScanPersistenceManager:
                 update.classification,
                 update.risk_score,
             )
+
+    def _broadcast_flush_result(self, flush_result: FlushResult) -> None:
+        socketio = getattr(self.app, "socketio", None)
+        if socketio is None:
+            return
+
+        for update in flush_result.inserted_updates:
+            _broadcast_network_event(socketio, NETWORK_SCAN_EVENT, update)
+
+        for update in flush_result.updated_updates:
+            _broadcast_network_event(socketio, NETWORK_UPDATE_EVENT, update)
 
     def _log_periodic_summary(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -562,6 +594,13 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _normalize_bssid(value: Any) -> str:
     if value is None:
         return ""
@@ -574,8 +613,63 @@ def _normalize_ssid(value: Any) -> str:
     return sanitize_input(str(value), max_length=255) or "Hidden"
 
 
+def _normalize_classification(value: Any) -> str:
+    normalized = sanitize_input(str(value or "LEGIT"), max_length=50).upper()
+    if normalized not in {"ROGUE", "SUSPICIOUS", "LEGIT"}:
+        return "LEGIT"
+    return normalized
+
+
+def _normalize_severity(value: Any, classification: str | None = None) -> str:
+    normalized = sanitize_input(str(value or ""), max_length=50).lower()
+    if normalized in {"critical", "high", "medium", "low", "info"}:
+        return normalized
+
+    if classification == "ROGUE":
+        return "high"
+    if classification == "SUSPICIOUS":
+        return "medium"
+    return "info"
+
+
 def _normalize_threat_type(value: Any) -> str:
     return sanitize_input(str(value or "UNKNOWN"), max_length=100) or "UNKNOWN"
+
+
+def _normalize_oui(bssid: str | None) -> str:
+    normalized_bssid = _normalize_bssid(bssid)
+    parts = normalized_bssid.split(":")
+    if len(parts) < 3:
+        return ""
+    return ":".join(parts[:3])
+
+
+def _load_oui_db() -> dict[str, str]:
+    global _oui_db
+
+    if _oui_db:
+        return _oui_db
+
+    try:
+        with OUI_DB_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            _oui_db = {str(key).upper(): str(value) for key, value in data.items()}
+    except Exception:
+        _oui_db = {}
+
+    return _oui_db
+
+
+def _enrich_manufacturer(bssid: str | None, manufacturer: str | None) -> str | None:
+    normalized = sanitize_input(str(manufacturer or ""), max_length=255) or None
+    if normalized and normalized.lower() != "unknown":
+        return normalized
+
+    oui = _normalize_oui(bssid)
+    if not oui:
+        return None
+
+    return _load_oui_db().get(oui)
 
 
 def _find_recent_duplicate_threat(threat_type: str, source_mac: str | None) -> Threat | None:
@@ -644,6 +738,141 @@ def _resolve_sensor(sensor_identifier: Any, hostname: Any = None) -> Sensor:
 
     _cache_sensor_id(sensor.id, sensor_key, host_key, str(sensor.id))
     return sensor
+
+
+def _sensor_room(sensor_id: int) -> str:
+    return f"sensor:{sensor_id}"
+
+
+def _log_emit(event_name: str, payload: Any, room: str | None = None) -> None:
+    if isinstance(payload, dict):
+        preview = {
+            key: payload.get(key)
+            for key in (
+                "sensor_id",
+                "ssid",
+                "bssid",
+                "classification",
+                "status",
+                "action",
+                "target_bssid",
+                "channel",
+                "timestamp",
+            )
+            if key in payload
+        }
+    else:
+        preview = payload
+
+    if room:
+        if room == DASHBOARD_ROOM:
+            LOGGER.info("[EMIT TO DASHBOARD] event=%s payload=%s", event_name, preview)
+        elif room.startswith("sensor:"):
+            LOGGER.info("[FORWARD COMMAND] event=%s room=%s payload=%s", event_name, room, preview)
+        else:
+            LOGGER.info("[WebSocket] emit %s room=%s payload=%s", event_name, room, preview)
+    else:
+        LOGGER.info("[WebSocket] emit %s payload=%s", event_name, preview)
+
+
+def _emit_socket_event(socketio: SocketIO, event_name: str, payload: Any, room: str | None = None) -> None:
+    _log_emit(event_name, payload, room=room)
+    socketio.emit(event_name, payload, room=room)
+
+
+def _emit_context_event(event_name: str, payload: Any) -> None:
+    _log_emit(event_name, payload, room=request.sid)
+    emit(event_name, payload)
+
+
+def _log_received_from_sensor(event_name: str, payload: Any) -> None:
+    if isinstance(payload, dict):
+        preview = {
+            key: payload.get(key)
+            for key in (
+                "event",
+                "sensor_id",
+                "ssid",
+                "bssid",
+                "status",
+                "target_bssid",
+                "action",
+                "channel",
+            )
+            if key in payload
+        }
+    else:
+        preview = payload
+    LOGGER.info("[RECEIVED FROM SENSOR] event=%s payload=%s", event_name, preview)
+
+
+def _format_network_contract(update: BufferedNetworkUpdate) -> dict[str, Any]:
+    return {
+        "sensor_id": update.sensor_id,
+        "ssid": update.ssid,
+        "bssid": update.bssid,
+        "signal": update.signal_strength,
+        "channel": update.channel,
+        "classification": _normalize_classification(update.classification),
+        "timestamp": update.last_seen.isoformat(),
+        "manufacturer": _enrich_manufacturer(update.bssid, update.manufacturer),
+    }
+
+
+def _broadcast_network_event(socketio: SocketIO, event_name: str, update: BufferedNetworkUpdate) -> None:
+    payload = _format_network_contract(update)
+    _emit_socket_event(socketio, event_name, payload, room=DASHBOARD_ROOM)
+
+
+def _should_emit_threat_event(sensor_id: int, bssid: str) -> bool:
+    now = time.monotonic()
+    key = (sensor_id, bssid)
+    last_emitted = _recent_threat_event_cache.get(key)
+    if last_emitted is not None and (now - last_emitted) < THREAT_DEDUPE_WINDOW_SECONDS:
+        return False
+
+    _recent_threat_event_cache[key] = now
+    stale_cutoff = now - max(THREAT_DEDUPE_WINDOW_SECONDS * 4, 300)
+    stale_keys = [cache_key for cache_key, value in _recent_threat_event_cache.items() if value < stale_cutoff]
+    for stale_key in stale_keys:
+        _recent_threat_event_cache.pop(stale_key, None)
+    return True
+
+
+def _persist_sensor_status(sensor_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    sensor = db.session.get(Sensor, sensor_id)
+    if sensor is None:
+        raise ValueError(f"Unknown sensor_id: {sensor_id}")
+
+    status = sanitize_input(str(payload.get("status") or "online"), max_length=50) or "online"
+    heartbeat = SensorHealth(
+        sensor_id=sensor_id,
+        status=status,
+        signal_strength=_safe_int(payload.get("signal_strength"), default=0),
+        cpu_usage=_safe_float(payload.get("cpu_usage", payload.get("cpu")), default=0.0),
+        memory_usage=_safe_float(payload.get("memory_usage", payload.get("memory")), default=0.0),
+        uptime=_safe_int(payload.get("uptime"), default=0),
+        last_heartbeat=datetime.utcnow(),
+    )
+    db.session.add(heartbeat)
+    sensor.is_active = status != "offline"
+    sensor.updated_at = datetime.utcnow()
+    db.session.commit()
+
+    return {
+        "event": "sensor_status",
+        "sensor_id": sensor.id,
+        "status": status,
+        "signal_strength": heartbeat.signal_strength,
+        "cpu": heartbeat.cpu_usage,
+        "cpu_usage": heartbeat.cpu_usage,
+        "memory": heartbeat.memory_usage,
+        "memory_usage": heartbeat.memory_usage,
+        "uptime": heartbeat.uptime,
+        "last_heartbeat": heartbeat.last_heartbeat.isoformat(),
+        "message": sanitize_input(str(payload.get("message") or ""), max_length=255) or None,
+        "interface": sanitize_input(str(payload.get("interface") or ""), max_length=255) or None,
+    }
 
 
 def _normalize_network_events(payload: Any) -> list[dict[str, Any]]:
@@ -823,59 +1052,103 @@ def init_socketio(app):
     @socketio.on("connect")
     def handle_connect():
         client_id = request.sid
+        join_room(DASHBOARD_ROOM)
         connected_clients[client_id] = {
             "connected_at": datetime.utcnow().isoformat(),
+            "client_type": "dashboard",
         }
+        _emit_context_event(
+            "connection_response",
+            {
+                "status": "connected",
+                "sid": client_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
 
     @socketio.on("disconnect")
     def handle_disconnect():
         client_id = request.sid
-        connected_clients.pop(client_id, None)
+        client_info = connected_clients.pop(client_id, None) or {}
+        sensor_id = client_info.get("sensor_id")
+        if client_info.get("client_type") == "sensor" and sensor_id:
+            try:
+                status_payload = _persist_sensor_status(
+                    int(sensor_id),
+                    {
+                        "status": "offline",
+                        "message": "Sensor disconnected",
+                    },
+                )
+                _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
+            except Exception as exc:
+                db.session.rollback()
+                LOGGER.warning("[WebSocket] Failed to persist offline status for sensor %s: %s", sensor_id, exc)
 
     @socketio.on("sensor_register")
     def handle_sensor_register(data):
         data = sanitize_json_payload(data or {})
         try:
+            _log_received_from_sensor("sensor_register", data)
             sensor = _resolve_sensor(
                 sensor_identifier=data.get("sensor_id"),
                 hostname=data.get("hostname"),
             )
             db.session.commit()
-            emit(
+            connected_clients[request.sid] = {
+                "connected_at": datetime.utcnow().isoformat(),
+                "client_type": "sensor",
+                "sensor_id": sensor.id,
+                "hostname": sensor.hostname,
+            }
+            leave_room(DASHBOARD_ROOM)
+            join_room(_sensor_room(sensor.id))
+            _emit_context_event(
                 "registration_success",
                 {
                     "status": "registered",
                     "sensor_id": sensor.id,
                     "sensor_name": sensor.name,
+                    "timestamp": datetime.utcnow().isoformat(),
                 },
             )
+            status_payload = _persist_sensor_status(
+                sensor.id,
+                {
+                    "status": "online",
+                    "message": "Sensor registered",
+                },
+            )
+            _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
         except Exception as exc:
             db.session.rollback()
-            emit("registration_error", {"status": "error", "message": "registration_failed"})
+            _emit_context_event("registration_error", {"status": "error", "message": "registration_failed"})
             LOGGER.warning("[WebSocket] Sensor registration failed: %s", exc)
 
-    @socketio.on("network_scan")
+    @socketio.on(NETWORK_SCAN_EVENT)
     def handle_network_scan(payload):
         payload = sanitize_json_payload(payload)
         network_events = _normalize_network_events(payload)
         if not network_events:
-            emit("network_scan_ack", {"status": "ignored", "queued": 0})
+            _emit_context_event("network_scan_ack", {"status": "ignored", "queued": 0})
             return
 
         queued = 0
         for network_data in network_events:
             try:
+                _log_received_from_sensor(NETWORK_SCAN_EVENT, network_data)
                 if persistence_manager.ingest(network_data):
                     queued += 1
             except Exception as exc:
                 db.session.rollback()
                 LOGGER.warning("[WebSocket] Failed to ingest network scan: %s", exc)
 
-        emit(
+        _emit_context_event(
             "network_scan_ack",
             {
                 "status": "ok",
                 "queued": queued,
+                "timestamp": datetime.utcnow().isoformat(),
             },
         )
 
@@ -884,8 +1157,10 @@ def init_socketio(app):
         payload = sanitize_json_payload(payload or {})
         ssid = _normalize_ssid(payload.get("ssid"))
         try:
-            threat_type = _normalize_threat_type(payload.get("threat_type"))
-            source_mac = _normalize_bssid(payload.get("source_mac"))
+            _log_received_from_sensor("new_threat", payload)
+            classification = _normalize_classification(payload.get("classification"))
+            threat_type = _normalize_threat_type(payload.get("threat_type") or classification)
+            source_mac = _normalize_bssid(payload.get("source_mac") or payload.get("bssid"))
             duplicate_threat = _find_recent_duplicate_threat(threat_type, source_mac)
             if duplicate_threat is not None:
                 LOGGER.info(
@@ -897,34 +1172,164 @@ def init_socketio(app):
 
             new_threat = Threat(
                 threat_type=threat_type,
-                severity=payload.get("severity", "HIGH"),
+                severity=_normalize_severity(payload.get("severity"), classification),
                 source_mac=source_mac or None,
                 ssid=ssid,
                 description="Detected via Sensor WebSocket",
+                detected_by=_safe_int(payload.get("sensor_id"), default=0) or None,
             )
             db.session.add(new_threat)
             db.session.commit()
-            socketio.emit(
+            event_payload = {
+                "sensor_id": _safe_int(payload.get("sensor_id"), default=new_threat.detected_by or 0),
+                "ssid": ssid,
+                "bssid": source_mac or None,
+                "signal": _safe_int(payload.get("signal"), default=0) or None,
+                "channel": _safe_int(payload.get("channel"), default=0) or None,
+                "classification": classification,
+                "timestamp": datetime.utcnow().isoformat(),
+                "manufacturer": _enrich_manufacturer(source_mac, payload.get("manufacturer")),
+                "threat_id": new_threat.id,
+                "severity": new_threat.severity,
+            }
+            if event_payload["sensor_id"] and source_mac and _should_emit_threat_event(event_payload["sensor_id"], source_mac):
+                _emit_socket_event(socketio, THREAT_DETECTED_EVENT, event_payload, room=DASHBOARD_ROOM)
+            _emit_socket_event(
+                socketio,
                 "threat_event",
                 {
                     "id": new_threat.id,
-                    "type": "threat_detected",
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "data": payload,
+                    "type": THREAT_DETECTED_EVENT,
+                    "timestamp": event_payload["timestamp"],
+                    "severity": new_threat.severity,
+                    "data": {
+                        "id": new_threat.id,
+                        "threat_type": new_threat.threat_type,
+                        "severity": new_threat.severity,
+                        "source_mac": new_threat.source_mac,
+                        "ssid": new_threat.ssid,
+                        "detected_by": new_threat.detected_by,
+                        "description": new_threat.description,
+                        "signal_strength": event_payload["signal"],
+                        "packet_count": 0,
+                        "is_resolved": new_threat.is_resolved,
+                        "created_at": new_threat.created_at.isoformat(),
+                    },
                 },
+                room=DASHBOARD_ROOM,
             )
         except Exception as exc:
             db.session.rollback()
             LOGGER.warning("[WebSocket] Failed to store threat for %s: %s", ssid, exc)
+
+    @socketio.on(SENSOR_STATUS_EVENT)
+    def handle_sensor_status(payload):
+        payload = sanitize_json_payload(payload or {})
+        try:
+            _log_received_from_sensor(SENSOR_STATUS_EVENT, payload)
+            sensor_id = _safe_int(payload.get("sensor_id"), default=0)
+            if not sensor_id:
+                sensor_info = connected_clients.get(request.sid) or {}
+                sensor_id = _safe_int(sensor_info.get("sensor_id"), default=0)
+            if not sensor_id:
+                raise ValueError("sensor_status missing sensor_id")
+
+            status_payload = _persist_sensor_status(sensor_id, payload)
+            if request.sid in connected_clients:
+                connected_clients[request.sid]["sensor_id"] = sensor_id
+                connected_clients[request.sid]["client_type"] = "sensor"
+            _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
+        except Exception as exc:
+            db.session.rollback()
+            LOGGER.warning("[WebSocket] Failed to persist sensor status: %s", exc)
+
+    @socketio.on(ATTACK_COMMAND_EVENT)
+    def handle_attack_command(payload):
+        payload = sanitize_json_payload(payload or {})
+        try:
+            sensor_id = _safe_int(payload.get("sensor_id"), default=0)
+            target_bssid = _normalize_bssid(payload.get("target_bssid") or payload.get("bssid"))
+            action = sanitize_input(str(payload.get("action") or "deauth"), max_length=50) or "deauth"
+            channel = _safe_int(payload.get("channel"), default=0) or None
+
+            if not sensor_id:
+                raise ValueError("attack_command missing sensor_id")
+            if not target_bssid:
+                raise ValueError("attack_command missing target_bssid")
+            if channel is None:
+                raise ValueError("attack_command missing channel")
+            sensor = db.session.get(Sensor, sensor_id)
+            if sensor is None:
+                raise ValueError(f"Sensor {sensor_id} does not exist")
+
+            room = _sensor_room(sensor_id)
+            if not any(
+                client.get("client_type") == "sensor" and _safe_int(client.get("sensor_id"), default=0) == sensor_id
+                for client in connected_clients.values()
+            ):
+                raise ValueError(f"Sensor {sensor_id} is not connected")
+            command_payload = {
+                "sensor_id": sensor_id,
+                "action": action,
+                "target_bssid": target_bssid,
+                "channel": channel,
+            }
+            _emit_socket_event(socketio, ATTACK_COMMAND_EVENT, {**command_payload, "sensor_id": sensor_id, "timestamp": datetime.utcnow().isoformat(), "status": "dispatched"}, room=DASHBOARD_ROOM)
+            _emit_socket_event(socketio, ATTACK_COMMAND_EVENT, command_payload, room=room)
+            _emit_context_event(
+                "attack_command_ack",
+                {
+                    "status": "ok",
+                    "sensor_id": sensor_id,
+                    "target_bssid": target_bssid,
+                    "channel": channel,
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+            )
+        except Exception as exc:
+            LOGGER.warning("[WebSocket] attack_command rejected: %s", exc)
+            _emit_context_event(
+                "attack_command_ack",
+                {
+                    "status": "error",
+                    "message": str(exc),
+                    "timestamp": datetime.utcnow().isoformat(),
+                },
+            )
+
+    @socketio.on(ATTACK_ACK_EVENT)
+    def handle_attack_ack(payload):
+        payload = sanitize_json_payload(payload or {})
+        try:
+            _log_received_from_sensor(ATTACK_ACK_EVENT, payload)
+            sensor_id = _safe_int(payload.get("sensor_id"), default=0)
+            if not sensor_id:
+                sensor_info = connected_clients.get(request.sid) or {}
+                sensor_id = _safe_int(sensor_info.get("sensor_id"), default=0)
+            if not sensor_id:
+                raise ValueError("attack_ack missing sensor_id")
+
+            ack_payload = {
+                "event": "attack_ack",
+                "status": sanitize_input(str(payload.get("status") or "failed"), max_length=50) or "failed",
+                "target_bssid": _normalize_bssid(payload.get("target_bssid")),
+                "sensor_id": sensor_id,
+                "message": sanitize_input(str(payload.get("message") or ""), max_length=255) or None,
+                "timestamp": payload.get("timestamp") or datetime.utcnow().isoformat(),
+            }
+            _emit_socket_event(socketio, ATTACK_ACK_EVENT, ack_payload, room=DASHBOARD_ROOM)
+        except Exception as exc:
+            LOGGER.warning("[WebSocket] Failed to handle attack_ack: %s", exc)
 
     return socketio
 
 
 def broadcast_threat_event(threat_data):
     socketio = current_app.socketio
-    socketio.emit("threat_event", threat_data)
+    _emit_socket_event(socketio, THREAT_DETECTED_EVENT, threat_data, room=DASHBOARD_ROOM)
+    _emit_socket_event(socketio, "threat_event", threat_data, room=DASHBOARD_ROOM)
 
 
 def broadcast_sensor_status(sensor_data):
     socketio = current_app.socketio
-    socketio.emit("sensor_status", sensor_data)
+    _emit_socket_event(socketio, SENSOR_STATUS_EVENT, sensor_data, room=DASHBOARD_ROOM)

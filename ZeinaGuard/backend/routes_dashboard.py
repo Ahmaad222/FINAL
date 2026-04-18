@@ -3,16 +3,37 @@ Dashboard API Routes
 Provides analytics and metrics for the dashboard
 """
 
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from datetime import datetime, timedelta
 from sqlalchemy import func, desc
 from models import (
-    Threat, ThreatEvent, Sensor, SensorHealth, 
+    Threat, ThreatEvent, Sensor, SensorHealth, WiFiNetwork,
     Incident, Alert, User, AlertRule, db
 )
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
+
+
+def _format_live_network(network: WiFiNetwork):
+    classification = (network.classification or 'LEGIT').upper()
+    if classification not in {'ROGUE', 'SUSPICIOUS', 'LEGIT'}:
+        classification = 'LEGIT'
+
+    manufacturer = (network.manufacturer or '').strip() or None
+    if manufacturer and manufacturer.lower() == 'unknown':
+        manufacturer = None
+
+    return {
+        'sensor_id': network.sensor_id,
+        'ssid': network.ssid or 'Hidden',
+        'bssid': network.bssid,
+        'signal': network.signal_strength,
+        'channel': network.channel,
+        'classification': classification,
+        'timestamp': network.last_seen.isoformat() if network.last_seen else None,
+        'manufacturer': manufacturer,
+    }
 
 
 @dashboard_bp.route('/overview', methods=['GET'])
@@ -94,6 +115,62 @@ def get_overview():
     
     except Exception as e:
         return jsonify({'error': f'Failed to get overview: {str(e)}'}), 500
+
+
+@dashboard_bp.route('/networks', methods=['GET'])
+@jwt_required(optional=True)
+def get_live_networks():
+    """Bootstrap the dashboard with the latest known network state."""
+    try:
+        limit = max(1, min(int(request.args.get('limit', 500)), 1000))
+        classification = (request.args.get('classification') or '').upper()
+
+        query = WiFiNetwork.query.order_by(
+            desc(WiFiNetwork.last_seen),
+            desc(WiFiNetwork.signal_strength),
+        )
+        if classification in {'ROGUE', 'SUSPICIOUS', 'LEGIT'}:
+            query = query.filter(func.upper(WiFiNetwork.classification) == classification)
+
+        networks = query.limit(limit).all()
+        return jsonify({
+            'networks': [_format_live_network(network) for network in networks],
+            'count': len(networks),
+            'generated_at': datetime.utcnow().isoformat(),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to get live networks: {str(e)}'}), 500
+
+
+@dashboard_bp.route('/threat-events', methods=['GET'])
+@jwt_required(optional=True)
+def get_recent_threat_events():
+    """Bootstrap the dashboard event feed with recent threat records."""
+    try:
+        limit = max(1, min(int(request.args.get('limit', 20)), 100))
+        threats = Threat.query.order_by(desc(Threat.created_at)).limit(limit).all()
+        events = [
+            {
+                'sensor_id': threat.detected_by,
+                'ssid': threat.ssid or 'Hidden',
+                'bssid': threat.source_mac,
+                'signal': None,
+                'channel': None,
+                'classification': 'ROGUE' if threat.severity in {'critical', 'high'} else 'SUSPICIOUS',
+                'timestamp': threat.created_at.isoformat() if threat.created_at else None,
+                'manufacturer': None,
+                'threat_id': threat.id,
+                'severity': threat.severity,
+            }
+            for threat in threats
+        ]
+        return jsonify({
+            'events': events,
+            'count': len(events),
+            'generated_at': datetime.utcnow().isoformat(),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to get threat events: {str(e)}'}), 500
 
 
 @dashboard_bp.route('/threat-timeline', methods=['GET'])

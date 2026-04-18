@@ -6,9 +6,9 @@ import time
 from scapy.all import sniff
 from scapy.layers.dot11 import Dot11, Dot11Beacon
 
-from config import INTERFACE
+import config
 from core.event_bus import event_queue
-from ui.terminal_ui import update_status
+from runtime_state import update_status
 from utils import (
     estimate_distance,
     extract_channel,
@@ -112,7 +112,7 @@ def channel_hopper():
 
     while True:
         if config.LOCKED_CHANNEL is not None:
-            os.system(f"iwconfig {INTERFACE} channel {config.LOCKED_CHANNEL} 2>/dev/null")
+            os.system(f"iwconfig {config.get_interface()} channel {config.LOCKED_CHANNEL} 2>/dev/null")
             time.sleep(1)
             continue
 
@@ -120,13 +120,15 @@ def channel_hopper():
             if config.LOCKED_CHANNEL is not None:
                 break
 
-            os.system(f"iwconfig {INTERFACE} channel {ch} 2>/dev/null")
+            os.system(f"iwconfig {config.get_interface()} channel {ch} 2>/dev/null")
             time.sleep(0.4)
 
 
 def start_monitoring():
-    if not os.path.exists(f"/sys/class/net/{INTERFACE}"):
-        update_status(sensor_status="error", message=f"Interface not found: {INTERFACE}")
+    interface_name = config.get_interface()
+
+    if not os.path.exists(f"/sys/class/net/{interface_name}"):
+        update_status(sensor_status="error", message=f"Interface not found: {interface_name}")
         return
 
     if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 0:
@@ -135,9 +137,9 @@ def start_monitoring():
 
     threading.Thread(target=channel_hopper, daemon=True).start()
     threading.Thread(target=ap_cleaner, daemon=True).start()
-    update_status(sensor_status="monitoring", message=f"Sniffing on {INTERFACE}")
+    update_status(sensor_status="monitoring", message=f"Sniffing on {interface_name}")
 
     try:
-        sniff(iface=INTERFACE, prn=handle_packet, store=False)
+        sniff(iface=interface_name, prn=handle_packet, store=False)
     except Exception as exc:
         update_status(sensor_status="error", message=f"Sniffing failed: {exc}")

@@ -2,5 +2,4 @@ scapy
 python-socketio
 websocket-client
 requests
-rich
-readchar
+psutil

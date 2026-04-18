@@ -3,12 +3,12 @@ import time
 import config
 from config import DEAUTH_COUNT, DEAUTH_INTERVAL
 from scapy.all import Dot11, Dot11Deauth, RadioTap, sendp
-from ui.terminal_ui import client_kicked, log_attack, update_status
+from runtime_state import client_kicked, log_attack, update_status
 
 
 class ContainmentEngine:
-    def __init__(self, iface):
-        self.iface = iface
+    def __init__(self, iface=None):
+        self.iface = iface or config.get_interface()
 
     def contain(self, bssid, clients, channel):
         if channel is None:

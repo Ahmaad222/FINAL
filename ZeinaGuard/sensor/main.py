@@ -1,64 +1,78 @@
+import logging
 import os
 import subprocess
 import sys
 import threading
+from pathlib import Path
 
 
-REQUIRED_PACKAGES = {
-    "flask": "flask",
-    "flask-socketio": "flask_socketio",
-    "python-socketio": "socketio",
-    "redis": "redis",
-    "requests": "requests",
-    "scapy": "scapy",
-    "rich": "rich",
-    "readchar": "readchar",
-    "flask-sqlalchemy": "flask_sqlalchemy",
-}
+ROOT_DIR = Path(__file__).resolve().parent
+VENV_DIR = ROOT_DIR / ".venv"
+REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
+BOOTSTRAP_FLAG = "ZEINAGUARD_VENV_ACTIVE"
 
 
-def install_missing_packages():
-    missing = []
+def configure_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        force=True,
+    )
 
-    for package, module in REQUIRED_PACKAGES.items():
-        try:
-            __import__(module)
-        except ImportError:
-            missing.append(package)
 
-    if not missing:
+def _venv_python_path():
+    if os.name == "nt":
+        return VENV_DIR / "Scripts" / "python.exe"
+    return VENV_DIR / "bin" / "python"
+
+
+def ensure_virtualenv():
+    if os.environ.get(BOOTSTRAP_FLAG) == "1":
         return
 
-    for pkg in missing:
-        print(f"Missing package: {pkg}")
+    venv_python = _venv_python_path()
+    if not venv_python.exists():
+        print(f"[Bootstrap] Creating virtual environment at {VENV_DIR}")
+        subprocess.check_call([sys.executable, "-m", "venv", str(VENV_DIR)])
 
-    choice = input("Install missing packages now? (y/n): ").lower()
-    if choice != "y":
-        sys.exit(1)
+    marker = VENV_DIR / ".requirements-installed"
+    if not marker.exists() or REQUIREMENTS_FILE.stat().st_mtime > marker.stat().st_mtime:
+        print("[Bootstrap] Installing sensor requirements")
+        subprocess.check_call([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"])
+        subprocess.check_call([str(venv_python), "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)])
+        marker.write_text("ok\n", encoding="utf-8")
 
-    subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+    current_python = Path(sys.executable).resolve()
+    if current_python != venv_python.resolve():
+        env = dict(os.environ)
+        env[BOOTSTRAP_FLAG] = "1"
+        os.execve(str(venv_python), [str(venv_python), __file__, *sys.argv[1:]], env)
 
 
 def main():
-    install_missing_packages()
+    ensure_virtualenv()
+    configure_logging()
 
+    import config
     from communication.api_client import APIClient
     from communication.ws_client import WSClient
     from detection.threat_manager import ThreatManager
     from monitoring.sniffer import start_monitoring
-    from prevention.response_engine import ResponseEngine
-    from ui.terminal_ui import run_terminal_ui, update_status
+    from runtime_state import update_status
 
     if hasattr(os, "geteuid") and os.geteuid() != 0:
         print("Warning: not running as root. Packet capture may fail.")
 
-    ui_thread = threading.Thread(target=run_terminal_ui, daemon=True, name="TerminalUI")
-    ui_thread.start()
-    update_status(sensor_status="starting", backend_status="connecting", message="Booting sensor")
+    selected_interface = config.select_wireless_interface()
+    update_status(
+        sensor_status="starting",
+        backend_status="connecting",
+        message=f"Booting sensor on {selected_interface}",
+    )
 
     token = None
     try:
-        api = APIClient()
+        api = APIClient(backend_url=config.BACKEND_URL)
         token = api.authenticate_sensor()
         update_status(
             backend_status="authenticated" if token else "offline",
@@ -67,14 +81,11 @@ def main():
     except Exception:
         update_status(backend_status="offline", message="Backend unavailable: local logging only")
 
-    ws_client = WSClient(token=token)
+    ws_client = WSClient(backend_url=config.BACKEND_URL, token=token)
     threading.Thread(target=ws_client.start, daemon=True, name="WSClient").start()
 
     threat_manager = ThreatManager()
     threading.Thread(target=threat_manager.start, daemon=True, name="ThreatManager").start()
-
-    response_engine = ResponseEngine()
-    threading.Thread(target=response_engine.start, daemon=True, name="ResponseEngine").start()
 
     update_status(sensor_status="monitoring", message="Wireless monitoring active")
     start_monitoring()

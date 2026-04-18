@@ -123,10 +123,12 @@ SCHEMA_STATEMENTS = [
     $$;
     """,
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_sensor_last_seen ON wifi_networks(sensor_id, last_seen)",
+    "CREATE INDEX IF NOT EXISTS idx_wifi_networks_sensor_bssid ON wifi_networks(sensor_id, bssid)",
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_last_seen ON wifi_networks(last_seen)",
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_signal ON wifi_networks(signal_strength)",
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_bssid ON wifi_networks(bssid)",
     "CREATE INDEX IF NOT EXISTS idx_threats_created_at ON threats(created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_threats_source_type ON threats(source_mac, threat_type)",
     "CREATE INDEX IF NOT EXISTS idx_threats_source_type_created ON threats(source_mac, threat_type, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_scan_events_sensor_time ON network_scan_events(sensor_id, scanned_at)",
     "CREATE INDEX IF NOT EXISTS idx_scan_events_scanned_at ON network_scan_events(scanned_at)",

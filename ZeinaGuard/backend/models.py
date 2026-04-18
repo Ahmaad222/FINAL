@@ -171,6 +171,7 @@ class WiFiNetwork(db.Model):
 
     __table_args__ = (
         UniqueConstraint('sensor_id', 'bssid', name='uq_wifi_networks_sensor_bssid'),
+        Index('idx_wifi_networks_sensor_bssid', 'sensor_id', 'bssid'),
         Index('idx_wifi_networks_sensor_last_seen', 'sensor_id', 'last_seen'),
         Index('idx_wifi_networks_last_seen', 'last_seen'),
         Index('idx_wifi_networks_signal', 'signal_strength'),
@@ -245,6 +246,7 @@ class Threat(db.Model):
         Index('idx_threats_created_at', 'created_at'),
         Index('idx_threats_severity', 'severity'),
         Index('idx_threats_sensor', 'detected_by'),
+        Index('idx_threats_source_type', 'source_mac', 'threat_type'),
         Index('idx_threats_source_type_created', 'source_mac', 'threat_type', 'created_at'),
     )
 

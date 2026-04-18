@@ -11,16 +11,13 @@ from typing import Any
 class LocalDataLogger:
     CSV_FIELDS = [
         "timestamp",
+        "sensor_id",
         "ssid",
         "bssid",
         "channel",
         "signal",
-        "encryption",
-        "manufacturer",
         "classification",
-        "score",
-        "uptime",
-        "uptime_seconds",
+        "manufacturer",
     ]
 
     def __init__(
@@ -29,12 +26,14 @@ class LocalDataLogger:
         max_bytes: int | None = None,
         rotation_seconds: int | None = None,
     ):
-        self.base_dir = Path(base_dir or Path(__file__).resolve().parent / "data-logs")
+        self.base_dir = Path(base_dir or Path(__file__).resolve().parent / "data_logs")
         os.makedirs(self.base_dir, exist_ok=True)
 
-        # Rotate aggressively so long-running sensors stay bounded on disk.
         self.max_bytes = int(max_bytes or os.getenv("SENSOR_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
         self.rotation_seconds = int(rotation_seconds or os.getenv("SENSOR_LOG_ROTATION_SECONDS", "300"))
+        self.total_max_bytes = int(
+            os.getenv("SENSOR_LOG_TOTAL_MAX_BYTES", str(50 * 1024 * 1024))
+        )
         self._lock = threading.Lock()
         self._csv_path: Path | None = None
         self._json_path: Path | None = None
@@ -59,16 +58,13 @@ class LocalDataLogger:
     def _build_row(self, payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "timestamp": payload.get("timestamp") or datetime.utcnow().isoformat(),
+            "sensor_id": payload.get("sensor_id"),
             "ssid": payload.get("ssid", "Hidden"),
             "bssid": payload.get("bssid", ""),
             "channel": payload.get("channel"),
             "signal": payload.get("signal"),
-            "encryption": payload.get("encryption", "UNKNOWN"),
-            "manufacturer": payload.get("manufacturer", "Unknown"),
-            "classification": payload.get("classification", "UNKNOWN"),
-            "score": payload.get("score", 0),
-            "uptime": payload.get("uptime", ""),
-            "uptime_seconds": payload.get("uptime_seconds", 0),
+            "classification": payload.get("classification", "LEGIT"),
+            "manufacturer": payload.get("manufacturer"),
         }
 
     def _ensure_handles(self) -> None:
@@ -108,6 +104,7 @@ class LocalDataLogger:
             self._csv_file.flush()
 
         self._opened_at = time.time()
+        self._prune_archives()
         print(f"[DataLogger] CSV log started: {self._csv_path.name}")
         print(f"[DataLogger] JSON log started: {self._json_path.name}")
 
@@ -120,3 +117,26 @@ class LocalDataLogger:
         self._csv_file = None
         self._json_file = None
         self._csv_writer = None
+
+    def _prune_archives(self) -> None:
+        files = sorted(
+            self.base_dir.glob("network_scan_*.*"),
+            key=lambda path: path.stat().st_mtime if path.exists() else 0,
+            reverse=True,
+        )
+
+        total_bytes = 0
+        for path in files:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+
+            total_bytes += size
+            if total_bytes <= self.total_max_bytes:
+                continue
+
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
