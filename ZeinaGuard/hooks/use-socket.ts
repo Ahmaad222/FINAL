@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 
 
@@ -11,11 +11,19 @@ export interface LiveNetworkEvent {
   signal: number | null;
   channel: number | null;
   classification: 'ROGUE' | 'SUSPICIOUS' | 'LEGIT';
-  timestamp: string;
+  last_seen: string;
+  timestamp?: string;
   manufacturer: string | null;
-  threat_id?: number;
-  severity?: string;
-  status?: string;
+}
+
+export interface NetworkSnapshotEvent {
+  event: 'network_snapshot';
+  data: LiveNetworkEvent[];
+}
+
+export interface NetworkRemovedEvent {
+  event: 'network_removed';
+  data: LiveNetworkEvent;
 }
 
 export interface ThreatEvent {
@@ -39,31 +47,41 @@ export interface ThreatEvent {
 
 export interface SensorStatusEvent {
   sensor_id: number;
-  status: 'online' | 'offline' | 'degraded' | 'starting' | 'monitoring' | 'capturing' | 'analyzing' | string;
-  signal_strength: number;
-  cpu?: number;
-  cpu_usage: number;
-  memory?: number;
-  memory_usage: number;
+  status: string;
+  cpu: number;
+  memory: number;
   uptime: number;
+  last_seen: string;
   last_heartbeat: string;
   message?: string | null;
   interface?: string | null;
+  hostname?: string | null;
+  connected?: boolean;
+}
+
+export interface SensorSnapshotEvent {
+  event: 'sensor_snapshot';
+  data: SensorStatusEvent[];
+}
+
+export interface SensorStatusUpdateEvent {
+  event: 'sensor_status_update';
+  data: SensorStatusEvent;
 }
 
 export interface AttackCommandEvent {
   sensor_id: number;
-  action: string;
-  target_bssid: string;
-  channel: number | null;
+  bssid: string;
+  action?: string;
+  channel?: number | null;
   timestamp?: string;
   status?: string;
 }
 
 export interface AttackAckEvent {
   event: 'attack_ack';
-  status: 'success' | 'failed';
-  target_bssid: string;
+  status: 'executed' | 'failed' | string;
+  bssid: string;
   sensor_id: number;
   message?: string | null;
   timestamp: string;
@@ -72,33 +90,35 @@ export interface AttackAckEvent {
 export interface AttackCommandAckEvent {
   status: 'ok' | 'error';
   sensor_id?: number;
-  target_bssid?: string;
+  bssid?: string;
   channel?: number | null;
   message?: string | null;
   timestamp: string;
 }
 
 interface UseSocketOptions {
-  onNetworkScan?: (event: LiveNetworkEvent) => void;
-  onNetworkUpdate?: (event: LiveNetworkEvent) => void;
+  onNetworkSnapshot?: (event: NetworkSnapshotEvent) => void;
+  onSensorSnapshot?: (event: SensorSnapshotEvent) => void;
+  onSensorStatusUpdate?: (event: SensorStatusUpdateEvent) => void;
+  onNetworkRemoved?: (event: NetworkRemovedEvent) => void;
   onThreatDetected?: (event: LiveNetworkEvent) => void;
   onAttackCommand?: (event: AttackCommandEvent) => void;
   onAttackCommandAck?: (event: AttackCommandAckEvent) => void;
   onAttackAck?: (event: AttackAckEvent) => void;
-  onSensorStatus?: (event: SensorStatusEvent) => void;
   onThreatEvent?: (event: ThreatEvent) => void;
   autoConnect?: boolean;
 }
 
 
 const SOCKET_EVENTS = [
-  'network_scan',
-  'network_update',
+  'network_snapshot',
+  'sensor_snapshot',
+  'sensor_status_update',
+  'network_removed',
   'threat_detected',
   'attack_command',
   'attack_command_ack',
   'attack_ack',
-  'sensor_status',
   'threat_event',
 ] as const;
 
@@ -115,13 +135,14 @@ function resolveSocketUrl(): string {
 
 export function useSocket(options: UseSocketOptions = {}) {
   const {
-    onNetworkScan,
-    onNetworkUpdate,
+    onNetworkSnapshot,
+    onSensorSnapshot,
+    onSensorStatusUpdate,
+    onNetworkRemoved,
     onThreatDetected,
     onAttackCommand,
     onAttackCommandAck,
     onAttackAck,
-    onSensorStatus,
     onThreatEvent,
     autoConnect = true,
   } = options;
@@ -129,28 +150,40 @@ export function useSocket(options: UseSocketOptions = {}) {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
   const handlersRef = useRef({
-    onNetworkScan,
-    onNetworkUpdate,
+    onNetworkSnapshot,
+    onSensorSnapshot,
+    onSensorStatusUpdate,
+    onNetworkRemoved,
     onThreatDetected,
     onAttackCommand,
     onAttackCommandAck,
     onAttackAck,
-    onSensorStatus,
     onThreatEvent,
   });
 
   useEffect(() => {
     handlersRef.current = {
-      onNetworkScan,
-      onNetworkUpdate,
+      onNetworkSnapshot,
+      onSensorSnapshot,
+      onSensorStatusUpdate,
+      onNetworkRemoved,
       onThreatDetected,
       onAttackCommand,
       onAttackCommandAck,
       onAttackAck,
-      onSensorStatus,
       onThreatEvent,
     };
-  }, [onAttackAck, onAttackCommand, onAttackCommandAck, onNetworkScan, onNetworkUpdate, onSensorStatus, onThreatDetected, onThreatEvent]);
+  }, [
+    onAttackAck,
+    onAttackCommand,
+    onAttackCommandAck,
+    onNetworkRemoved,
+    onNetworkSnapshot,
+    onSensorSnapshot,
+    onSensorStatusUpdate,
+    onThreatDetected,
+    onThreatEvent,
+  ]);
 
   const connect = useCallback(() => {
     if (socketRef.current) {
@@ -185,22 +218,24 @@ export function useSocket(options: UseSocketOptions = {}) {
       console.log('[EVENT RECEIVED] connection_response', data);
     });
 
-    socket.on('registration_success', (data) => {
-      console.log('[EVENT RECEIVED] registration_success', data);
+    socket.on('network_snapshot', (event: NetworkSnapshotEvent) => {
+      console.log('SNAPSHOT', event.data);
+      handlersRef.current.onNetworkSnapshot?.(event);
     });
 
-    socket.on('registration_error', (data) => {
-      console.log('[EVENT RECEIVED] registration_error', data);
+    socket.on('sensor_snapshot', (event: SensorSnapshotEvent) => {
+      console.log('SNAPSHOT', event.data);
+      handlersRef.current.onSensorSnapshot?.(event);
     });
 
-    socket.on('network_scan', (event: LiveNetworkEvent) => {
-      console.log('[EVENT RECEIVED] network_scan', event);
-      handlersRef.current.onNetworkScan?.(event);
+    socket.on('sensor_status_update', (event: SensorStatusUpdateEvent) => {
+      console.log('[EVENT RECEIVED] sensor_status_update', event);
+      handlersRef.current.onSensorStatusUpdate?.(event);
     });
 
-    socket.on('network_update', (event: LiveNetworkEvent) => {
-      console.log('[EVENT RECEIVED] network_update', event);
-      handlersRef.current.onNetworkUpdate?.(event);
+    socket.on('network_removed', (event: NetworkRemovedEvent) => {
+      console.log('[EVENT RECEIVED] network_removed', event);
+      handlersRef.current.onNetworkRemoved?.(event);
     });
 
     socket.on('threat_detected', (event: LiveNetworkEvent) => {
@@ -221,11 +256,6 @@ export function useSocket(options: UseSocketOptions = {}) {
     socket.on('attack_ack', (event: AttackAckEvent) => {
       console.log('[EVENT RECEIVED] attack_ack', event);
       handlersRef.current.onAttackAck?.(event);
-    });
-
-    socket.on('sensor_status', (event: SensorStatusEvent) => {
-      console.log('[EVENT RECEIVED] sensor_status', event);
-      handlersRef.current.onSensorStatus?.(event);
     });
 
     socket.on('threat_event', (event: ThreatEvent) => {
@@ -249,13 +279,9 @@ export function useSocket(options: UseSocketOptions = {}) {
     setConnected(false);
   }, []);
 
-  const isConnected = useCallback(() => {
-    return connected;
-  }, [connected]);
+  const isConnected = useCallback(() => connected, [connected]);
 
-  const getSocket = useCallback(() => {
-    return socketRef.current;
-  }, []);
+  const getSocket = useCallback(() => socketRef.current, []);
 
   const sendAttackCommand = useCallback((payload: AttackCommandEvent) => {
     if (!socketRef.current?.connected) {
@@ -294,8 +320,8 @@ export function useThreatEvents(onEvent?: (event: ThreatEvent) => void) {
 }
 
 
-export function useSensorStatus(onEvent?: (event: SensorStatusEvent) => void) {
+export function useSensorStatus(onEvent?: (event: SensorStatusUpdateEvent) => void) {
   useSocket({
-    onSensorStatus: onEvent,
+    onSensorStatusUpdate: onEvent,
   });
 }

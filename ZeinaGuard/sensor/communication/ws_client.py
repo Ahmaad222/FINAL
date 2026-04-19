@@ -24,7 +24,7 @@ SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
 SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
 SCAN_DEDUP_SIGNAL_DELTA = int(os.getenv("SCAN_DEDUP_SIGNAL_DELTA", "5"))
 SCAN_DEDUP_MAX_AGE_SECONDS = float(os.getenv("SCAN_DEDUP_MAX_AGE_SECONDS", "30"))
-SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "10"))
+SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "5"))
 OUTBOUND_QUEUE_MAXSIZE = int(os.getenv("SENSOR_OUTBOUND_QUEUE_MAXSIZE", "4000"))
 
 
@@ -62,7 +62,7 @@ class WSClient:
             self._enqueue_event(
                 "sensor_register",
                 {
-                    "sensor_id": self.sensor_registration_key,
+                    "registration_key": self.sensor_registration_key,
                     "hostname": self.hostname,
                     "interface": config.get_interface(),
                 },
@@ -78,7 +78,12 @@ class WSClient:
 
         @self.sio.on("registration_success")
         def registration_success(data):
-            self.sensor_id = self._safe_int(data.get("sensor_id"), default=0) or None
+            sensor_id = data.get("sensor_id")
+            if isinstance(sensor_id, bool) or not isinstance(sensor_id, int) or sensor_id <= 0:
+                update_status(backend_status="degraded", message="Backend returned invalid sensor_id")
+                LOGGER.warning("[DROP] registration_success returned invalid sensor_id=%s", sensor_id)
+                return
+            self.sensor_id = sensor_id
             update_status(
                 backend_status="registered",
                 message=f"Sensor registered as #{self.sensor_id}",
@@ -126,6 +131,10 @@ class WSClient:
                 time.sleep(5)
 
     def _enqueue_event(self, event_name, payload):
+        if event_name != "sensor_register" and not self._payload_has_int_sensor_id(payload):
+            LOGGER.warning("[DROP] event=%s invalid sensor_id payload=%s", event_name, self._payload_preview(payload))
+            return False
+
         envelope = {
             "event_name": event_name,
             "payload": payload,
@@ -192,8 +201,13 @@ class WSClient:
             batch = list(scan_batch)
             scan_batch.clear()
 
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            LOGGER.warning("[DROP] event=network_scan invalid sensor_id payload=%s", {"batch_size": len(batch)})
+            return
+
         payload = {
-            "sensor_id": self._sensor_id_value(),
+            "sensor_id": sensor_id,
             "hostname": self.hostname,
             "sent_at": datetime.utcnow().isoformat(),
             "networks": batch,
@@ -229,6 +243,7 @@ class WSClient:
                 "event",
                 "sensor_id",
                 "status",
+                "bssid",
                 "target_bssid",
                 "action",
                 "channel",
@@ -274,6 +289,8 @@ class WSClient:
                 continue
 
             payload = self._build_scan_payload(scan)
+            if payload is None:
+                continue
             self.local_logger.log_scan(payload)
             self._update_last_sent_cache(payload)
             self._enqueue_event("network_scan", payload)
@@ -281,7 +298,8 @@ class WSClient:
     def _status_publisher(self):
         while self.is_running:
             payload = self._build_sensor_status_payload()
-            self._enqueue_event("sensor_heartbeat", payload)
+            if payload is not None:
+                self._enqueue_event("sensor_status", payload)
             time.sleep(SENSOR_STATUS_INTERVAL_SECONDS)
 
     def _should_process_scan(self, scan):
@@ -338,8 +356,13 @@ class WSClient:
         )
 
     def _build_scan_payload(self, scan):
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            LOGGER.warning("[DROP] event=network_scan invalid sensor_id payload=%s", {"bssid": scan.get("bssid")})
+            return None
+
         return {
-            "sensor_id": self._sensor_id_value(),
+            "sensor_id": sensor_id,
             "timestamp": scan.get("timestamp") or datetime.utcnow().isoformat(),
             "ssid": scan.get("ssid") or "Hidden",
             "bssid": scan.get("bssid"),
@@ -355,13 +378,17 @@ class WSClient:
         }
 
     def _build_sensor_status_payload(self):
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            return None
+
         status_snapshot = get_status_snapshot()
         cpu_percent = psutil.cpu_percent(interval=None)
         memory_percent = psutil.virtual_memory().percent
         uptime_seconds = int(time.time() - self.started_at)
         return {
             "event": "sensor_status",
-            "sensor_id": self._sensor_id_value(),
+            "sensor_id": sensor_id,
             "registration_key": self.sensor_registration_key,
             "hostname": self.hostname,
             "status": status_snapshot.get("sensor_status", "monitoring"),
@@ -372,6 +399,7 @@ class WSClient:
             "memory_usage": memory_percent,
             "uptime": uptime_seconds,
             "last_heartbeat": datetime.utcnow().isoformat(),
+            "timestamp": datetime.utcnow().isoformat(),
             "message": status_snapshot.get("message"),
             "interface": config.get_interface(),
         }
@@ -380,7 +408,7 @@ class WSClient:
         payload = payload or {}
         requested_sensor_id = self._safe_int(payload.get("sensor_id"), default=0)
         actual_sensor_id = self._safe_int(self.sensor_id, default=0)
-        target_bssid = str(payload.get("target_bssid") or "").strip().upper()
+        target_bssid = str(payload.get("bssid") or payload.get("target_bssid") or "").strip().upper()
         channel = payload.get("channel")
 
         if not actual_sensor_id:
@@ -420,24 +448,37 @@ class WSClient:
             containment = ContainmentEngine(config.get_interface())
             containment.contain(target_bssid, clients, channel)
             LOGGER.info("[ATTACK EXECUTED] target=%s channel=%s", target_bssid, channel)
-            self._queue_attack_ack("success", target_bssid, "Containment finished successfully")
+            self._queue_attack_ack("executed", target_bssid, "Containment finished successfully")
         except Exception as exc:
             LOGGER.warning("[ATTACK EXECUTED] failed target=%s error=%s", target_bssid, exc)
             self._queue_attack_ack("failed", target_bssid, str(exc))
 
     def _queue_attack_ack(self, status, target_bssid, message=None):
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            LOGGER.warning("[DROP] event=attack_ack invalid sensor_id payload=%s", {"bssid": target_bssid})
+            return
+
         payload = {
             "event": "attack_ack",
             "status": status,
-            "target_bssid": target_bssid,
-            "sensor_id": self._sensor_id_value(),
+            "bssid": target_bssid,
+            "sensor_id": sensor_id,
             "message": message,
             "timestamp": datetime.utcnow().isoformat(),
         }
         self._enqueue_event("attack_ack", payload)
 
     def _sensor_id_value(self):
-        return self.sensor_id or self.sensor_registration_key
+        if isinstance(self.sensor_id, bool) or not isinstance(self.sensor_id, int) or self.sensor_id <= 0:
+            return None
+        return self.sensor_id
+
+    def _payload_has_int_sensor_id(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        sensor_id = payload.get("sensor_id")
+        return isinstance(sensor_id, int) and not isinstance(sensor_id, bool) and sensor_id > 0
 
     def _safe_int(self, value, default=0):
         try:

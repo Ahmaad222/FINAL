@@ -23,6 +23,18 @@ from sqlalchemy import func, literal_column, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from models import NetworkScanEvent, Sensor, SensorHealth, Threat, WiFiNetwork, db
+from realtime_state import (
+    get_connected_sensors_snapshot as get_realtime_sensor_snapshot_map,
+    get_network as get_realtime_network,
+    get_network_snapshot as get_realtime_network_snapshot,
+    get_sensor as get_realtime_sensor,
+    get_sensor_snapshot as get_realtime_sensor_snapshot,
+    is_sensor_online as is_realtime_sensor_online,
+    mark_sensor_offline as mark_realtime_sensor_offline,
+    prune_expired_state,
+    upsert_network as upsert_realtime_network,
+    upsert_sensor as upsert_realtime_sensor,
+)
 from security import sanitize_input, sanitize_json_payload, validate_mac_address
 
 
@@ -55,18 +67,22 @@ ATTACK_ACK_EVENT = "attack_ack"
 EXECUTE_ATTACK_EVENT = "execute_attack"
 SENSOR_STATUS_EVENT = "sensor_status"
 SENSOR_HEARTBEAT_EVENT = "sensor_heartbeat"
+SENSOR_STATUS_UPDATE_EVENT = "sensor_status_update"
+NETWORK_SNAPSHOT_EVENT = "network_snapshot"
+SENSOR_SNAPSHOT_EVENT = "sensor_snapshot"
+NETWORK_REMOVED_EVENT = "network_removed"
 DASHBOARD_ROOM = "dashboards"
 
 _sensor_id_cache: dict[str, int] = {}
 _sensor_id_cache_lock = threading.Lock()
 _cleanup_thread_started = False
 _cleanup_thread_lock = threading.Lock()
+_realtime_state_thread_started = False
+_realtime_state_thread_lock = threading.Lock()
 _persistence_manager = None
 _persistence_manager_lock = threading.Lock()
 _recent_threat_event_cache: dict[tuple[int, str], float] = {}
 _oui_db: dict[str, str] = {}
-_connected_sensors: dict[int, dict[str, Any]] = {}
-_connected_sensors_lock = threading.Lock()
 REDIS_AVAILABLE = False
 
 
@@ -114,7 +130,7 @@ redis_client = _build_redis_client()
 
 @dataclass
 class QueuedNetworkEvent:
-    sensor_identifier: str
+    sensor_id: int
     hostname: str
     bssid: str
     ssid: str
@@ -211,8 +227,11 @@ class ScanPersistenceManager:
     def _build_queued_event(self, network_data: dict[str, Any]) -> QueuedNetworkEvent:
         bssid = _normalize_bssid(network_data.get("bssid"))
         ssid = _normalize_ssid(network_data.get("ssid"))
+        sensor_id = _strict_sensor_id(network_data.get("sensor_id"))
         if not bssid or not validate_mac_address(bssid):
             raise ValueError(f"Invalid BSSID: {network_data.get('bssid')}")
+        if sensor_id is None:
+            raise ValueError(f"Invalid sensor_id for network scan: {network_data.get('sensor_id')}")
 
         channel = _safe_int(network_data.get("channel"), default=0) or None
         signal_strength = _safe_int(network_data.get("signal"), default=0) or None
@@ -233,7 +252,7 @@ class ScanPersistenceManager:
         severity = _normalize_severity(network_data.get("severity"), classification)
 
         return QueuedNetworkEvent(
-            sensor_identifier=sanitize_input(str(network_data.get("sensor_id") or ""), max_length=255) or "sensor",
+            sensor_id=sensor_id,
             hostname=sanitize_input(str(network_data.get("hostname") or ""), max_length=255) or "sensor",
             bssid=bssid,
             ssid=ssid,
@@ -336,13 +355,9 @@ class ScanPersistenceManager:
                     next_flush_deadline = time.monotonic() + BATCH_FLUSH_INTERVAL_SECONDS
 
     def _consume_event(self, queued_event: QueuedNetworkEvent) -> None:
-        sensor = _resolve_sensor(
-            sensor_identifier=queued_event.sensor_identifier,
-            hostname=queued_event.hostname,
-        )
-        cache_key = (sensor.id, queued_event.bssid)
+        cache_key = (queued_event.sensor_id, queued_event.bssid)
         pending = self._pending_updates.get(cache_key)
-        incoming = self._to_buffered_update(sensor.id, queued_event)
+        incoming = self._to_buffered_update(queued_event.sensor_id, queued_event)
 
         if pending is None:
             self._pending_updates[cache_key] = incoming
@@ -398,6 +413,9 @@ class ScanPersistenceManager:
 
     def _flush_batch(self, batch: dict[tuple[int, str], BufferedNetworkUpdate]) -> FlushResult:
         updates = list(batch.values())
+        if db.session.get_bind().dialect.name != "postgresql":
+            return self._flush_batch_generic(batch)
+
         wifi_rows = [
             {
                 "sensor_id": update.sensor_id,
@@ -513,6 +531,97 @@ class ScanPersistenceManager:
             scan_event_count=len(scan_rows),
         )
 
+    def _flush_batch_generic(self, batch: dict[tuple[int, str], BufferedNetworkUpdate]) -> FlushResult:
+        inserted_updates: list[BufferedNetworkUpdate] = []
+        updated_updates: list[BufferedNetworkUpdate] = []
+        network_id_map: dict[tuple[int, str], int] = {}
+
+        for key, update in batch.items():
+            existing = WiFiNetwork.query.filter_by(sensor_id=update.sensor_id, bssid=update.bssid).first()
+            if existing is None:
+                existing = WiFiNetwork(
+                    sensor_id=update.sensor_id,
+                    ssid=update.ssid,
+                    bssid=update.bssid,
+                    channel=update.channel,
+                    frequency=update.frequency,
+                    signal_strength=update.signal_strength,
+                    encryption=update.encryption,
+                    clients_count=update.clients_count,
+                    classification=update.classification,
+                    risk_score=update.risk_score,
+                    auth_type=update.auth_type,
+                    wps_info=update.wps_info,
+                    manufacturer=update.manufacturer,
+                    device_type=update.device_type,
+                    uptime_seconds=update.uptime_seconds,
+                    raw_beacon=update.raw_beacon,
+                    raw_data=update.raw_data,
+                    seen_count=update.seen_increment,
+                    first_seen=update.first_seen,
+                    last_seen=update.last_seen,
+                )
+                db.session.add(existing)
+                db.session.flush()
+                inserted_updates.append(update)
+            else:
+                existing.ssid = update.ssid
+                existing.channel = update.channel
+                existing.frequency = update.frequency
+                existing.signal_strength = update.signal_strength
+                existing.encryption = update.encryption
+                existing.clients_count = update.clients_count
+                existing.classification = update.classification
+                existing.risk_score = update.risk_score
+                existing.auth_type = update.auth_type
+                existing.wps_info = update.wps_info
+                existing.manufacturer = update.manufacturer
+                existing.device_type = update.device_type
+                existing.uptime_seconds = update.uptime_seconds
+                existing.raw_beacon = update.raw_beacon
+                existing.raw_data = update.raw_data
+                existing.last_seen = update.last_seen
+                existing.seen_count = (existing.seen_count or 0) + update.seen_increment
+                updated_updates.append(update)
+
+            network_id_map[key] = existing.id
+
+        scan_rows = [
+            NetworkScanEvent(
+                sensor_id=update.sensor_id,
+                network_id=network_id_map[(update.sensor_id, update.bssid)],
+                event_type=update.classification or "SCAN",
+                severity=update.severity,
+                risk_score=update.risk_score,
+                signal_strength=update.signal_strength,
+                channel=update.channel,
+                scan_metadata={
+                    "ssid": update.ssid,
+                    "bssid": update.bssid,
+                    "uptime_seconds": update.uptime_seconds,
+                    "seen_increment": update.seen_increment,
+                    "raw_data": update.raw_data,
+                },
+                reasons=update.reasons,
+                scanned_at=update.last_seen,
+            )
+            for update in batch.values()
+        ]
+
+        if scan_rows:
+            db.session.add_all(scan_rows)
+
+        db.session.commit()
+
+        return FlushResult(
+            persisted_keys=set(network_id_map.keys()),
+            inserted_updates=inserted_updates,
+            updated_updates=updated_updates,
+            inserted_count=len(inserted_updates),
+            updated_count=len(updated_updates),
+            scan_event_count=len(scan_rows),
+        )
+
     def _record_flush_result(self, flush_result: FlushResult) -> None:
         with self._stats_lock:
             self._stats["inserted"] += flush_result.inserted_count
@@ -533,15 +642,13 @@ class ScanPersistenceManager:
             )
 
     def _broadcast_flush_result(self, flush_result: FlushResult) -> None:
-        socketio = getattr(self.app, "socketio", None)
-        if socketio is None:
-            return
-
-        for update in flush_result.inserted_updates:
-            _broadcast_network_event(socketio, NETWORK_SCAN_EVENT, update)
-
-        for update in flush_result.updated_updates:
-            _broadcast_network_event(socketio, NETWORK_UPDATE_EVENT, update)
+        if flush_result.inserted_count or flush_result.updated_count:
+            LOGGER.info(
+                "[DB] Historical persistence flush complete: inserted=%s updated=%s scan_events=%s",
+                flush_result.inserted_count,
+                flush_result.updated_count,
+                flush_result.scan_event_count,
+            )
 
     def _log_periodic_summary(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -637,6 +744,12 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _strict_sensor_id(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if value > 0 else None
 
 
 def _normalize_bssid(value: Any) -> str:
@@ -790,64 +903,39 @@ def _mark_sensor_status(
     connected: bool = True,
 ) -> dict[str, Any]:
     payload = sanitize_json_payload(payload or {})
-    heartbeat_time = datetime.utcnow()
-    status = sanitize_input(str(payload.get("status") or ("online" if connected else "offline")), max_length=50)
-    status = status or ("online" if connected else "offline")
-
-    snapshot = {
-        "sensor_id": sensor_id,
+    payload = {
+        **payload,
         "sid": sid,
-        "connected": connected,
-        "status": status,
-        "signal_strength": _safe_int(payload.get("signal_strength"), default=0),
-        "cpu": _safe_float(payload.get("cpu_usage", payload.get("cpu")), default=0.0),
-        "cpu_usage": _safe_float(payload.get("cpu_usage", payload.get("cpu")), default=0.0),
-        "memory": _safe_float(payload.get("memory_usage", payload.get("memory")), default=0.0),
-        "memory_usage": _safe_float(payload.get("memory_usage", payload.get("memory")), default=0.0),
-        "uptime": _safe_int(payload.get("uptime"), default=0),
-        "message": sanitize_input(str(payload.get("message") or ""), max_length=255) or None,
-        "interface": sanitize_input(str(payload.get("interface") or ""), max_length=255) or None,
-        "hostname": sanitize_input(str(payload.get("hostname") or ""), max_length=255) or None,
-        "last_heartbeat": heartbeat_time.isoformat(),
-        "last_seen": heartbeat_time.isoformat(),
-        "updated_at": heartbeat_time.isoformat(),
+        "status": payload.get("status") or ("online" if connected else "offline"),
     }
-
-    with _connected_sensors_lock:
-        existing = _connected_sensors.get(sensor_id, {}).copy()
-        existing.update({key: value for key, value in snapshot.items() if value is not None})
-        if sid is not None:
-            existing["sid"] = sid
-        existing["connected"] = connected
-        existing["sensor_id"] = sensor_id
-        if not connected:
-            existing["status"] = "offline"
-            existing["message"] = snapshot["message"] or "Sensor disconnected"
-        _connected_sensors[sensor_id] = existing
-        return existing.copy()
+    action, snapshot = upsert_realtime_sensor(sensor_id, payload, connected=connected)
+    LOGGER.info("[STATE %s] sensor sensor_id=%s status=%s", action, sensor_id, snapshot.get("status"))
+    return snapshot
 
 
 def _unmark_sensor_status(sensor_id: int, sid: str | None = None, message: str | None = None) -> dict[str, Any] | None:
-    payload = {"status": "offline", "message": message or "Sensor disconnected"}
-    return _mark_sensor_status(sensor_id, payload, sid=sid, connected=False)
+    changed, snapshot = mark_realtime_sensor_offline(
+        sensor_id,
+        message=message or "Sensor disconnected",
+        sid=sid,
+    )
+    if snapshot and changed:
+        LOGGER.info("[STATE REMOVE] sensor sensor_id=%s status=%s", sensor_id, snapshot.get("status"))
+    return snapshot
 
 
 def get_connected_sensors_snapshot() -> dict[int, dict[str, Any]]:
-    with _connected_sensors_lock:
-        return {sensor_id: snapshot.copy() for sensor_id, snapshot in _connected_sensors.items()}
+    return get_realtime_sensor_snapshot_map()
 
 
 def is_sensor_connected(sensor_id: int) -> bool:
-    with _connected_sensors_lock:
-        snapshot = _connected_sensors.get(sensor_id)
-        return bool(snapshot and snapshot.get("connected"))
+    return is_realtime_sensor_online(sensor_id)
 
 
 def get_sensor_socket_id(sensor_id: int) -> str | None:
-    with _connected_sensors_lock:
-        snapshot = _connected_sensors.get(sensor_id)
-        if snapshot and snapshot.get("connected") and snapshot.get("sid"):
-            return str(snapshot["sid"])
+    snapshot = get_realtime_sensor(sensor_id)
+    if snapshot and snapshot.get("connected") and snapshot.get("sid"):
+        return str(snapshot["sid"])
 
     for sid, client in connected_clients.items():
         if client.get("client_type") == "sensor" and _safe_int(client.get("sensor_id"), default=0) == sensor_id:
@@ -1003,23 +1091,16 @@ def _touch_sensor_record(sensor_id: int, payload: dict[str, Any]) -> datetime:
 
 
 def _resolve_sensor_id_from_payload(payload: dict[str, Any], sid: str | None = None) -> int:
-    sensor_id = _safe_int(payload.get("sensor_id"), default=0)
-    if sensor_id:
-        return sensor_id
+    sensor_id = _strict_sensor_id(payload.get("sensor_id"))
+    if sensor_id is None:
+        return 0
 
     sensor_info = connected_clients.get(sid or request.sid) or {}
-    sensor_id = _safe_int(sensor_info.get("sensor_id"), default=0)
-    if sensor_id:
-        return sensor_id
+    connected_sensor_id = _safe_int(sensor_info.get("sensor_id"), default=0)
+    if connected_sensor_id and connected_sensor_id != sensor_id:
+        raise ValueError(f"sensor_id mismatch: payload={sensor_id} connected={connected_sensor_id}")
 
-    sensor_identifier = payload.get("sensor_id") or payload.get("registration_key") or payload.get("hostname")
-    hostname = payload.get("hostname")
-    if sensor_identifier or hostname:
-        sensor = _resolve_sensor(sensor_identifier=sensor_identifier, hostname=hostname)
-        db.session.commit()
-        return sensor.id
-
-    return 0
+    return sensor_id
 
 
 def _handle_sensor_presence(socketio: SocketIO, payload: dict[str, Any], *, sid: str, status_event_name: str) -> dict[str, Any]:
@@ -1042,7 +1123,12 @@ def _handle_sensor_presence(socketio: SocketIO, payload: dict[str, Any], *, sid:
             connected_clients[sid]["hostname"] = live_snapshot["hostname"]
         connected_clients[sid]["last_seen"] = merged_payload["last_heartbeat"]
 
-    _emit_socket_event(socketio, SENSOR_STATUS_EVENT, merged_payload, room=DASHBOARD_ROOM)
+    _emit_socket_event(
+        socketio,
+        SENSOR_STATUS_UPDATE_EVENT,
+        {"event": SENSOR_STATUS_UPDATE_EVENT, "data": merged_payload},
+        room=DASHBOARD_ROOM,
+    )
     return merged_payload
 
 
@@ -1081,7 +1167,12 @@ def _touch_sensor_activity(socketio: SocketIO, payload: dict[str, Any], *, sid: 
         connected_clients[sid]["client_type"] = "sensor"
         connected_clients[sid]["last_seen"] = heartbeat_at.isoformat()
 
-    _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
+    _emit_socket_event(
+        socketio,
+        SENSOR_STATUS_UPDATE_EVENT,
+        {"event": SENSOR_STATUS_UPDATE_EVENT, "data": status_payload},
+        room=DASHBOARD_ROOM,
+    )
     return status_payload
 
 
@@ -1235,6 +1326,72 @@ def start_cleanup_thread(app) -> None:
         _cleanup_thread_started = True
 
 
+def _emit_snapshot(socketio: SocketIO) -> None:
+    network_snapshot = {
+        "event": NETWORK_SNAPSHOT_EVENT,
+        "data": get_realtime_network_snapshot(),
+    }
+    sensor_snapshot = {
+        "event": SENSOR_SNAPSHOT_EVENT,
+        "data": get_realtime_sensor_snapshot(),
+    }
+    LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORK_SNAPSHOT_EVENT, len(network_snapshot["data"]))
+    _emit_socket_event(socketio, NETWORK_SNAPSHOT_EVENT, network_snapshot, room=DASHBOARD_ROOM)
+    LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", SENSOR_SNAPSHOT_EVENT, len(sensor_snapshot["data"]))
+    _emit_socket_event(socketio, SENSOR_SNAPSHOT_EVENT, sensor_snapshot, room=DASHBOARD_ROOM)
+
+
+def _realtime_state_loop(socketio: SocketIO) -> None:
+    next_cleanup_at = time.monotonic()
+    next_snapshot_at = time.monotonic()
+
+    while True:
+        now = time.monotonic()
+
+        if now >= next_cleanup_at:
+            removed_networks, updated_sensors = prune_expired_state()
+            for network in removed_networks:
+                LOGGER.info("[STATE REMOVE] network bssid=%s sensor_id=%s", network.get("bssid"), network.get("sensor_id"))
+                _emit_socket_event(
+                    socketio,
+                    NETWORK_REMOVED_EVENT,
+                    {"event": NETWORK_REMOVED_EVENT, "data": network},
+                    room=DASHBOARD_ROOM,
+                )
+            for sensor in updated_sensors:
+                LOGGER.info("[STATE REMOVE] sensor sensor_id=%s status=%s", sensor.get("sensor_id"), sensor.get("status"))
+                _emit_socket_event(
+                    socketio,
+                    SENSOR_STATUS_UPDATE_EVENT,
+                    {"event": SENSOR_STATUS_UPDATE_EVENT, "data": sensor},
+                    room=DASHBOARD_ROOM,
+                )
+            next_cleanup_at = now + 2.0
+
+        if now >= next_snapshot_at:
+            _emit_snapshot(socketio)
+            next_snapshot_at = now + 1.0
+
+        time.sleep(0.2)
+
+
+def start_realtime_state_thread(socketio: SocketIO) -> None:
+    global _realtime_state_thread_started
+
+    with _realtime_state_thread_lock:
+        if _realtime_state_thread_started:
+            return
+
+        realtime_thread = threading.Thread(
+            target=_realtime_state_loop,
+            args=(socketio,),
+            daemon=True,
+            name="zeinaguard-realtime-state",
+        )
+        realtime_thread.start()
+        _realtime_state_thread_started = True
+
+
 def _resolve_async_mode() -> str:
     preferred_mode = os.getenv("SOCKETIO_ASYNC_MODE", "eventlet")
     if preferred_mode == "eventlet":
@@ -1257,6 +1414,7 @@ def init_socketio(app):
     )
 
     start_cleanup_thread(app)
+    start_realtime_state_thread(socketio)
     persistence_manager = _get_persistence_manager(app)
 
     @socketio.on("connect")
@@ -1302,7 +1460,12 @@ def init_socketio(app):
                             "hostname": live_snapshot.get("hostname"),
                         }
                     )
-                _emit_socket_event(socketio, SENSOR_STATUS_EVENT, status_payload, room=DASHBOARD_ROOM)
+                _emit_socket_event(
+                    socketio,
+                    SENSOR_STATUS_UPDATE_EVENT,
+                    {"event": SENSOR_STATUS_UPDATE_EVENT, "data": status_payload},
+                    room=DASHBOARD_ROOM,
+                )
             except Exception as exc:
                 db.session.rollback()
                 LOGGER.warning("[WebSocket] Failed to persist offline status for sensor %s: %s", sensor_id, exc)
@@ -1313,7 +1476,7 @@ def init_socketio(app):
         try:
             _log_received_from_sensor("sensor_register", data)
             sensor = _resolve_sensor(
-                sensor_identifier=data.get("sensor_id"),
+                sensor_identifier=data.get("registration_key") or data.get("sensor_id"),
                 hostname=data.get("hostname"),
             )
             db.session.commit()
@@ -1359,38 +1522,42 @@ def init_socketio(app):
             _emit_context_event("network_scan_ack", {"status": "ignored", "queued": 0})
             return
 
-        try:
-            _touch_sensor_activity(
-                socketio,
-                {
-                    "sensor_id": payload.get("sensor_id"),
-                    "registration_key": payload.get("registration_key"),
-                    "hostname": payload.get("hostname"),
-                    "status": "online",
-                    "message": "Receiving network scan batches",
-                },
-                sid=request.sid,
-                status_event_name=NETWORK_SCAN_EVENT,
-            )
-        except Exception as exc:
-            db.session.rollback()
-            LOGGER.warning("[WebSocket] Failed to refresh sensor presence on network_scan: %s", exc)
-
         queued = 0
+        dropped = 0
+        connected_sensor_id = _safe_int((connected_clients.get(request.sid) or {}).get("sensor_id"), default=0)
         for network_data in network_events:
             try:
                 _log_received_from_sensor(NETWORK_SCAN_EVENT, network_data)
+                sensor_id = _strict_sensor_id(network_data.get("sensor_id"))
+                if sensor_id is None:
+                    raise ValueError("network_scan missing int sensor_id")
+                if connected_sensor_id and connected_sensor_id != sensor_id:
+                    raise ValueError(f"network_scan sensor_id mismatch: payload={sensor_id} connected={connected_sensor_id}")
+
+                action, live_network = upsert_realtime_network(network_data)
+                LOGGER.info(
+                    "[STATE %s] network bssid=%s sensor_id=%s classification=%s",
+                    action,
+                    live_network.get("bssid"),
+                    live_network.get("sensor_id"),
+                    live_network.get("classification"),
+                )
                 if persistence_manager.ingest(network_data):
                     queued += 1
             except Exception as exc:
+                dropped += 1
                 db.session.rollback()
                 LOGGER.warning("[WebSocket] Failed to ingest network scan: %s", exc)
+
+        if request.sid in connected_clients:
+            connected_clients[request.sid]["last_seen"] = datetime.utcnow().isoformat()
 
         _emit_context_event(
             "network_scan_ack",
             {
-                "status": "ok",
+                "status": "ok" if queued else "partial",
                 "queued": queued,
+                "dropped": dropped,
                 "timestamp": datetime.utcnow().isoformat(),
             },
         )
@@ -1499,41 +1666,60 @@ def init_socketio(app):
     def handle_attack_command(payload):
         payload = sanitize_json_payload(payload or {})
         sensor_id = None
-        target_bssid = None
+        bssid = None
         channel = None
         try:
-            sensor_id = _safe_int(payload.get("sensor_id"), default=0)
-            target_bssid = _normalize_bssid(payload.get("target_bssid") or payload.get("bssid"))
+            sensor_id = _strict_sensor_id(payload.get("sensor_id"))
+            bssid = _normalize_bssid(payload.get("bssid") or payload.get("target_bssid"))
             action = sanitize_input(str(payload.get("action") or "deauth"), max_length=50) or "deauth"
-            channel = _safe_int(payload.get("channel"), default=0) or None
 
-            if not sensor_id:
+            if sensor_id is None:
                 raise ValueError("attack_command missing sensor_id")
-            if not target_bssid:
-                raise ValueError("attack_command missing target_bssid")
-            if channel is None:
-                raise ValueError("attack_command missing channel")
+            if not bssid:
+                raise ValueError("attack_command missing bssid")
+
             sensor = db.session.get(Sensor, sensor_id)
             if sensor is None:
                 raise ValueError(f"Sensor {sensor_id} does not exist")
+            if not is_sensor_connected(sensor_id):
+                raise ValueError(f"Sensor {sensor_id} is offline")
+
+            network_snapshot = get_realtime_network(bssid)
+            if network_snapshot is None:
+                raise ValueError(f"Network {bssid} is not active")
+            if _safe_int(network_snapshot.get("sensor_id"), default=0) != sensor_id:
+                raise ValueError(f"Network {bssid} is not owned by sensor {sensor_id}")
+
+            channel = _safe_int(network_snapshot.get("channel"), default=0) or None
 
             sensor_sid = get_sensor_socket_id(sensor_id)
-            if not sensor_sid or not is_sensor_connected(sensor_id):
+            if not sensor_sid:
                 raise ValueError(f"Sensor {sensor_id} is not connected")
+
             command_payload = {
                 "sensor_id": sensor_id,
                 "action": action,
-                "target_bssid": target_bssid,
+                "bssid": bssid,
                 "channel": channel,
             }
-            _emit_socket_event(socketio, ATTACK_COMMAND_EVENT, {**command_payload, "sensor_id": sensor_id, "timestamp": datetime.utcnow().isoformat(), "status": "dispatched"}, room=DASHBOARD_ROOM)
+            _emit_socket_event(
+                socketio,
+                ATTACK_COMMAND_EVENT,
+                {
+                    **command_payload,
+                    "sensor_id": sensor_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "status": "dispatched",
+                },
+                room=DASHBOARD_ROOM,
+            )
             _emit_socket_event(socketio, EXECUTE_ATTACK_EVENT, command_payload, room=sensor_sid)
             _emit_context_event(
                 "attack_command_ack",
                 {
                     "status": "ok",
                     "sensor_id": sensor_id,
-                    "target_bssid": target_bssid,
+                    "bssid": bssid,
                     "channel": channel,
                     "timestamp": datetime.utcnow().isoformat(),
                 },
@@ -1545,7 +1731,7 @@ def init_socketio(app):
                 {
                     "status": "error",
                     "sensor_id": sensor_id or None,
-                    "target_bssid": target_bssid or None,
+                    "bssid": bssid or None,
                     "channel": channel,
                     "message": str(exc),
                     "timestamp": datetime.utcnow().isoformat(),
@@ -1557,17 +1743,14 @@ def init_socketio(app):
         payload = sanitize_json_payload(payload or {})
         try:
             _log_received_from_sensor(ATTACK_ACK_EVENT, payload)
-            sensor_id = _safe_int(payload.get("sensor_id"), default=0)
-            if not sensor_id:
-                sensor_info = connected_clients.get(request.sid) or {}
-                sensor_id = _safe_int(sensor_info.get("sensor_id"), default=0)
-            if not sensor_id:
+            sensor_id = _strict_sensor_id(payload.get("sensor_id"))
+            if sensor_id is None:
                 raise ValueError("attack_ack missing sensor_id")
 
             ack_payload = {
                 "event": "attack_ack",
                 "status": sanitize_input(str(payload.get("status") or "failed"), max_length=50) or "failed",
-                "target_bssid": _normalize_bssid(payload.get("target_bssid")),
+                "bssid": _normalize_bssid(payload.get("bssid") or payload.get("target_bssid")),
                 "sensor_id": sensor_id,
                 "message": sanitize_input(str(payload.get("message") or ""), max_length=255) or None,
                 "timestamp": payload.get("timestamp") or datetime.utcnow().isoformat(),
@@ -1587,4 +1770,9 @@ def broadcast_threat_event(threat_data):
 
 def broadcast_sensor_status(sensor_data):
     socketio = current_app.socketio
-    _emit_socket_event(socketio, SENSOR_STATUS_EVENT, sensor_data, room=DASHBOARD_ROOM)
+    _emit_socket_event(
+        socketio,
+        SENSOR_STATUS_UPDATE_EVENT,
+        {"event": SENSOR_STATUS_UPDATE_EVENT, "data": sensor_data},
+        room=DASHBOARD_ROOM,
+    )

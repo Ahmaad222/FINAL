@@ -13,6 +13,7 @@ from models import (
     Incident, Alert, User, AlertRule, db
 )
 from websocket_server import get_connected_sensors_snapshot
+from realtime_state import get_network_snapshot as get_realtime_network_snapshot
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
 SENSOR_HEARTBEAT_STALE_SECONDS = int(os.getenv('SENSOR_HEARTBEAT_STALE_SECONDS', '15'))
@@ -170,21 +171,16 @@ def get_overview():
 @dashboard_bp.route('/networks', methods=['GET'])
 @jwt_required(optional=True)
 def get_live_networks():
-    """Bootstrap the dashboard with the latest known network state."""
+    """Return the authoritative in-memory live network snapshot."""
     try:
         limit = max(1, min(int(request.args.get('limit', 500)), 1000))
         classification = (request.args.get('classification') or '').upper()
-
-        query = WiFiNetwork.query.order_by(
-            desc(WiFiNetwork.last_seen),
-            desc(WiFiNetwork.signal_strength),
-        )
+        networks = get_realtime_network_snapshot()
         if classification in {'ROGUE', 'SUSPICIOUS', 'LEGIT'}:
-            query = query.filter(func.upper(WiFiNetwork.classification) == classification)
-
-        networks = query.limit(limit).all()
+            networks = [network for network in networks if network.get('classification') == classification]
+        networks = networks[:limit]
         return jsonify({
-            'networks': [_format_live_network(network) for network in networks],
+            'networks': networks,
             'count': len(networks),
             'generated_at': datetime.utcnow().isoformat(),
         }), 200
@@ -311,64 +307,16 @@ def get_threat_summary():
 @dashboard_bp.route('/sensor-health', methods=['GET'])
 @jwt_required(optional=True)
 def get_sensor_health():
-    """Get current sensor health metrics"""
+    """Get the authoritative in-memory live sensor snapshot."""
     try:
-        # Get latest health for each sensor
-        sensors_health = []
-        sensors = Sensor.query.all()
-        realtime_sensors = get_connected_sensors_snapshot()
-
-        for sensor in sensors:
-            latest_health = SensorHealth.query\
-                .filter_by(sensor_id=sensor.id)\
-                .order_by(desc(SensorHealth.created_at))\
-                .first()
-            realtime_status = realtime_sensors.get(sensor.id)
-
-            if latest_health or realtime_status:
-                effective_status = _effective_sensor_status(sensor, latest_health, realtime_status)
-                sensors_health.append({
-                    'sensor_id': sensor.id,
-                    'name': sensor.name,
-                    'location': sensor.location,
-                    'status': effective_status,
-                    'signal_strength': (
-                        realtime_status.get('signal_strength')
-                        if realtime_status is not None
-                        else latest_health.signal_strength if latest_health else 0
-                    ),
-                    'cpu_usage': (
-                        realtime_status.get('cpu_usage')
-                        if realtime_status is not None
-                        else latest_health.cpu_usage if latest_health else 0
-                    ),
-                    'memory_usage': (
-                        realtime_status.get('memory_usage')
-                        if realtime_status is not None
-                        else latest_health.memory_usage if latest_health else 0
-                    ),
-                    'uptime': (
-                        realtime_status.get('uptime')
-                        if realtime_status is not None
-                        else latest_health.uptime if latest_health else 0
-                    ),
-                    'interface': realtime_status.get('interface') if realtime_status is not None else None,
-                    'last_heartbeat': (
-                        realtime_status.get('last_heartbeat')
-                        if realtime_status is not None
-                        else latest_health.last_heartbeat.isoformat() if latest_health and latest_health.last_heartbeat
-                        else sensor.last_heartbeat.isoformat() if sensor.last_heartbeat else None
-                    )
-                })
-        
-        # Calculate averages
+        sensors_health = list(get_connected_sensors_snapshot().values())
         if sensors_health:
-            avg_signal = sum(s['signal_strength'] or 0 for s in sensors_health) / len(sensors_health)
-            avg_cpu = sum(s['cpu_usage'] or 0 for s in sensors_health) / len(sensors_health)
-            avg_memory = sum(s['memory_usage'] or 0 for s in sensors_health) / len(sensors_health)
+            avg_signal = 0
+            avg_cpu = sum(s.get('cpu') or 0 for s in sensors_health) / len(sensors_health)
+            avg_memory = sum(s.get('memory') or 0 for s in sensors_health) / len(sensors_health)
         else:
             avg_signal = avg_cpu = avg_memory = 0
-        
+
         return jsonify({
             'sensors': sensors_health,
             'averages': {

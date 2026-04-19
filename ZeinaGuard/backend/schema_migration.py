@@ -139,6 +139,10 @@ SCHEMA_STATEMENTS = [
 
 
 def apply_runtime_migrations() -> None:
+    if db.engine.dialect.name != "postgresql":
+        LOGGER.info("[DB] Skipping PostgreSQL runtime migrations for dialect=%s", db.engine.dialect.name)
+        return
+
     LOGGER.info("[DB] Applying runtime schema migrations")
     with db.engine.begin() as connection:
         for statement in SCHEMA_STATEMENTS:
