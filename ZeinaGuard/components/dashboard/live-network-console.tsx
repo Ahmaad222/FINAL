@@ -11,6 +11,7 @@ import {
   type AttackCommandEvent,
   type AttackCommandAckEvent,
   type LiveNetworkEvent,
+  type NetworkRemovedEvent,
   type SensorStatusEvent,
 } from '@/hooks/use-socket';
 
@@ -26,6 +27,18 @@ interface ActivityItem {
 }
 
 const SENSOR_HEARTBEAT_STALE_MS = 15000;
+const LIVE_NETWORK_STALE_MS = 12000;
+
+
+function parseUtcTimestamp(timestamp: string) {
+  if (!timestamp) {
+    return Number.NaN;
+  }
+  if (timestamp.endsWith('Z') || /[+-]\d\d:\d\d$/.test(timestamp)) {
+    return new Date(timestamp).getTime();
+  }
+  return new Date(`${timestamp}Z`).getTime();
+}
 
 
 function estimateDistance(signal: number | null) {
@@ -65,7 +78,7 @@ function trendFromHistory(history: number[]) {
 
 
 function relativeLastSeen(timestamp: string) {
-  const seen = new Date(timestamp).getTime();
+  const seen = parseUtcTimestamp(timestamp);
   const deltaSeconds = Math.max(0, Math.floor((Date.now() - seen) / 1000));
   if (deltaSeconds < 2) {
     return 'now';
@@ -90,7 +103,7 @@ function signalBarWidth(signal: number | null) {
 
 
 function effectiveSensorStatus(sensor: SensorStatusEvent) {
-  const heartbeat = Date.parse(sensor.last_heartbeat || '');
+  const heartbeat = parseUtcTimestamp(sensor.last_heartbeat || '');
   if (!Number.isFinite(heartbeat) || (Date.now() - heartbeat) > SENSOR_HEARTBEAT_STALE_MS) {
     return 'offline';
   }
@@ -106,6 +119,12 @@ function classificationClasses(classification: LiveNetworkEvent['classification'
     return 'bg-amber-950 text-amber-100 border border-amber-700';
   }
   return 'bg-emerald-950 text-emerald-100 border border-emerald-700';
+}
+
+
+function isFreshNetwork(network: LiveNetworkEvent) {
+  const seenAt = parseUtcTimestamp(network.timestamp);
+  return Number.isFinite(seenAt) && (Date.now() - seenAt) <= LIVE_NETWORK_STALE_MS;
 }
 
 
@@ -144,29 +163,49 @@ export function LiveNetworkConsole() {
     signalHistoryRef.current[key] = [...current.slice(-7), event.signal];
   };
 
-  const upsertBufferedNetwork = (event: LiveNetworkEvent) => {
-    const normalized = {
-      ...event,
-      bssid: event.bssid.toUpperCase(),
-      classification: event.classification ?? 'LEGIT',
-    } as LiveNetworkEvent;
-    trackSignalHistory(normalized);
-    bufferedNetworksRef.current = {
-      ...bufferedNetworksRef.current,
-      [normalized.bssid]: normalized,
-    };
-    markDirty();
-  };
-
   const { isConnected, sendAttackCommand } = useSocket({
     onNetworkScan: (event) => {
-      upsertBufferedNetwork(event);
+      appendBufferedActivity({
+        id: `live-scan-${event.bssid}-${event.timestamp}`,
+        type: 'status',
+        title: `Live scan ${event.classification}`,
+        detail: `${event.ssid || 'Hidden'} | ${event.bssid}`,
+        timestamp: event.timestamp,
+      });
     },
     onNetworkUpdate: (event) => {
-      upsertBufferedNetwork(event);
+      appendBufferedActivity({
+        id: `network-update-${event.bssid}-${event.timestamp}`,
+        type: 'status',
+        title: `Network update ${event.classification}`,
+        detail: `${event.ssid || 'Hidden'} | ${event.bssid}`,
+        timestamp: event.timestamp,
+      });
+    },
+    onNetworkSnapshot: (snapshot) => {
+      const nextNetworks: Record<string, LiveNetworkEvent> = {};
+      for (const network of snapshot) {
+        const normalized = {
+          ...network,
+          bssid: network.bssid.toUpperCase(),
+          classification: network.classification ?? 'LEGIT',
+        } as LiveNetworkEvent;
+        if (!isFreshNetwork(normalized)) {
+          continue;
+        }
+        trackSignalHistory(normalized);
+        nextNetworks[normalized.bssid] = normalized;
+      }
+      bufferedNetworksRef.current = nextNetworks;
+      markDirty();
+    },
+    onNetworkRemoved: (event: NetworkRemovedEvent) => {
+      const nextNetworks = { ...bufferedNetworksRef.current };
+      delete nextNetworks[event.bssid.toUpperCase()];
+      bufferedNetworksRef.current = nextNetworks;
+      markDirty();
     },
     onThreatDetected: (event) => {
-      upsertBufferedNetwork(event);
       appendBufferedActivity({
         id: `threat-${event.bssid}-${event.timestamp}`,
         type: 'threat',
@@ -221,7 +260,7 @@ export function LiveNetworkConsole() {
         timestamp: event.timestamp,
       });
       pendingAttackStateRef.current = `Attack ${event.status} for ${event.target_bssid}`;
-      if (event.status === 'success') {
+      if (event.status === 'success' || event.status === 'executed') {
         toast.success('Attack acknowledged', {
           description: event.message || `Sensor #${event.sensor_id} confirmed ${event.target_bssid}`,
         });
@@ -249,6 +288,22 @@ export function LiveNetworkConsole() {
 
   useEffect(() => {
     const flushInterval = window.setInterval(() => {
+      const prunedNetworks = Object.fromEntries(
+        Object.entries(bufferedNetworksRef.current).filter(([, network]) => isFreshNetwork(network)),
+      );
+      const prunedStatuses = Object.fromEntries(
+        Object.entries(bufferedSensorStatusesRef.current).filter(([, sensor]) => effectiveSensorStatus(sensor) !== 'offline' || Number.isFinite(parseUtcTimestamp(sensor.last_heartbeat))),
+      ) as Record<number, SensorStatusEvent>;
+
+      if (
+        Object.keys(prunedNetworks).length !== Object.keys(bufferedNetworksRef.current).length
+        || Object.keys(prunedStatuses).length !== Object.keys(bufferedSensorStatusesRef.current).length
+      ) {
+        bufferedNetworksRef.current = prunedNetworks;
+        bufferedSensorStatusesRef.current = prunedStatuses;
+        hasBufferedChangesRef.current = true;
+      }
+
       if (!hasBufferedChangesRef.current) {
         return;
       }
@@ -299,8 +354,15 @@ export function LiveNetworkConsole() {
 
         const nextNetworks: Record<string, LiveNetworkEvent> = {};
         for (const network of networkPayload.networks || []) {
-          nextNetworks[String(network.bssid).toUpperCase()] = network;
-          trackSignalHistory(network);
+          const normalized = {
+            ...network,
+            bssid: String(network.bssid).toUpperCase(),
+          } as LiveNetworkEvent;
+          if (!isFreshNetwork(normalized)) {
+            continue;
+          }
+          nextNetworks[normalized.bssid] = normalized;
+          trackSignalHistory(normalized);
         }
         const nextStatuses: Record<number, SensorStatusEvent> = {};
         for (const sensor of sensorPayload.sensors || []) {
@@ -332,14 +394,14 @@ export function LiveNetworkConsole() {
   }, []);
 
   const networkList = useMemo(() => {
-    const items = Object.values(networks);
+    const items = Object.values(networks).filter(isFreshNetwork);
     const filtered = filter === 'ALL'
       ? items
       : items.filter((network) => network.classification === filter);
 
     return filtered.sort((left, right) => {
-      const leftTime = new Date(left.timestamp).getTime();
-      const rightTime = new Date(right.timestamp).getTime();
+      const leftTime = parseUtcTimestamp(left.timestamp);
+      const rightTime = parseUtcTimestamp(right.timestamp);
       return rightTime - leftTime;
     });
   }, [filter, networks]);
@@ -352,9 +414,10 @@ export function LiveNetworkConsole() {
     return networks[normalized] || null;
   }, [huntTarget, networks]);
 
-  const rogueCount = Object.values(networks).filter((network) => network.classification === 'ROGUE').length;
-  const suspiciousCount = Object.values(networks).filter((network) => network.classification === 'SUSPICIOUS').length;
-  const legitCount = Object.values(networks).filter((network) => network.classification === 'LEGIT').length;
+  const liveNetworks = Object.values(networks).filter(isFreshNetwork);
+  const rogueCount = liveNetworks.filter((network) => network.classification === 'ROGUE').length;
+  const suspiciousCount = liveNetworks.filter((network) => network.classification === 'SUSPICIOUS').length;
+  const legitCount = liveNetworks.filter((network) => network.classification === 'LEGIT').length;
   const onlineSensors = Object.values(sensorStatuses).filter((sensor) => effectiveSensorStatus(sensor) !== 'offline').length;
 
   const handleAttack = (network: LiveNetworkEvent) => {
@@ -380,7 +443,7 @@ export function LiveNetworkConsole() {
         <Card className="bg-slate-900 border-slate-800">
           <CardHeader className="pb-2">
             <CardDescription className="text-slate-400">Live Networks</CardDescription>
-            <CardTitle className="text-3xl text-white">{Object.keys(networks).length}</CardTitle>
+            <CardTitle className="text-3xl text-white">{liveNetworks.length}</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-slate-400">Buffered dashboard snapshot, refreshed once per second</CardContent>
         </Card>

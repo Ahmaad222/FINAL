@@ -11,7 +11,7 @@ import time
 from datetime import timedelta
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_jwt_extended import JWTManager
 from sqlalchemy import text
@@ -22,7 +22,7 @@ from werkzeug.security import generate_password_hash
 from models import User, db
 from routes import register_blueprints
 from schema_migration import apply_runtime_migrations
-from websocket_server import get_realtime_status, init_socketio
+from websocket_server import dispatch_attack_command, get_realtime_status, init_socketio
 
 
 def configure_logging() -> logging.Logger:
@@ -140,6 +140,13 @@ def register_routes(app):
             }
         ), 200
 
+    @app.route("/api/attack", methods=["POST"])
+    def attack():
+        payload = request.get_json(silent=True) or {}
+        logger.info("[Attack API] request received payload=%s", payload)
+        ack_payload, status_code = dispatch_attack_command(app.socketio, payload)
+        return jsonify(ack_payload), status_code
+
     @app.errorhandler(404)
     def not_found(error):
         return jsonify({"error": "Not Found", "message": str(error)}), 404
@@ -165,6 +172,8 @@ def create_app(config_object=None):
     app.config["SQLALCHEMY_DATABASE_URI"] = os.getenv("DATABASE_URL", build_database_url())
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
     app.config["SQLALCHEMY_ECHO"] = False
+    app.config["SOCKETIO_ASYNC_MODE"] = os.getenv("SOCKETIO_ASYNC_MODE", "eventlet")
+    app.config["SOCKETIO_CORS_ALLOWED_ORIGINS"] = os.getenv("CORS_ORIGINS", "*")
     app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {
         "pool_pre_ping": True,
         "pool_recycle": int(os.getenv("DB_POOL_RECYCLE_SECONDS", "1800")),

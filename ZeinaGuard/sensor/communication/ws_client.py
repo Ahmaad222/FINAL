@@ -4,7 +4,7 @@ import socket
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from queue import Empty, Full, Queue
 
 import psutil
@@ -24,8 +24,12 @@ SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
 SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
 SCAN_DEDUP_SIGNAL_DELTA = int(os.getenv("SCAN_DEDUP_SIGNAL_DELTA", "5"))
 SCAN_DEDUP_MAX_AGE_SECONDS = float(os.getenv("SCAN_DEDUP_MAX_AGE_SECONDS", "30"))
-SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "10"))
+SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "5"))
 OUTBOUND_QUEUE_MAXSIZE = int(os.getenv("SENSOR_OUTBOUND_QUEUE_MAXSIZE", "4000"))
+
+
+def utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class WSClient:
@@ -57,12 +61,12 @@ class WSClient:
     def _register_handlers(self):
         @self.sio.event
         def connect():
-            LOGGER.info("[QUEUE] backend connected, queueing sensor_register")
+            LOGGER.info("[QUEUE] backend connected, queueing sensor_register registration_key=%s", self.sensor_registration_key)
             update_status(backend_status="connected", message=f"Connected to {self.backend_url}")
             self._enqueue_event(
                 "sensor_register",
                 {
-                    "sensor_id": self.sensor_registration_key,
+                    "registration_key": self.sensor_registration_key,
                     "hostname": self.hostname,
                     "interface": config.get_interface(),
                 },
@@ -79,10 +83,13 @@ class WSClient:
         @self.sio.on("registration_success")
         def registration_success(data):
             self.sensor_id = self._safe_int(data.get("sensor_id"), default=0) or None
+            LOGGER.info("[QUEUE] registration_success sensor_id=%s", self.sensor_id)
             update_status(
                 backend_status="registered",
                 message=f"Sensor registered as #{self.sensor_id}",
             )
+            if self.sensor_id:
+                self._enqueue_event("sensor_heartbeat", self._build_sensor_status_payload())
 
         @self.sio.on("execute_attack")
         def execute_attack(payload):
@@ -129,7 +136,7 @@ class WSClient:
         envelope = {
             "event_name": event_name,
             "payload": payload,
-            "queued_at": datetime.utcnow().isoformat(),
+            "queued_at": utc_iso(),
         }
 
         try:
@@ -195,10 +202,16 @@ class WSClient:
         payload = {
             "sensor_id": self._sensor_id_value(),
             "hostname": self.hostname,
-            "sent_at": datetime.utcnow().isoformat(),
+            "sent_at": utc_iso(),
             "networks": batch,
         }
+        if payload["sensor_id"] is None:
+            LOGGER.info("[SEND] sensor_id unavailable, deferring network_scan batch size=%s", len(batch))
+            for item in batch:
+                deferred_events.appendleft({"event_name": "network_scan", "payload": item})
+            return
         if self._send_event("network_scan", payload):
+            LOGGER.info("[SENT] network_scan sensor_id=%s batch_size=%s", payload["sensor_id"], len(batch))
             self._mark_scan_batch_sent(batch)
             return
 
@@ -256,7 +269,7 @@ class WSClient:
                 "signal": event.get("signal"),
                 "channel": event.get("channel"),
                 "classification": event.get("classification"),
-                "timestamp": event.get("timestamp") or datetime.utcnow().isoformat(),
+                "timestamp": event.get("timestamp") or utc_iso(),
                 "manufacturer": event.get("manufacturer"),
                 "threat_type": threat.get("status"),
                 "severity": "high" if event.get("classification") == "ROGUE" else "medium",
@@ -280,8 +293,9 @@ class WSClient:
 
     def _status_publisher(self):
         while self.is_running:
-            payload = self._build_sensor_status_payload()
-            self._enqueue_event("sensor_heartbeat", payload)
+            if self.sensor_id:
+                payload = self._build_sensor_status_payload()
+                self._enqueue_event("sensor_heartbeat", payload)
             time.sleep(SENSOR_STATUS_INTERVAL_SECONDS)
 
     def _should_process_scan(self, scan):
@@ -340,7 +354,7 @@ class WSClient:
     def _build_scan_payload(self, scan):
         return {
             "sensor_id": self._sensor_id_value(),
-            "timestamp": scan.get("timestamp") or datetime.utcnow().isoformat(),
+            "timestamp": scan.get("timestamp") or utc_iso(),
             "ssid": scan.get("ssid") or "Hidden",
             "bssid": scan.get("bssid"),
             "channel": scan.get("channel"),
@@ -364,14 +378,14 @@ class WSClient:
             "sensor_id": self._sensor_id_value(),
             "registration_key": self.sensor_registration_key,
             "hostname": self.hostname,
-            "status": status_snapshot.get("sensor_status", "monitoring"),
+            "status": "online",
             "signal_strength": 0,
             "cpu": cpu_percent,
             "memory": memory_percent,
             "cpu_usage": cpu_percent,
             "memory_usage": memory_percent,
             "uptime": uptime_seconds,
-            "last_heartbeat": datetime.utcnow().isoformat(),
+            "last_heartbeat": utc_iso(),
             "message": status_snapshot.get("message"),
             "interface": config.get_interface(),
         }
@@ -416,11 +430,12 @@ class WSClient:
             from prevention.containment_engine import ContainmentEngine
 
             log_attack(f"Commanded containment requested -> {target_bssid}", target_bssid)
+            LOGGER.info("Starting Deauth Attack on BSSID %s channel=%s", target_bssid, channel)
             clients = list(clients_map.get(target_bssid, set()))
             containment = ContainmentEngine(config.get_interface())
             containment.contain(target_bssid, clients, channel)
             LOGGER.info("[ATTACK EXECUTED] target=%s channel=%s", target_bssid, channel)
-            self._queue_attack_ack("success", target_bssid, "Containment finished successfully")
+            self._queue_attack_ack("executed", target_bssid, "Containment finished successfully")
         except Exception as exc:
             LOGGER.warning("[ATTACK EXECUTED] failed target=%s error=%s", target_bssid, exc)
             self._queue_attack_ack("failed", target_bssid, str(exc))
@@ -432,12 +447,12 @@ class WSClient:
             "target_bssid": target_bssid,
             "sensor_id": self._sensor_id_value(),
             "message": message,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utc_iso(),
         }
         self._enqueue_event("attack_ack", payload)
 
     def _sensor_id_value(self):
-        return self.sensor_id or self.sensor_registration_key
+        return self.sensor_id
 
     def _safe_int(self, value, default=0):
         try:

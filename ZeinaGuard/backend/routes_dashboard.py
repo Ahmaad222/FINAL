@@ -6,16 +6,27 @@ Provides analytics and metrics for the dashboard
 import os
 from flask import Blueprint, jsonify, request
 from flask_jwt_extended import jwt_required, get_jwt_identity
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, desc
 from models import (
     Threat, ThreatEvent, Sensor, SensorHealth, WiFiNetwork,
     Incident, Alert, User, AlertRule, db
 )
-from websocket_server import get_connected_sensors_snapshot
+from websocket_server import get_active_network_snapshot, get_connected_sensors_snapshot
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
 SENSOR_HEARTBEAT_STALE_SECONDS = int(os.getenv('SENSOR_HEARTBEAT_STALE_SECONDS', '15'))
+LIVE_NETWORK_TTL_SECONDS = int(os.getenv('LIVE_NETWORK_TTL_SECONDS', '60'))
+
+
+def _utc_iso(value: datetime | None):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    else:
+        value = value.astimezone(timezone.utc)
+    return value.isoformat().replace('+00:00', 'Z')
 
 
 def _format_live_network(network: WiFiNetwork):
@@ -34,7 +45,7 @@ def _format_live_network(network: WiFiNetwork):
         'signal': network.signal_strength,
         'channel': network.channel,
         'classification': classification,
-        'timestamp': network.last_seen.isoformat() if network.last_seen else None,
+        'timestamp': _utc_iso(network.last_seen),
         'manufacturer': manufacturer,
     }
 
@@ -44,9 +55,12 @@ def _effective_sensor_status(sensor: Sensor, latest_health: SensorHealth | None,
         realtime_heartbeat = realtime_status.get('last_heartbeat')
         if realtime_heartbeat:
             try:
-                heartbeat = datetime.fromisoformat(realtime_heartbeat)
+                heartbeat_text = realtime_heartbeat[:-1] + '+00:00' if str(realtime_heartbeat).endswith('Z') else realtime_heartbeat
+                heartbeat = datetime.fromisoformat(heartbeat_text)
             except ValueError:
                 heartbeat = None
+            if heartbeat and heartbeat.tzinfo is not None:
+                heartbeat = heartbeat.astimezone(timezone.utc).replace(tzinfo=None)
             if heartbeat and (datetime.utcnow() - heartbeat).total_seconds() <= SENSOR_HEARTBEAT_STALE_SECONDS:
                 status = (realtime_status.get('status') or 'online').lower()
                 if realtime_status.get('connected', True) and status != 'offline':
@@ -149,7 +163,7 @@ def get_overview():
                         'signal_strength': h[3],
                         'cpu_usage': h[4],
                         'memory_usage': h[5],
-                        'last_heartbeat': h[6].isoformat() if h[6] else None
+                        'last_heartbeat': _utc_iso(h[6])
                     } for h in latest_health
                 ]
             },
@@ -174,11 +188,26 @@ def get_live_networks():
     try:
         limit = max(1, min(int(request.args.get('limit', 500)), 1000))
         classification = (request.args.get('classification') or '').upper()
+        realtime_networks = get_active_network_snapshot()
 
+        if realtime_networks:
+            filtered_networks = [
+                network for network in realtime_networks
+                if classification not in {'ROGUE', 'SUSPICIOUS', 'LEGIT'} or str(network.get('classification')).upper() == classification
+            ]
+            filtered_networks = filtered_networks[:limit]
+            return jsonify({
+                'networks': filtered_networks,
+                'count': len(filtered_networks),
+                'generated_at': _utc_iso(datetime.utcnow()),
+            }), 200
+
+        cutoff = datetime.utcnow() - timedelta(seconds=LIVE_NETWORK_TTL_SECONDS)
         query = WiFiNetwork.query.order_by(
             desc(WiFiNetwork.last_seen),
             desc(WiFiNetwork.signal_strength),
         )
+        query = query.filter(WiFiNetwork.last_seen >= cutoff)
         if classification in {'ROGUE', 'SUSPICIOUS', 'LEGIT'}:
             query = query.filter(func.upper(WiFiNetwork.classification) == classification)
 
@@ -186,7 +215,7 @@ def get_live_networks():
         return jsonify({
             'networks': [_format_live_network(network) for network in networks],
             'count': len(networks),
-            'generated_at': datetime.utcnow().isoformat(),
+            'generated_at': _utc_iso(datetime.utcnow()),
         }), 200
     except Exception as e:
         return jsonify({'error': f'Failed to get live networks: {str(e)}'}), 500
@@ -207,7 +236,7 @@ def get_recent_threat_events():
                 'signal': None,
                 'channel': None,
                 'classification': 'ROGUE' if threat.severity in {'critical', 'high'} else 'SUSPICIOUS',
-                'timestamp': threat.created_at.isoformat() if threat.created_at else None,
+                'timestamp': _utc_iso(threat.created_at),
                 'manufacturer': None,
                 'threat_id': threat.id,
                 'severity': threat.severity,
@@ -217,7 +246,7 @@ def get_recent_threat_events():
         return jsonify({
             'events': events,
             'count': len(events),
-            'generated_at': datetime.utcnow().isoformat(),
+            'generated_at': _utc_iso(datetime.utcnow()),
         }), 200
     except Exception as e:
         return jsonify({'error': f'Failed to get threat events: {str(e)}'}), 500
@@ -356,8 +385,8 @@ def get_sensor_health():
                     'last_heartbeat': (
                         realtime_status.get('last_heartbeat')
                         if realtime_status is not None
-                        else latest_health.last_heartbeat.isoformat() if latest_health and latest_health.last_heartbeat
-                        else sensor.last_heartbeat.isoformat() if sensor.last_heartbeat else None
+                        else _utc_iso(latest_health.last_heartbeat) if latest_health and latest_health.last_heartbeat
+                        else _utc_iso(sensor.last_heartbeat) if sensor.last_heartbeat else None
                     )
                 })
         

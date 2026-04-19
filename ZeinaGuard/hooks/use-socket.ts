@@ -18,6 +18,12 @@ export interface LiveNetworkEvent {
   status?: string;
 }
 
+export interface NetworkRemovedEvent {
+  sensor_id: number;
+  bssid: string;
+  timestamp: string;
+}
+
 export interface ThreatEvent {
   type: 'threat_detected';
   timestamp: string;
@@ -62,7 +68,7 @@ export interface AttackCommandEvent {
 
 export interface AttackAckEvent {
   event: 'attack_ack';
-  status: 'success' | 'failed';
+  status: 'success' | 'executed' | 'failed';
   target_bssid: string;
   sensor_id: number;
   message?: string | null;
@@ -81,6 +87,8 @@ export interface AttackCommandAckEvent {
 interface UseSocketOptions {
   onNetworkScan?: (event: LiveNetworkEvent) => void;
   onNetworkUpdate?: (event: LiveNetworkEvent) => void;
+  onNetworkSnapshot?: (event: LiveNetworkEvent[]) => void;
+  onNetworkRemoved?: (event: NetworkRemovedEvent) => void;
   onThreatDetected?: (event: LiveNetworkEvent) => void;
   onAttackCommand?: (event: AttackCommandEvent) => void;
   onAttackCommandAck?: (event: AttackCommandAckEvent) => void;
@@ -93,12 +101,16 @@ interface UseSocketOptions {
 
 const SOCKET_EVENTS = [
   'network_scan',
+  'live_scan',
   'network_update',
+  'network_snapshot',
+  'network_removed',
   'threat_detected',
   'attack_command',
   'attack_command_ack',
   'attack_ack',
   'sensor_status',
+  'sensor_status_update',
   'threat_event',
 ] as const;
 
@@ -117,6 +129,8 @@ export function useSocket(options: UseSocketOptions = {}) {
   const {
     onNetworkScan,
     onNetworkUpdate,
+    onNetworkSnapshot,
+    onNetworkRemoved,
     onThreatDetected,
     onAttackCommand,
     onAttackCommandAck,
@@ -131,6 +145,8 @@ export function useSocket(options: UseSocketOptions = {}) {
   const handlersRef = useRef({
     onNetworkScan,
     onNetworkUpdate,
+    onNetworkSnapshot,
+    onNetworkRemoved,
     onThreatDetected,
     onAttackCommand,
     onAttackCommandAck,
@@ -143,6 +159,8 @@ export function useSocket(options: UseSocketOptions = {}) {
     handlersRef.current = {
       onNetworkScan,
       onNetworkUpdate,
+      onNetworkSnapshot,
+      onNetworkRemoved,
       onThreatDetected,
       onAttackCommand,
       onAttackCommandAck,
@@ -150,7 +168,7 @@ export function useSocket(options: UseSocketOptions = {}) {
       onSensorStatus,
       onThreatEvent,
     };
-  }, [onAttackAck, onAttackCommand, onAttackCommandAck, onNetworkScan, onNetworkUpdate, onSensorStatus, onThreatDetected, onThreatEvent]);
+  }, [onAttackAck, onAttackCommand, onAttackCommandAck, onNetworkRemoved, onNetworkScan, onNetworkSnapshot, onNetworkUpdate, onSensorStatus, onThreatDetected, onThreatEvent]);
 
   const connect = useCallback(() => {
     if (socketRef.current) {
@@ -198,9 +216,24 @@ export function useSocket(options: UseSocketOptions = {}) {
       handlersRef.current.onNetworkScan?.(event);
     });
 
+    socket.on('live_scan', (event: LiveNetworkEvent) => {
+      console.log('[EVENT RECEIVED] live_scan', event);
+      handlersRef.current.onNetworkScan?.(event);
+    });
+
     socket.on('network_update', (event: LiveNetworkEvent) => {
       console.log('[EVENT RECEIVED] network_update', event);
       handlersRef.current.onNetworkUpdate?.(event);
+    });
+
+    socket.on('network_snapshot', (event: LiveNetworkEvent[]) => {
+      console.log('SNAPSHOT', event);
+      handlersRef.current.onNetworkSnapshot?.(event);
+    });
+
+    socket.on('network_removed', (event: NetworkRemovedEvent) => {
+      console.log('[EVENT RECEIVED] network_removed', event);
+      handlersRef.current.onNetworkRemoved?.(event);
     });
 
     socket.on('threat_detected', (event: LiveNetworkEvent) => {
@@ -225,6 +258,11 @@ export function useSocket(options: UseSocketOptions = {}) {
 
     socket.on('sensor_status', (event: SensorStatusEvent) => {
       console.log('[EVENT RECEIVED] sensor_status', event);
+      handlersRef.current.onSensorStatus?.(event);
+    });
+
+    socket.on('sensor_status_update', (event: SensorStatusEvent) => {
+      console.log('[EVENT RECEIVED] sensor_status_update', event);
       handlersRef.current.onSensorStatus?.(event);
     });
 

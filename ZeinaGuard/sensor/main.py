@@ -241,7 +241,23 @@ def main():
     except Exception:
         update_status(backend_status="offline", message="Backend unavailable: local logging only")
 
-    ws_client = WSClient(backend_url=config.BACKEND_URL, token=token)
+    sensor_registration_key = (
+        os.getenv("ZEINAGUARD_SENSOR_REGISTRATION_KEY")
+        or os.getenv("ZEINAGUARD_SENSOR_ID")
+    )
+    print(
+        "Starting WS client:",
+        {
+            "backend_url": config.BACKEND_URL,
+            "interface": selected_interface,
+            "registration_key": sensor_registration_key or "auto-hostname",
+        },
+    )
+    ws_client = WSClient(
+        backend_url=config.BACKEND_URL,
+        token=token,
+        sensor_id=sensor_registration_key,
+    )
     threading.Thread(target=ws_client.start, daemon=True, name="WSClient").start()
 
     threat_manager = ThreatManager()
