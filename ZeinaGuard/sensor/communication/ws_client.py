@@ -24,7 +24,7 @@ SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
 SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
 SCAN_DEDUP_SIGNAL_DELTA = int(os.getenv("SCAN_DEDUP_SIGNAL_DELTA", "5"))
 SCAN_DEDUP_MAX_AGE_SECONDS = float(os.getenv("SCAN_DEDUP_MAX_AGE_SECONDS", "30"))
-SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "5"))
+SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "10"))
 OUTBOUND_QUEUE_MAXSIZE = int(os.getenv("SENSOR_OUTBOUND_QUEUE_MAXSIZE", "4000"))
 
 
@@ -47,6 +47,7 @@ class WSClient:
             reconnection=True,
             reconnection_attempts=0,
             reconnection_delay=3,
+            reconnection_delay_max=10,
             logger=False,
             engineio_logger=False,
         )
@@ -122,8 +123,9 @@ class WSClient:
                 self.sio.connect(
                     self.backend_url,
                     headers={"Authorization": f"Bearer {self.token}"},
-                    transports=["websocket"],
+                    transports=["websocket", "polling"],
                     wait=True,
+                    wait_timeout=10,
                 )
                 self.sio.wait()
             except Exception:

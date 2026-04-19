@@ -163,6 +163,7 @@ class WiFiNetwork(db.Model):
     seen_count = db.Column(Integer, default=1, nullable=False)  # How many times this network was seen
     first_seen = db.Column(DateTime, default=datetime.utcnow, nullable=False)
     last_seen = db.Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    is_active = db.Column(Boolean, default=True, nullable=False, index=True)
 
     # Raw data for debugging
     raw_beacon = db.Column(Text)
@@ -175,6 +176,7 @@ class WiFiNetwork(db.Model):
         Index('idx_wifi_networks_sensor_bssid', 'sensor_id', 'bssid'),
         Index('idx_wifi_networks_sensor_last_seen', 'sensor_id', 'last_seen'),
         Index('idx_wifi_networks_last_seen', 'last_seen'),
+        Index('idx_wifi_networks_active_last_seen', 'is_active', 'last_seen'),
         Index('idx_wifi_networks_signal', 'signal_strength'),
         Index('idx_wifi_networks_bssid', 'bssid'),
     )

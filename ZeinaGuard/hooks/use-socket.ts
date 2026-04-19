@@ -22,8 +22,7 @@ export interface NetworkSnapshotEvent {
 }
 
 export interface NetworkRemovedEvent {
-  event: 'network_removed';
-  data: LiveNetworkEvent;
+  bssid: string;
 }
 
 export interface ThreatEvent {
@@ -196,6 +195,7 @@ export function useSocket(options: UseSocketOptions = {}) {
       reconnectionDelay: 1000,
       reconnectionDelayMax: 5000,
       reconnectionAttempts: Infinity,
+      timeout: 10000,
       transports: ['websocket', 'polling'],
     });
 

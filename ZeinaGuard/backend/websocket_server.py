@@ -49,6 +49,11 @@ BATCH_FLUSH_INTERVAL_SECONDS = float(os.getenv("NETWORK_BATCH_FLUSH_INTERVAL_SEC
 BATCH_SIZE_LIMIT = int(os.getenv("NETWORK_BATCH_SIZE_LIMIT", "200"))
 NETWORK_LOG_INTERVAL_SECONDS = float(os.getenv("NETWORK_LOG_INTERVAL_SECONDS", "30"))
 CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
+LIVE_NETWORK_WINDOW_SECONDS = float(os.getenv("LIVE_NETWORK_TTL_SECONDS", "60"))
+LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS = float(os.getenv("LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS", "60"))
+SENSOR_HEARTBEAT_TIMEOUT_SECONDS = float(os.getenv("LIVE_SENSOR_TTL_SECONDS", "30"))
+LIVE_STATE_SWEEP_INTERVAL_SECONDS = float(os.getenv("LIVE_STATE_SWEEP_INTERVAL_SECONDS", "5"))
+SNAPSHOT_INTERVAL_SECONDS = float(os.getenv("SNAPSHOT_INTERVAL_SECONDS", "1"))
 SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "6"))
 THREAT_RETENTION_HOURS = int(os.getenv("THREAT_RETENTION_HOURS", "24"))
 NETWORK_RETENTION_HOURS = int(os.getenv("WIFI_NETWORK_RETENTION_HOURS", "48"))
@@ -436,6 +441,7 @@ class ScanPersistenceManager:
                 "seen_count": update.seen_increment,
                 "first_seen": update.first_seen,
                 "last_seen": update.last_seen,
+                "is_active": True,
                 "raw_beacon": update.raw_beacon,
                 "raw_data": update.raw_data,
                 "created_at": update.first_seen,
@@ -465,6 +471,7 @@ class ScanPersistenceManager:
                 "raw_beacon": insert_stmt.excluded.raw_beacon,
                 "raw_data": insert_stmt.excluded.raw_data,
                 "last_seen": insert_stmt.excluded.last_seen,
+                "is_active": True,
                 "updated_at": func.now(),
                 "seen_count": wifi_table.c.seen_count + insert_stmt.excluded.seen_count,
             },
@@ -560,6 +567,7 @@ class ScanPersistenceManager:
                     seen_count=update.seen_increment,
                     first_seen=update.first_seen,
                     last_seen=update.last_seen,
+                    is_active=True,
                 )
                 db.session.add(existing)
                 db.session.flush()
@@ -581,6 +589,7 @@ class ScanPersistenceManager:
                 existing.raw_beacon = update.raw_beacon
                 existing.raw_data = update.raw_data
                 existing.last_seen = update.last_seen
+                existing.is_active = True
                 existing.seen_count = (existing.seen_count or 0) + update.seen_increment
                 updated_updates.append(update)
 
@@ -1326,6 +1335,48 @@ def start_cleanup_thread(app) -> None:
         _cleanup_thread_started = True
 
 
+def _mark_stale_network_rows_inactive() -> int:
+    cutoff = datetime.utcnow() - timedelta(seconds=LIVE_NETWORK_WINDOW_SECONDS)
+    updated_rows = (
+        db.session.query(WiFiNetwork)
+        .filter(
+            WiFiNetwork.is_active.is_(True),
+            WiFiNetwork.last_seen < cutoff,
+        )
+        .update(
+            {
+                WiFiNetwork.is_active: False,
+                WiFiNetwork.updated_at: datetime.utcnow(),
+            },
+            synchronize_session=False,
+        )
+    )
+    db.session.commit()
+    return updated_rows
+
+
+def _persist_sensor_timeout(sensor_id: int, payload: dict[str, Any]) -> None:
+    sensor = db.session.get(Sensor, sensor_id)
+    if sensor is None:
+        return
+
+    heartbeat_at = datetime.utcnow()
+    heartbeat = SensorHealth(
+        sensor_id=sensor_id,
+        status="offline",
+        signal_strength=_safe_int(payload.get("signal_strength"), default=0),
+        cpu_usage=_safe_float(payload.get("cpu"), default=0.0),
+        memory_usage=_safe_float(payload.get("memory"), default=0.0),
+        uptime=_safe_int(payload.get("uptime"), default=0),
+        last_heartbeat=heartbeat_at,
+    )
+    db.session.add(heartbeat)
+    sensor.is_active = False
+    sensor.last_heartbeat = heartbeat_at
+    sensor.updated_at = heartbeat_at
+    db.session.commit()
+
+
 def _emit_snapshot(socketio: SocketIO) -> None:
     network_snapshot = {
         "event": NETWORK_SNAPSHOT_EVENT,
@@ -1341,8 +1392,9 @@ def _emit_snapshot(socketio: SocketIO) -> None:
     _emit_socket_event(socketio, SENSOR_SNAPSHOT_EVENT, sensor_snapshot, room=DASHBOARD_ROOM)
 
 
-def _realtime_state_loop(socketio: SocketIO) -> None:
+def _realtime_state_loop(app, socketio: SocketIO) -> None:
     next_cleanup_at = time.monotonic()
+    next_db_cleanup_at = time.monotonic()
     next_snapshot_at = time.monotonic()
 
     while True:
@@ -1355,27 +1407,44 @@ def _realtime_state_loop(socketio: SocketIO) -> None:
                 _emit_socket_event(
                     socketio,
                     NETWORK_REMOVED_EVENT,
-                    {"event": NETWORK_REMOVED_EVENT, "data": network},
+                    {"bssid": network.get("bssid")},
                     room=DASHBOARD_ROOM,
                 )
             for sensor in updated_sensors:
                 LOGGER.info("[STATE REMOVE] sensor sensor_id=%s status=%s", sensor.get("sensor_id"), sensor.get("status"))
+                with app.app_context():
+                    try:
+                        _persist_sensor_timeout(int(sensor["sensor_id"]), sensor)
+                    except Exception as exc:
+                        db.session.rollback()
+                        LOGGER.warning("[WebSocket] Failed to persist sensor timeout for %s: %s", sensor.get("sensor_id"), exc)
                 _emit_socket_event(
                     socketio,
                     SENSOR_STATUS_UPDATE_EVENT,
                     {"event": SENSOR_STATUS_UPDATE_EVENT, "data": sensor},
                     room=DASHBOARD_ROOM,
                 )
-            next_cleanup_at = now + 2.0
+            next_cleanup_at = now + LIVE_STATE_SWEEP_INTERVAL_SECONDS
+
+        if now >= next_db_cleanup_at:
+            with app.app_context():
+                try:
+                    updated_rows = _mark_stale_network_rows_inactive()
+                    if updated_rows:
+                        CLEANUP_LOGGER.info("[Cleanup] Marked %s stale wifi networks inactive", updated_rows)
+                except Exception as exc:
+                    db.session.rollback()
+                    CLEANUP_LOGGER.warning("[Cleanup] Failed to mark stale wifi networks inactive: %s", exc)
+            next_db_cleanup_at = now + LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS
 
         if now >= next_snapshot_at:
             _emit_snapshot(socketio)
-            next_snapshot_at = now + 1.0
+            next_snapshot_at = now + SNAPSHOT_INTERVAL_SECONDS
 
         time.sleep(0.2)
 
 
-def start_realtime_state_thread(socketio: SocketIO) -> None:
+def start_realtime_state_thread(app, socketio: SocketIO) -> None:
     global _realtime_state_thread_started
 
     with _realtime_state_thread_lock:
@@ -1384,7 +1453,7 @@ def start_realtime_state_thread(socketio: SocketIO) -> None:
 
         realtime_thread = threading.Thread(
             target=_realtime_state_loop,
-            args=(socketio,),
+            args=(app, socketio),
             daemon=True,
             name="zeinaguard-realtime-state",
         )
@@ -1414,7 +1483,7 @@ def init_socketio(app):
     )
 
     start_cleanup_thread(app)
-    start_realtime_state_thread(socketio)
+    start_realtime_state_thread(app, socketio)
     persistence_manager = _get_persistence_manager(app)
 
     @socketio.on("connect")
@@ -1561,6 +1630,7 @@ def init_socketio(app):
                 "timestamp": datetime.utcnow().isoformat(),
             },
         )
+        _emit_snapshot(socketio)
 
     @socketio.on("new_threat")
     def handle_new_threat(payload):

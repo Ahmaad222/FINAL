@@ -63,25 +63,29 @@ load_env() {
 }
 
 install_required_packages() {
+  local missing_packages=()
+
+  command -v gcc >/dev/null 2>&1 || missing_packages+=("build-essential")
+  command -v curl >/dev/null 2>&1 || missing_packages+=("curl" "ca-certificates")
+  command -v lsof >/dev/null 2>&1 || missing_packages+=("lsof")
+  command -v psql >/dev/null 2>&1 || missing_packages+=("postgresql-client")
+  command -v pg_isready >/dev/null 2>&1 || missing_packages+=("postgresql")
+  command -v python3 >/dev/null 2>&1 || missing_packages+=("python3")
+  python3 -m pip --version >/dev/null 2>&1 || missing_packages+=("python3-pip")
+  python3 -m venv --help >/dev/null 2>&1 || missing_packages+=("python3-venv")
+
+  if [ "${#missing_packages[@]}" -eq 0 ]; then
+    log "[SKIP] System packages already installed"
+    return
+  fi
+
   if ! command -v apt-get >/dev/null 2>&1; then
     fail "Automatic package installation currently supports apt-get based Linux distributions."
   fi
 
-  log "Installing required system packages"
+  log "Installing required system packages: ${missing_packages[*]}"
   run_maybe_sudo apt-get update
-  run_maybe_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y \
-    build-essential \
-    ca-certificates \
-    curl \
-    libpq-dev \
-    lsof \
-    postgresql \
-    postgresql-client \
-    postgresql-contrib \
-    python3 \
-    python3-dev \
-    python3-pip \
-    python3-venv
+  run_maybe_sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing_packages[@]}" libpq-dev python3-dev postgresql-contrib
 }
 
 install_optional_redis() {

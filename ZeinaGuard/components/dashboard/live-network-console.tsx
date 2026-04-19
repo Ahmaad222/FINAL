@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, AlertTriangle, Radio, Wifi, WifiOff, Zap } from 'lucide-react';
 import { toast } from 'sonner';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -124,6 +124,12 @@ export function LiveNetworkConsole() {
 
   const signalHistoryRef = useRef<Record<string, number[]>>({});
 
+  const apiBase = (
+    process.env.NEXT_PUBLIC_API_URL ||
+    process.env.NEXT_PUBLIC_BACKEND_URL ||
+    'http://localhost:8000'
+  ).replace(/\/$/, '');
+
   const appendActivity = (item: ActivityItem) => {
     setActivity((current) => [item, ...current].slice(0, 20));
   };
@@ -166,13 +172,14 @@ export function LiveNetworkConsole() {
       });
     },
     onNetworkRemoved: (event) => {
-      const network = normalizeNetwork(event.data);
+      const normalizedBssid = event.bssid.toUpperCase();
+      setNetworks((current) => current.filter((network) => network.bssid !== normalizedBssid));
       appendActivity({
-        id: `removed-${network.bssid}-${network.last_seen}`,
+        id: `removed-${normalizedBssid}-${Date.now()}`,
         type: 'status',
         title: 'Network removed',
-        detail: `${network.ssid || 'Hidden'} | ${network.bssid}`,
-        timestamp: network.last_seen,
+        detail: normalizedBssid,
+        timestamp: new Date().toISOString(),
       });
     },
     onThreatDetected: (event) => {
@@ -241,7 +248,44 @@ export function LiveNetworkConsole() {
     },
   });
 
-  const loading = !hasNetworkSnapshot || !hasSensorSnapshot;
+  const loading = !hasNetworkSnapshot;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const refreshActiveNetworks = async () => {
+      try {
+        const response = await fetch(`${apiBase}/networks/active`, {
+          cache: 'no-store',
+        });
+        if (!response.ok) {
+          throw new Error(`Active network request failed (${response.status})`);
+        }
+
+        const payload = await response.json();
+        if (cancelled) {
+          return;
+        }
+
+        const nextNetworks = Array.isArray(payload.networks)
+          ? payload.networks.map((network: LiveNetworkEvent) => normalizeNetwork(network))
+          : [];
+        trackSignalHistory(nextNetworks);
+        setNetworks(nextNetworks);
+        setHasNetworkSnapshot(true);
+      } catch (error) {
+        console.error('[ACTIVE NETWORK POLL] failed', error);
+      }
+    };
+
+    refreshActiveNetworks();
+    const interval = window.setInterval(refreshActiveNetworks, 60000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [apiBase]);
 
   const networkList = useMemo(() => {
     const filtered = filter === 'ALL'

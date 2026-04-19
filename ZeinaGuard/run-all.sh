@@ -5,9 +5,18 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 LOG_DIR="$ROOT_DIR/logs"
 STATE_DIR="$ROOT_DIR/.zeinaguard-runtime"
+FAST_MODE=0
 
-log() {
+log_step() {
   printf '[run-all] %s\n' "$*"
+}
+
+log_ok() {
+  printf '[OK] %s\n' "$*"
+}
+
+log_skip() {
+  printf '[SKIP] %s\n' "$*"
 }
 
 warn() {
@@ -17,6 +26,20 @@ warn() {
 fail() {
   printf '[ERROR] %s\n' "$*" >&2
   exit 1
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --fast)
+        FAST_MODE=1
+        ;;
+      *)
+        fail "Unknown option: $1"
+        ;;
+    esac
+    shift
+  done
 }
 
 run_maybe_sudo() {
@@ -55,7 +78,7 @@ NEXT_PUBLIC_API_URL=http://localhost:5000
 
 JWT_SECRET_KEY=super_secret_key
 EOF
-  log "Created default .env file at $ENV_FILE"
+  log_ok "Created default .env file"
 }
 
 load_env() {
@@ -75,11 +98,10 @@ fix_project_permissions() {
   fi
 
   if [ -w "$ROOT_DIR" ] && { [ ! -d "$ROOT_DIR/node_modules" ] || [ -w "$ROOT_DIR/node_modules" ]; }; then
-    log "Project ownership looks okay; skipping recursive chown"
     return
   fi
 
-  log "Fixing project ownership for $ROOT_DIR"
+  log_step "Fixing project ownership"
   run_maybe_sudo chown -R "$USER:$USER" "$ROOT_DIR" || true
 }
 
@@ -118,7 +140,7 @@ stop_pid_file() {
 
   pid="$(cat "$pid_file" 2>/dev/null || true)"
   if [ -n "$pid" ] && process_running "$pid"; then
-    log "Stopping previous $name process ($pid)"
+    log_step "Stopping previous $name process ($pid)"
     kill "$pid" >/dev/null 2>&1 || true
     wait_for_process_exit "$pid"
   fi
@@ -207,40 +229,73 @@ wait_for_http() {
   fail "$name health check failed for $url"
 }
 
+sha256_file() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
 prepare_frontend() {
-  log "Preparing frontend toolchain"
-  log "Loading Node helper"
+  local lock_file="$ROOT_DIR/pnpm-lock.yaml"
+  local lock_hash_file="$ROOT_DIR/node_modules/.pnpm-lock.sha256"
+  local current_lock_hash=""
+  local saved_lock_hash=""
+
+  log_step "Preparing frontend toolchain"
   # shellcheck source=/dev/null
   source "$ROOT_DIR/fix-node.sh"
-  log "Ensuring Node.js 20, npm, and pnpm"
+
+  if [ "$FAST_MODE" = "1" ]; then
+    if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+      fix_node_load_nvm
+      nvm use "$(fix_node_requested_version)" >/dev/null 2>&1 || true
+      hash -r
+    fi
+    command -v pnpm >/dev/null 2>&1 || fail "Fast mode requires pnpm to already be installed."
+    [ -d "$ROOT_DIR/node_modules" ] || fail "Fast mode requires existing node_modules."
+    log_skip "Frontend dependency install skipped (--fast)"
+    return
+  fi
+
   ensure_zeinaguard_node_toolchain
 
-  log "Checking project ownership"
   fix_project_permissions
-  log "Cleaning npm cache"
-  npm cache clean --force >/dev/null 2>&1 || true
 
-  log "Removing old frontend install artifacts"
-  rm -rf "$ROOT_DIR/node_modules"
-  rm -f "$ROOT_DIR/package-lock.json"
+  if [ -f "$lock_file" ]; then
+    current_lock_hash="$(sha256_file "$lock_file")"
+  fi
+  if [ -f "$lock_hash_file" ]; then
+    saved_lock_hash="$(tr -d '[:space:]' < "$lock_hash_file")"
+  fi
 
-  log "Installing frontend dependencies with pnpm"
+  if [ -d "$ROOT_DIR/node_modules" ] && [ -n "$current_lock_hash" ] && [ "$current_lock_hash" = "$saved_lock_hash" ]; then
+    log_skip "Frontend dependencies already installed"
+    return
+  fi
+
+  log_step "Installing frontend dependencies with pnpm"
   (
     cd "$ROOT_DIR"
     pnpm install
   )
+  mkdir -p "$ROOT_DIR/node_modules"
+  if [ -n "$current_lock_hash" ]; then
+    printf '%s\n' "$current_lock_hash" > "$lock_hash_file"
+  fi
+  log_ok "Frontend dependencies ready"
 }
 
 prepare_python_envs() {
-  log "Rebuilding backend virtual environment"
-  bash "$ROOT_DIR/fix-python.sh" backend
+  if [ "$FAST_MODE" = "1" ]; then
+    ZEINAGUARD_FAST=1 bash "$ROOT_DIR/fix-python.sh" backend --fast
+    ZEINAGUARD_FAST=1 bash "$ROOT_DIR/fix-python.sh" sensor --fast
+    return
+  fi
 
-  log "Rebuilding sensor virtual environment"
+  bash "$ROOT_DIR/fix-python.sh" backend
   bash "$ROOT_DIR/fix-python.sh" sensor
 }
 
 start_backend() {
-  log "Starting backend"
+  log_step "Starting backend"
   ensure_port_available "backend" "5000"
   start_command \
     "backend" \
@@ -250,10 +305,11 @@ start_backend() {
     --bind 0.0.0.0:5000 \
     app:app
   wait_for_http "backend" "http://localhost:5000/health" 90 '"status":"healthy"'
+  log_ok "Backend ready"
 }
 
 start_frontend() {
-  log "Starting frontend"
+  log_step "Starting frontend"
   ensure_port_available "frontend" "3000"
   start_command \
     "frontend" \
@@ -261,11 +317,13 @@ start_frontend() {
     pnpm \
     dev
   wait_for_http "frontend" "http://localhost:3000" 120
+  log_ok "Frontend ready"
 }
 
 start_sensor() {
   local sensor_python="$ROOT_DIR/sensor/.venv/bin/python"
-  log "Starting sensor"
+
+  log_step "Starting sensor"
   stop_pid_file "sensor"
 
   if command -v sudo >/dev/null 2>&1; then
@@ -291,6 +349,8 @@ start_sensor() {
       "$sensor_python" \
       "$ROOT_DIR/sensor/main.py"
   fi
+
+  log_ok "Sensor running"
 }
 
 print_ready() {
@@ -306,13 +366,18 @@ EOF
 }
 
 main() {
+  parse_args "$@"
   ensure_linux
   ensure_default_env
   load_env
   ensure_runtime_dirs
 
-  bash "$ROOT_DIR/setup-check.sh"
-  load_env
+  if [ "$FAST_MODE" = "1" ]; then
+    log_skip "Skipping setup checks (--fast)"
+  else
+    bash "$ROOT_DIR/setup-check.sh"
+    load_env
+  fi
 
   prepare_frontend
   prepare_python_envs

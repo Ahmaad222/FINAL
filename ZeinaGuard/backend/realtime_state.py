@@ -10,8 +10,8 @@ from datetime import datetime
 from typing import Any
 
 
-NETWORK_TTL_SECONDS = float(os.getenv("LIVE_NETWORK_TTL_SECONDS", "8"))
-SENSOR_TTL_SECONDS = float(os.getenv("LIVE_SENSOR_TTL_SECONDS", "10"))
+NETWORK_TTL_SECONDS = float(os.getenv("LIVE_NETWORK_TTL_SECONDS", "60"))
+SENSOR_TTL_SECONDS = float(os.getenv("LIVE_SENSOR_TTL_SECONDS", "30"))
 
 _state_lock = threading.Lock()
 _active_networks: dict[str, dict[str, Any]] = {}
@@ -103,6 +103,21 @@ def get_network(bssid: str) -> dict[str, Any] | None:
 def get_network_snapshot() -> list[dict[str, Any]]:
     with _state_lock:
         snapshot = [network.copy() for network in _active_networks.values()]
+
+    snapshot.sort(key=lambda item: item.get("last_seen") or "", reverse=True)
+    return snapshot
+
+
+def get_active_network_snapshot(*, max_age_seconds: float | None = None) -> list[dict[str, Any]]:
+    threshold_seconds = NETWORK_TTL_SECONDS if max_age_seconds is None else max_age_seconds
+    now = _utcnow()
+
+    with _state_lock:
+        snapshot = [
+            network.copy()
+            for network in _active_networks.values()
+            if (now - _parse_timestamp(network.get("last_seen"))).total_seconds() <= threshold_seconds
+        ]
 
     snapshot.sort(key=lambda item: item.get("last_seen") or "", reverse=True)
     return snapshot

@@ -13,10 +13,12 @@ from models import (
     Incident, Alert, User, AlertRule, db
 )
 from websocket_server import get_connected_sensors_snapshot
-from realtime_state import get_network_snapshot as get_realtime_network_snapshot
+from realtime_state import get_active_network_snapshot as get_realtime_active_network_snapshot
 
 dashboard_bp = Blueprint('dashboard', __name__, url_prefix='/api/dashboard')
-SENSOR_HEARTBEAT_STALE_SECONDS = int(os.getenv('SENSOR_HEARTBEAT_STALE_SECONDS', '15'))
+active_networks_bp = Blueprint('active_networks', __name__)
+SENSOR_HEARTBEAT_STALE_SECONDS = int(os.getenv('SENSOR_HEARTBEAT_STALE_SECONDS', '30'))
+ACTIVE_NETWORK_WINDOW_SECONDS = int(os.getenv('LIVE_NETWORK_TTL_SECONDS', '60'))
 
 
 def _format_live_network(network: WiFiNetwork):
@@ -35,9 +37,28 @@ def _format_live_network(network: WiFiNetwork):
         'signal': network.signal_strength,
         'channel': network.channel,
         'classification': classification,
+        'last_seen': network.last_seen.isoformat() if network.last_seen else None,
         'timestamp': network.last_seen.isoformat() if network.last_seen else None,
         'manufacturer': manufacturer,
     }
+
+
+def _active_network_cutoff():
+    return datetime.utcnow() - timedelta(seconds=ACTIVE_NETWORK_WINDOW_SECONDS)
+
+
+def _query_active_network_rows(limit: int, classification: str):
+    cutoff = _active_network_cutoff()
+    query = WiFiNetwork.query.filter(
+        WiFiNetwork.is_active.is_(True),
+        WiFiNetwork.last_seen >= cutoff,
+    ).order_by(
+        desc(WiFiNetwork.last_seen),
+        desc(WiFiNetwork.signal_strength),
+    )
+    if classification in {'ROGUE', 'SUSPICIOUS', 'LEGIT'}:
+        query = query.filter(func.upper(WiFiNetwork.classification) == classification)
+    return query.limit(limit).all()
 
 
 def _effective_sensor_status(sensor: Sensor, latest_health: SensorHealth | None, realtime_status: dict | None = None):
@@ -171,21 +192,45 @@ def get_overview():
 @dashboard_bp.route('/networks', methods=['GET'])
 @jwt_required(optional=True)
 def get_live_networks():
-    """Return the authoritative in-memory live network snapshot."""
+    """Return active networks for non-WebSocket consumers."""
     try:
         limit = max(1, min(int(request.args.get('limit', 500)), 1000))
         classification = (request.args.get('classification') or '').upper()
-        networks = get_realtime_network_snapshot()
-        if classification in {'ROGUE', 'SUSPICIOUS', 'LEGIT'}:
-            networks = [network for network in networks if network.get('classification') == classification]
-        networks = networks[:limit]
+        networks = _query_active_network_rows(limit, classification)
+        return jsonify({
+            'networks': [_format_live_network(network) for network in networks],
+            'count': len(networks),
+            'generated_at': datetime.utcnow().isoformat(),
+        }), 200
+    except Exception as e:
+        return jsonify({'error': f'Failed to get live networks: {str(e)}'}), 500
+
+
+@active_networks_bp.route('/networks/active', methods=['GET'])
+@jwt_required(optional=True)
+def get_active_networks():
+    """Return only networks seen within the active realtime window."""
+    try:
+        limit = max(1, min(int(request.args.get('limit', 500)), 1000))
+        classification = (request.args.get('classification') or '').upper()
+        database_rows = _query_active_network_rows(limit, classification)
+        realtime_rows = get_realtime_active_network_snapshot(max_age_seconds=ACTIVE_NETWORK_WINDOW_SECONDS)
+
+        if realtime_rows:
+            if classification in {'ROGUE', 'SUSPICIOUS', 'LEGIT'}:
+                realtime_rows = [network for network in realtime_rows if network.get('classification') == classification]
+            realtime_rows = realtime_rows[:limit]
+            networks = realtime_rows
+        else:
+            networks = [_format_live_network(network) for network in database_rows]
+
         return jsonify({
             'networks': networks,
             'count': len(networks),
             'generated_at': datetime.utcnow().isoformat(),
         }), 200
     except Exception as e:
-        return jsonify({'error': f'Failed to get live networks: {str(e)}'}), 500
+        return jsonify({'error': f'Failed to get active networks: {str(e)}'}), 500
 
 
 @dashboard_bp.route('/threat-events', methods=['GET'])
