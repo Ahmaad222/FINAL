@@ -48,6 +48,25 @@ logger = configure_logging()
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
+
+def _flask_cors_origins() -> list[str]:
+    """Origins allowed for REST + credentialed CORS. Socket.IO may still use '*'."""
+    defaults = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://[::1]:3000",
+    ]
+    raw = os.getenv("CORS_ORIGINS", "")
+    extra = [o.strip() for o in raw.split(",") if o.strip()]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for origin in defaults + extra:
+        if origin not in seen:
+            seen.add(origin)
+            merged.append(origin)
+    return merged
+
+
 DB_CONNECT_RETRIES = int(os.getenv("DB_CONNECT_RETRIES", "15"))
 DB_CONNECT_DELAY_SECONDS = float(os.getenv("DB_CONNECT_DELAY_SECONDS", "2"))
 
@@ -176,7 +195,11 @@ def create_app(config_object=None):
     if config_object:
         app.config.from_object(config_object)
 
-    CORS(app, resources={r"/*": {"origins": os.getenv("CORS_ORIGINS", "*")}}, supports_credentials=True)
+    CORS(
+        app,
+        resources={r"/*": {"origins": _flask_cors_origins()}},
+        supports_credentials=True,
+    )
 
     db.init_app(app)
     JWTManager(app)

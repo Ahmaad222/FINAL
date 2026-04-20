@@ -12,7 +12,7 @@ from sqlalchemy import desc
 sensors_bp = Blueprint('sensors', __name__, url_prefix='/api/sensors')
 
 
-@sensors_bp.route('/', methods=['GET'])
+@sensors_bp.route('/', methods=['GET'], strict_slashes=False)
 @jwt_required(optional=True)
 def get_sensors():
     try:

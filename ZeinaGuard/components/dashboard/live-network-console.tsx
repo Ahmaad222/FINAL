@@ -144,7 +144,7 @@ export function LiveNetworkConsole() {
     }
   };
 
-  const { isConnected, sendAttackCommand } = useSocket({
+  const { isConnected, sendExecuteAttack } = useSocket({
     onNetworkSnapshot: (event) => {
       const nextNetworks = (event.data || []).map(normalizeNetwork);
       trackSignalHistory(nextNetworks);
@@ -313,14 +313,26 @@ export function LiveNetworkConsole() {
   const onlineSensors = sensorStatuses.filter((sensor) => sensor.status !== 'offline').length;
 
   const handleAttack = (network: LiveNetworkEvent) => {
-    try {
-      sendAttackCommand({
-        sensor_id: network.sensor_id,
-        bssid: network.bssid,
+    if (!isConnected()) {
+      toast.error('Realtime disconnected', {
+        description: 'Reconnect before initiating containment.',
       });
+      return;
+    }
+
+    const label = network.ssid?.trim() ? network.ssid : 'Hidden';
+
+    try {
+      sendExecuteAttack({
+        action: 'deauth',
+        sensor_id: network.sensor_id,
+        target_bssid: network.bssid,
+        channel: network.channel ?? null,
+      });
+      toast.info(`Initiating Containment on ${label}`);
       setAttackState(`Dispatching deauth command for ${network.bssid} via sensor #${network.sensor_id}`);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to send attack command';
+      const message = error instanceof Error ? error.message : 'Failed to send containment command';
       setAttackState(message);
       toast.error('Attack dispatch failed', { description: message });
     }
@@ -436,6 +448,7 @@ export function LiveNetworkConsole() {
                             type="button"
                             size="sm"
                             className="bg-red-600 text-white hover:bg-red-500"
+                            disabled={!isConnected()}
                             onClick={() => handleAttack(network)}
                           >
                             Attack

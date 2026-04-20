@@ -1732,9 +1732,17 @@ def init_socketio(app):
             db.session.rollback()
             LOGGER.warning("[WebSocket] Failed to persist sensor heartbeat: %s", exc)
 
-    @socketio.on(ATTACK_COMMAND_EVENT)
-    def handle_attack_command(payload):
-        payload = sanitize_json_payload(payload or {})
+    def _resolve_deauth_channel(payload: dict[str, Any], network_snapshot: dict[str, Any] | None) -> int | None:
+        raw = payload.get("channel")
+        if raw is not None and raw != "":
+            ch = _safe_int(raw, default=0)
+            return ch if ch else None
+        snap = network_snapshot or {}
+        ch2 = _safe_int(snap.get("channel"), default=0)
+        return ch2 if ch2 else None
+
+    def _dispatch_dashboard_deauth(raw_payload: dict[str, Any], *, source_event: str) -> None:
+        payload = sanitize_json_payload(raw_payload or {})
         sensor_id = None
         bssid = None
         channel = None
@@ -1744,9 +1752,9 @@ def init_socketio(app):
             action = sanitize_input(str(payload.get("action") or "deauth"), max_length=50) or "deauth"
 
             if sensor_id is None:
-                raise ValueError("attack_command missing sensor_id")
+                raise ValueError(f"{source_event} missing sensor_id")
             if not bssid:
-                raise ValueError("attack_command missing bssid")
+                raise ValueError(f"{source_event} missing bssid or target_bssid")
 
             sensor = db.session.get(Sensor, sensor_id)
             if sensor is None:
@@ -1760,7 +1768,7 @@ def init_socketio(app):
             if _safe_int(network_snapshot.get("sensor_id"), default=0) != sensor_id:
                 raise ValueError(f"Network {bssid} is not owned by sensor {sensor_id}")
 
-            channel = _safe_int(network_snapshot.get("channel"), default=0) or None
+            channel = _resolve_deauth_channel(payload, network_snapshot)
 
             sensor_sid = get_sensor_socket_id(sensor_id)
             if not sensor_sid:
@@ -1772,18 +1780,24 @@ def init_socketio(app):
                 "bssid": bssid,
                 "channel": channel,
             }
+            relay_to_sensor = {
+                "action": action,
+                "sensor_id": sensor_id,
+                "target_bssid": bssid,
+                "bssid": bssid,
+                "channel": channel,
+            }
             _emit_socket_event(
                 socketio,
                 ATTACK_COMMAND_EVENT,
                 {
                     **command_payload,
-                    "sensor_id": sensor_id,
                     "timestamp": datetime.utcnow().isoformat(),
                     "status": "dispatched",
                 },
                 room=DASHBOARD_ROOM,
             )
-            _emit_socket_event(socketio, EXECUTE_ATTACK_EVENT, command_payload, room=sensor_sid)
+            _emit_socket_event(socketio, EXECUTE_ATTACK_EVENT, relay_to_sensor, room=sensor_sid)
             _emit_context_event(
                 "attack_command_ack",
                 {
@@ -1795,7 +1809,7 @@ def init_socketio(app):
                 },
             )
         except Exception as exc:
-            LOGGER.warning("[WebSocket] attack_command rejected: %s", exc)
+            LOGGER.warning("[WebSocket] %s rejected: %s", source_event, exc)
             _emit_context_event(
                 "attack_command_ack",
                 {
@@ -1807,6 +1821,15 @@ def init_socketio(app):
                     "timestamp": datetime.utcnow().isoformat(),
                 },
             )
+
+    @socketio.on(ATTACK_COMMAND_EVENT)
+    def handle_attack_command(payload):
+        _dispatch_dashboard_deauth(payload or {}, source_event=ATTACK_COMMAND_EVENT)
+
+    @socketio.on(EXECUTE_ATTACK_EVENT)
+    def handle_execute_attack_from_dashboard(payload):
+        """Dashboard containment: validate then relay deauth to the sensor as execute_attack."""
+        _dispatch_dashboard_deauth(payload or {}, source_event=EXECUTE_ATTACK_EVENT)
 
     @socketio.on(ATTACK_ACK_EVENT)
     def handle_attack_ack(payload):

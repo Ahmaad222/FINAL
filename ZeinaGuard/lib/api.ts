@@ -3,7 +3,15 @@
  * Handles all HTTP requests to Flask backend
  */
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+function resolveApiBaseUrl(): string {
+  const raw =
+    process.env.NEXT_PUBLIC_API_URL ||
+    process.env.NEXT_PUBLIC_BACKEND_URL ||
+    'http://localhost:5000';
+  return raw.replace(/\/+$/, '');
+}
+
+const API_URL = resolveApiBaseUrl();
 
 // Token storage keys
 const ACCESS_TOKEN_KEY = 'zeinaguard_access_token';
@@ -100,13 +108,25 @@ async function apiRequest<T = any>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<ApiResponse<T>> {
-  const url = `${API_URL}${endpoint}`;
+  const path = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  const url = `${API_URL}${path}`;
   const token = getAccessToken();
 
+  const method = (options.method || 'GET').toUpperCase();
+  const hasJsonBody =
+    options.body !== undefined &&
+    options.body !== null &&
+    options.body !== '';
+
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> || {}),
   };
+
+  if (hasJsonBody || ['POST', 'PUT', 'PATCH'].includes(method)) {
+    if (!headers['Content-Type'] && !headers['content-type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+  }
 
   if (token) {
     headers['Authorization'] = `Bearer ${token}`;
@@ -118,7 +138,23 @@ async function apiRequest<T = any>(
       headers,
     });
 
-    const data = await response.json();
+    const ct = response.headers.get('content-type') || '';
+    let data: unknown;
+    if (ct.includes('application/json')) {
+      data = await response.json();
+    } else {
+      const text = await response.text();
+      try {
+        data = text ? JSON.parse(text) : null;
+      } catch {
+        if (!response.ok) {
+          return {
+            error: text?.slice(0, 200) || `HTTP ${response.status}`,
+          };
+        }
+        return { error: 'Invalid JSON response from server' };
+      }
+    }
 
     if (!response.ok) {
       // Handle 401 - token expired or invalid

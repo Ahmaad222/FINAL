@@ -95,6 +95,14 @@ export interface AttackCommandAckEvent {
   timestamp: string;
 }
 
+/** Dashboard → server → sensor containment (deauth) payload for `execute_attack` */
+export interface ExecuteAttackPayload {
+  action: 'deauth';
+  sensor_id: number;
+  target_bssid: string;
+  channel: number | null;
+}
+
 interface UseSocketOptions {
   onNetworkSnapshot?: (event: NetworkSnapshotEvent) => void;
   onSensorSnapshot?: (event: SensorSnapshotEvent) => void;
@@ -292,6 +300,15 @@ export function useSocket(options: UseSocketOptions = {}) {
     socketRef.current.emit('attack_command', payload);
   }, []);
 
+  const sendExecuteAttack = useCallback((payload: ExecuteAttackPayload) => {
+    if (!socketRef.current?.connected) {
+      throw new Error('Socket is not connected');
+    }
+
+    console.log('[SOCKET EMIT] execute_attack', payload);
+    socketRef.current.emit('execute_attack', payload);
+  }, []);
+
   useEffect(() => {
     if (!autoConnect) {
       return;
@@ -309,6 +326,7 @@ export function useSocket(options: UseSocketOptions = {}) {
     isConnected,
     getSocket,
     sendAttackCommand,
+    sendExecuteAttack,
   };
 }
 
