@@ -17,8 +17,11 @@ fail() {
   exit 1
 }
 
+# --- تم إصلاح المشكلة هنا ---
 run_maybe_sudo() {
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+  local user_id
+  user_id=$(id -u)
+  if [ "$user_id" -eq 0 ]; then
     "$@"
   elif command -v sudo >/dev/null 2>&1; then
     sudo "$@"
@@ -26,6 +29,7 @@ run_maybe_sudo() {
     fail "This action requires sudo: $*"
   fi
 }
+# ----------------------------
 
 ensure_linux() {
   [ "$(uname -s)" = "Linux" ] || fail "setup-check.sh supports Linux only."
