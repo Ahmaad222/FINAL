@@ -299,6 +299,40 @@ require_sudo_access() {
   sudo -v
 }
 
+build_sensor_command() {
+  local -n out_command_ref="$1"
+  local sensor_shell_command=""
+  local preserve_env_vars=""
+
+  printf -v sensor_shell_command 'source %q && exec python %q' \
+    "$SENSOR_DIR/.venv/bin/activate" \
+    "$SENSOR_DIR/main.py"
+
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    out_command_ref=(bash -lc "$sensor_shell_command")
+    return
+  fi
+
+  preserve_env_vars="BACKEND_URL,ZEINAGUARD_NONINTERACTIVE,SENSOR_INTERFACE,ZEINAGUARD_SENSOR_ID,ZEINAGUARD_SENSOR_REGISTRATION_KEY"
+  out_command_ref=(sudo --preserve-env="$preserve_env_vars" bash -lc "$sensor_shell_command")
+}
+
+verify_sensor_launcher() {
+  local sensor_shell_command=""
+
+  printf -v sensor_shell_command 'source %q && command -v python >/dev/null && python -c %q >/dev/null' \
+    "$SENSOR_DIR/.venv/bin/activate" \
+    'import sys; raise SystemExit(0 if sys.prefix != getattr(sys, "base_prefix", sys.prefix) else 1)'
+
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    bash -lc "$sensor_shell_command" || fail "Sensor virtual environment is not usable as root"
+    return
+  fi
+
+  sudo --preserve-env=BACKEND_URL,ZEINAGUARD_NONINTERACTIVE,SENSOR_INTERFACE,ZEINAGUARD_SENSOR_ID,ZEINAGUARD_SENSOR_REGISTRATION_KEY \
+    bash -lc "$sensor_shell_command" || fail "Sensor virtual environment is not usable through sudo"
+}
+
 start_service() {
   local service_name="$1"
   local workdir="$2"
@@ -467,12 +501,8 @@ main() {
   stop_pid_file_if_present "sensor"
 
   require_sudo_access
-
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    sensor_command=("$SENSOR_DIR/.venv/bin/python" "$SENSOR_DIR/main.py")
-  else
-    sensor_command=(sudo -E "$SENSOR_DIR/.venv/bin/python" "$SENSOR_DIR/main.py")
-  fi
+  verify_sensor_launcher
+  build_sensor_command sensor_command
 
   start_service "backend" "$BACKEND_DIR" "$BACKEND_LOG" \
     env FLASK_PORT="$BACKEND_PORT" BACKEND_URL="$BACKEND_URL" \
