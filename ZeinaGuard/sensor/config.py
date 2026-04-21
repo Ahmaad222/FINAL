@@ -9,8 +9,9 @@ _parsed_backend_url = urlparse(BACKEND_URL)
 BACKEND_HOST = _parsed_backend_url.hostname or "localhost"
 BACKEND_PORT = _parsed_backend_url.port or 5000
 
+ENV_INTERFACE = (os.getenv("SENSOR_INTERFACE") or "").strip()
 LOCKED_CHANNEL = None
-INTERFACE = os.getenv("SENSOR_INTERFACE", "wlan0")
+INTERFACE = ENV_INTERFACE or "wlan0"
 
 TRUSTED_APS = {
     "WE_EDF20C": {
@@ -38,7 +39,7 @@ def _linux_wireless_interfaces():
 
 def list_wireless_interfaces():
     interfaces = _linux_wireless_interfaces()
-    if not interfaces and INTERFACE:
+    if not interfaces and os.name == "nt" and INTERFACE:
         return [INTERFACE]
     return interfaces
 
@@ -73,10 +74,24 @@ def _can_prompt_for_interface():
 
 def select_wireless_interface():
     interfaces = list_wireless_interfaces()
+    requested_interface = (os.getenv("SENSOR_INTERFACE") or "").strip()
 
     if not interfaces:
-        print("No wireless interfaces detected. Falling back to wlan0.")
-        set_interface("wlan0")
+        if os.name == "nt":
+            print("No wireless interfaces detected on Windows. Falling back to wlan0.")
+            set_interface("wlan0")
+            return INTERFACE
+        raise RuntimeError("No wireless interfaces detected. Set SENSOR_INTERFACE to a valid adapter before starting the sensor.")
+
+    if requested_interface:
+        requested_path = Path("/sys/class/net") / requested_interface
+        if requested_interface not in interfaces and not requested_path.exists():
+            raise RuntimeError(
+                f"Configured SENSOR_INTERFACE '{requested_interface}' is unavailable. "
+                f"Detected interfaces: {', '.join(interfaces)}"
+            )
+        print(f"Using configured wireless interface: {requested_interface}")
+        set_interface(requested_interface)
         return INTERFACE
 
     selected = _default_interface(interfaces)

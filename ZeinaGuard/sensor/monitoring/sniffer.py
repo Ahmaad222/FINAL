@@ -1,4 +1,5 @@
 from datetime import datetime
+import logging
 import os
 import threading
 import time
@@ -23,6 +24,7 @@ from utils import (
 
 clients_map = {}
 aps_state = {}
+LOGGER = logging.getLogger("zeinaguard.sensor.sniffer")
 
 AP_TIMEOUT = 60
 START_TIME = time.time()
@@ -127,19 +129,30 @@ def channel_hopper():
 def start_monitoring():
     interface_name = config.get_interface()
 
-    if not os.path.exists(f"/sys/class/net/{interface_name}"):
-        update_status(sensor_status="error", message=f"Interface not found: {interface_name}")
-        return
+    if os.name != "nt" and not os.path.exists(f"/sys/class/net/{interface_name}"):
+        detected_interfaces = config.list_wireless_interfaces()
+        detected_summary = ", ".join(detected_interfaces) if detected_interfaces else "none"
+        message = f"Interface not found: {interface_name}. Detected interfaces: {detected_summary}"
+        update_status(sensor_status="error", message=message)
+        raise RuntimeError(message)
 
     if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 0:
-        update_status(sensor_status="error", message="Root privileges required for sniffing")
-        return
+        message = "Root privileges required for sniffing"
+        update_status(sensor_status="error", message=message)
+        raise PermissionError(message)
 
     threading.Thread(target=channel_hopper, daemon=True).start()
     threading.Thread(target=ap_cleaner, daemon=True).start()
     update_status(sensor_status="monitoring", message=f"Sniffing on {interface_name}")
+    LOGGER.info("[Sensor] Starting packet capture on interface=%s", interface_name)
 
     try:
         sniff(iface=interface_name, prn=handle_packet, store=False)
     except Exception as exc:
-        update_status(sensor_status="error", message=f"Sniffing failed: {exc}")
+        message = f"Sniffing failed on {interface_name}: {exc}"
+        update_status(sensor_status="error", message=message)
+        raise RuntimeError(message) from exc
+
+    message = f"Packet capture stopped unexpectedly on {interface_name}"
+    update_status(sensor_status="error", message=message)
+    raise RuntimeError(message)

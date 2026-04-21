@@ -29,6 +29,8 @@ declare -a BACKEND_RETRY_DELAYS=(1 1 2 2 3 3 5 5 8 10)
 
 SELECTED_SENSOR_INTERFACE=""
 SHUTDOWN_DONE=0
+SENSOR_RESTART_COUNT=0
+SENSOR_MAX_RESTARTS=1
 
 log() {
   printf '[run.sh] %s\n' "$*"
@@ -417,8 +419,8 @@ run_sensor_command() {
     SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
     ZEINAGUARD_NONINTERACTIVE=1 \
     PYTHONUNBUFFERED=1 \
-    exec sudo -n \
-      --preserve-env=BACKEND_URL,SENSOR_INTERFACE,ZEINAGUARD_NONINTERACTIVE,PYTHONUNBUFFERED \
+    SENSOR_LOG_FILE="$SENSOR_LOG" \
+    exec sudo -n -E \
       "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" "$@"
   )
 }
@@ -503,7 +505,49 @@ start_service() {
   write_pid_file
 
   sleep 2
-  process_running "$pid" || fail "$service_name failed to stay running. See $log_file"
+  process_running "$pid"
+}
+
+recent_log_excerpt() {
+  local log_file="$1"
+  local lines="${2:-20}"
+
+  if [ ! -f "$log_file" ]; then
+    return 0
+  fi
+
+  tail -n "$lines" "$log_file" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
+}
+
+start_sensor_service() {
+  local startup_reason=""
+
+  start_service \
+    "sensor" \
+    "$SENSOR_DIR" \
+    "$SENSOR_LOG" \
+    env BACKEND_URL="$BACKEND_URL" SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" ZEINAGUARD_NONINTERACTIVE=1 PYTHONUNBUFFERED=1 SENSOR_LOG_FILE="$SENSOR_LOG" \
+    sudo -n -E \
+    "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" \
+    && return 0
+
+  startup_reason="$(recent_log_excerpt "$SENSOR_LOG")"
+  if [ "$SENSOR_RESTART_COUNT" -lt "$SENSOR_MAX_RESTARTS" ]; then
+    SENSOR_RESTART_COUNT=$((SENSOR_RESTART_COUNT + 1))
+    warn "Sensor exited during startup. Restarting once (${SENSOR_RESTART_COUNT}/${SENSOR_MAX_RESTARTS}). Reason: ${startup_reason:-unknown}"
+    sleep 2
+    start_service \
+      "sensor" \
+      "$SENSOR_DIR" \
+      "$SENSOR_LOG" \
+      env BACKEND_URL="$BACKEND_URL" SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" ZEINAGUARD_NONINTERACTIVE=1 PYTHONUNBUFFERED=1 SENSOR_LOG_FILE="$SENSOR_LOG" \
+      sudo -n -E \
+      "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" \
+      && return 0
+    startup_reason="$(recent_log_excerpt "$SENSOR_LOG")"
+  fi
+
+  fail "sensor failed to stay running after $((SENSOR_RESTART_COUNT + 1)) attempts. Reason: ${startup_reason:-unknown}. See $SENSOR_LOG"
 }
 
 stop_service() {
@@ -698,6 +742,8 @@ on_exit() {
 }
 
 monitor_services() {
+  local sensor_reason=""
+
   while true; do
     if ! process_running "${SERVICE_PIDS[backend]:-}"; then
       fail "Backend exited unexpectedly. See $BACKEND_LOG"
@@ -708,7 +754,23 @@ monitor_services() {
     fi
 
     if ! process_running "${SERVICE_PIDS[sensor]:-}"; then
-      fail "Sensor exited unexpectedly. See $SENSOR_LOG"
+      sensor_reason="$(recent_log_excerpt "$SENSOR_LOG")"
+      if [ "$SENSOR_RESTART_COUNT" -lt "$SENSOR_MAX_RESTARTS" ]; then
+        SENSOR_RESTART_COUNT=$((SENSOR_RESTART_COUNT + 1))
+        warn "Sensor exited unexpectedly. Restarting once (${SENSOR_RESTART_COUNT}/${SENSOR_MAX_RESTARTS}). Reason: ${sensor_reason:-unknown}"
+        stop_service "sensor"
+        sleep 2
+        start_service \
+          "sensor" \
+          "$SENSOR_DIR" \
+          "$SENSOR_LOG" \
+          env BACKEND_URL="$BACKEND_URL" SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" ZEINAGUARD_NONINTERACTIVE=1 PYTHONUNBUFFERED=1 SENSOR_LOG_FILE="$SENSOR_LOG" \
+          sudo -n -E \
+          "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" \
+          || fail "Sensor restart failed. Reason: ${sensor_reason:-unknown}. See $SENSOR_LOG"
+      else
+        fail "Sensor exited unexpectedly after restart. Reason: ${sensor_reason:-unknown}. See $SENSOR_LOG"
+      fi
     fi
 
     sleep 2
@@ -730,7 +792,8 @@ main() {
     "backend" \
     "$BACKEND_DIR" \
     "$BACKEND_LOG" \
-    env FLASK_PORT="$BACKEND_PORT" BACKEND_URL="$BACKEND_URL" "$BACKEND_VENV_PYTHON" "$BACKEND_DIR/app.py"
+    env FLASK_PORT="$BACKEND_PORT" BACKEND_URL="$BACKEND_URL" "$BACKEND_VENV_PYTHON" "$BACKEND_DIR/app.py" \
+    || fail "backend failed to stay running. See $BACKEND_LOG"
 
   wait_for_backend_health || fail "Backend failed health gating. See $BACKEND_LOG"
 
@@ -739,18 +802,13 @@ main() {
     "frontend" \
     "$FRONTEND_DIR" \
     "$FRONTEND_LOG" \
-    env NEXT_PUBLIC_API_URL="$BACKEND_URL" NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL" pnpm dev
+    env NEXT_PUBLIC_API_URL="$BACKEND_URL" NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL" pnpm dev \
+    || fail "frontend failed to stay running. See $FRONTEND_LOG"
 
   wait_for_http "http://127.0.0.1:${FRONTEND_PORT}" 10 || fail "Frontend failed health check. See $FRONTEND_LOG"
 
   log "Starting sensor"
-  start_service \
-    "sensor" \
-    "$SENSOR_DIR" \
-    "$SENSOR_LOG" \
-    env BACKEND_URL="$BACKEND_URL" SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" ZEINAGUARD_NONINTERACTIVE=1 PYTHONUNBUFFERED=1 \
-    sudo -n --preserve-env=BACKEND_URL,SENSOR_INTERFACE,ZEINAGUARD_NONINTERACTIVE,PYTHONUNBUFFERED \
-    "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN"
+  start_sensor_service
 
   print_summary
   monitor_services

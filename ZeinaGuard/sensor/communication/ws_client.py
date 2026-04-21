@@ -53,6 +53,10 @@ class WSClient:
         self._remote_disabled_reason = None
         self._connect_attempts = 0
         self._last_disconnect_log_at = 0.0
+        self._startup_error = None
+        self._startup_error_lock = threading.Lock()
+        self._registered_event = threading.Event()
+        self._worker_threads_started = False
         self.local_logger = LocalDataLogger()
         self.outbound_queue = Queue(maxsize=OUTBOUND_QUEUE_MAXSIZE)
         self._sender_lock = threading.Lock()
@@ -90,11 +94,15 @@ class WSClient:
 
         @self.sio.event
         def connect_error(_data):
-            update_status(backend_status="offline", message="Backend connect failed")
+            details = _data if _data else "unknown connect_error"
+            self._set_startup_error(f"Backend connect failed: {details}")
+            update_status(backend_status="offline", message=f"Backend connect failed: {details}")
 
         @self.sio.on("registration_success")
         def registration_success(data):
             self.sensor_id = self._safe_int(data.get("sensor_id"), default=0) or None
+            self._clear_startup_error()
+            self._registered_event.set()
             LOGGER.info("[Sensor] Registered with backend as sensor_id=%s", self.sensor_id)
             update_status(
                 backend_status="registered",
@@ -102,6 +110,17 @@ class WSClient:
             )
             if self.sensor_id:
                 self._enqueue_event("sensor_heartbeat", self._build_sensor_status_payload())
+
+        @self.sio.on("registration_error")
+        def registration_error(data):
+            message = f"Sensor registration failed: {data}"
+            self._set_startup_error(message)
+            LOGGER.error("[Sensor] %s", message)
+            update_status(backend_status="offline", message=message)
+            try:
+                self.sio.disconnect()
+            except Exception:
+                pass
 
         @self.sio.on("execute_attack")
         def execute_attack(payload):
@@ -115,12 +134,10 @@ class WSClient:
 
     def start(self):
         self.is_running = True
-        threading.Thread(target=self._scan_listener, daemon=True, name="WSScanListener").start()
-        threading.Thread(target=self._threat_listener, daemon=True, name="WSThreatListener").start()
-        threading.Thread(target=self._status_publisher, daemon=True, name="WSSensorStatus").start()
-        threading.Thread(target=self._sender_worker, daemon=True, name="WSSenderWorker").start()
+        self._start_worker_threads()
 
         if not self.token:
+            self._set_startup_error("Backend authentication token is missing")
             self._disable_remote("missing_token", "Backend authentication unavailable; local logging only")
             while self.is_running:
                 time.sleep(1)
@@ -138,28 +155,70 @@ class WSClient:
                     headers={"Authorization": f"Bearer {self.token}"},
                     transports=["websocket"],
                     wait=True,
+                    wait_timeout=5,
                 )
                 self.sio.wait()
                 if self.is_running and self.remote_enabled and not self.sio.connected:
-                    raise RuntimeError("Backend socket disconnected")
-            except Exception:
+                    raise RuntimeError("Backend socket disconnected before registration completed")
+            except Exception as exc:
+                self._set_startup_error(str(exc))
                 self._connect_attempts += 1
                 if self._connect_attempts >= BACKEND_CONNECT_MAX_RETRIES:
                     self._disable_remote(
                         "retry_limit",
-                        f"Backend unavailable after {self._connect_attempts} attempts; local logging only",
+                        f"Backend unavailable after {self._connect_attempts} attempts; last error: {exc}",
                     )
                     break
 
                 retry_delay = retry_delay_seconds(self._connect_attempts)
                 update_status(
                     backend_status="offline",
-                    message=f"Backend retry {self._connect_attempts}/{BACKEND_CONNECT_MAX_RETRIES} in {retry_delay}s",
+                    message=f"Backend retry {self._connect_attempts}/{BACKEND_CONNECT_MAX_RETRIES} in {retry_delay}s: {exc}",
                 )
                 time.sleep(retry_delay)
 
         while self.is_running:
             time.sleep(1)
+
+    def wait_until_ready(self, timeout_seconds):
+        deadline = time.monotonic() + timeout_seconds
+
+        while time.monotonic() < deadline:
+            if self._registered_event.wait(timeout=0.25):
+                return
+
+            startup_error = self._get_startup_error()
+            if not self.remote_enabled and startup_error:
+                raise RuntimeError(startup_error)
+
+        startup_error = self._get_startup_error()
+        if startup_error:
+            raise RuntimeError(startup_error)
+        raise TimeoutError(
+            f"Backend socket was not fully ready within {timeout_seconds}s for {self.backend_url}"
+        )
+
+    def _start_worker_threads(self):
+        if self._worker_threads_started:
+            return
+
+        threading.Thread(target=self._scan_listener, daemon=True, name="WSScanListener").start()
+        threading.Thread(target=self._threat_listener, daemon=True, name="WSThreatListener").start()
+        threading.Thread(target=self._status_publisher, daemon=True, name="WSSensorStatus").start()
+        threading.Thread(target=self._sender_worker, daemon=True, name="WSSenderWorker").start()
+        self._worker_threads_started = True
+
+    def _set_startup_error(self, message):
+        with self._startup_error_lock:
+            self._startup_error = str(message)
+
+    def _clear_startup_error(self):
+        with self._startup_error_lock:
+            self._startup_error = None
+
+    def _get_startup_error(self):
+        with self._startup_error_lock:
+            return self._startup_error
 
     def _disable_remote(self, reason, message):
         if self._remote_disabled_reason == reason:

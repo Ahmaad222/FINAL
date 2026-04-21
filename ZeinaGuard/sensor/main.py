@@ -1,9 +1,11 @@
 import argparse
+from datetime import datetime
 import logging
 import os
 import subprocess
 import sys
 import threading
+import traceback
 from pathlib import Path
 
 
@@ -11,14 +13,44 @@ ROOT_DIR = Path(__file__).resolve().parent
 VENV_DIR = ROOT_DIR / ".venv"
 REQUIREMENTS_FILE = ROOT_DIR / "requirements.txt"
 BOOTSTRAP_FLAG = "ZEINAGUARD_VENV_ACTIVE"
+DEFAULT_SENSOR_LOG_FILE = ROOT_DIR.parent / "logs" / "sensor.log"
+LOGGER = logging.getLogger("zeinaguard.sensor.main")
 
 
 def configure_logging():
     logging.basicConfig(
         level=logging.INFO,
-        format="%(message)s",
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
         force=True,
     )
+
+
+def sensor_log_file() -> Path:
+    configured_path = os.getenv("SENSOR_LOG_FILE", "").strip()
+    return Path(configured_path) if configured_path else DEFAULT_SENSOR_LOG_FILE
+
+
+def append_crash_report(message, exc_info):
+    log_path = sensor_log_file()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    crash_report = "".join(traceback.format_exception(*exc_info))
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{timestamp} CRITICAL {message}\n")
+        handle.write(crash_report)
+        if not crash_report.endswith("\n"):
+            handle.write("\n")
+
+
+def install_thread_exception_logging():
+    def _thread_excepthook(args):
+        exc_info = (args.exc_type, args.exc_value, args.exc_traceback)
+        LOGGER.error("Unhandled exception in thread %s", args.thread.name, exc_info=exc_info)
+        append_crash_report(f"Unhandled exception in thread {args.thread.name}", exc_info)
+
+    threading.excepthook = _thread_excepthook
 
 
 def _venv_python_path():
@@ -237,7 +269,11 @@ def run_self_test():
         print("[Sensor Test] Root privileges are required for the sensor self-test.", flush=True)
         return 1
 
-    if requested_interface and available_interfaces and requested_interface not in available_interfaces:
+    if (
+        requested_interface
+        and requested_interface not in available_interfaces
+        and not Path(f"/sys/class/net/{requested_interface}").exists()
+    ):
         print(
             f"[Sensor Test] Requested interface '{requested_interface}' is unavailable. "
             f"Detected interfaces: {', '.join(sorted(available_interfaces))}",
@@ -260,6 +296,7 @@ def run_self_test():
 def main():
     ensure_virtualenv()
     configure_logging()
+    install_thread_exception_logging()
 
     import config
     from communication.api_client import APIClient
@@ -278,16 +315,14 @@ def main():
         message=f"Booting sensor on {selected_interface}",
     )
 
-    token = None
-    try:
-        api = APIClient(backend_url=config.BACKEND_URL)
-        token = api.authenticate_sensor()
-        update_status(
-            backend_status="authenticated" if token else "offline",
-            message="Backend authenticated" if token else "Offline mode: local logging only",
-        )
-    except Exception:
-        update_status(backend_status="offline", message="Backend unavailable: local logging only")
+    startup_timeout = int(os.getenv("SENSOR_BACKEND_READY_TIMEOUT_SECONDS", "15"))
+    api = APIClient(backend_url=config.BACKEND_URL)
+    api.wait_for_backend_ready(timeout_seconds=startup_timeout)
+    token = api.authenticate_sensor(strict=True)
+    update_status(
+        backend_status="authenticated",
+        message="Backend authenticated",
+    )
 
     sensor_registration_key = (
         os.getenv("ZEINAGUARD_SENSOR_REGISTRATION_KEY")
@@ -306,17 +341,33 @@ def main():
         token=token,
         sensor_id=sensor_registration_key,
     )
-    threading.Thread(target=ws_client.start, daemon=True, name="WSClient").start()
+    ws_thread = threading.Thread(target=ws_client.start, daemon=True, name="WSClient")
+    ws_thread.start()
+    ws_client.wait_until_ready(timeout_seconds=startup_timeout)
 
     threat_manager = ThreatManager()
     threading.Thread(target=threat_manager.start, daemon=True, name="ThreatManager").start()
 
     update_status(sensor_status="monitoring", message="Wireless monitoring active")
     start_monitoring()
+    raise RuntimeError("Sensor monitoring loop exited unexpectedly")
+
+
+def run():
+    args = parse_args()
+    if args.test:
+        return run_self_test()
+    main()
+    return 0
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    if args.test:
-        raise SystemExit(run_self_test())
-    main()
+    try:
+        raise SystemExit(run())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except Exception:
+        exc_info = sys.exc_info()
+        LOGGER.exception("Sensor startup failed")
+        append_crash_report("Sensor startup failed", exc_info)
+        raise SystemExit(1)
