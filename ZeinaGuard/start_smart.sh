@@ -5,6 +5,7 @@ IFS=$'\n\t'
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$ROOT_DIR/logs"
 FRONTEND_DIR="$ROOT_DIR"
+FRONTEND_RUNTIME_DIR="$ROOT_DIR/frontend"
 BACKEND_DIR="$ROOT_DIR/backend"
 SENSOR_DIR="$ROOT_DIR/sensor"
 ENV_FILE="$ROOT_DIR/.env"
@@ -12,15 +13,21 @@ ENV_FILE="$ROOT_DIR/.env"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
+BACKEND_VENV_PYTHON="$BACKEND_DIR/.venv/bin/python"
+SENSOR_VENV_PYTHON="$SENSOR_DIR/.venv/bin/python"
 
 FRONTEND_LOG="$LOG_DIR/frontend.log"
 BACKEND_LOG="$LOG_DIR/backend.log"
 SENSOR_LOG="$LOG_DIR/sensor.log"
+SENSOR_TEST_LOG="$LOG_DIR/sensor-preflight.log"
 
 declare -a START_ORDER=()
 declare -A SERVICE_PIDS=()
+declare -a PREFLIGHT_ERRORS=()
+declare -a PREFLIGHT_NOTES=()
 
 CLEANUP_DONE=0
+SELECTED_SENSOR_INTERFACE=""
 
 log() {
   printf '[start_smart] %s\n' "$*"
@@ -65,100 +72,144 @@ ensure_runtime_dirs() {
   mkdir -p "$LOG_DIR"
 }
 
-ensure_pnpm() {
-  if command_exists pnpm; then
-    return
-  fi
-
-  if command_exists corepack; then
-    corepack enable >/dev/null 2>&1 || true
-    corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true
-  fi
-
-  command_exists pnpm || fail "pnpm is required to start the frontend"
+add_preflight_error() {
+  PREFLIGHT_ERRORS+=("$1")
 }
 
-hash_file() {
-  local target="$1"
-
-  if command_exists sha256sum; then
-    sha256sum "$target" | awk '{print $1}'
-    return
-  fi
-
-  if command_exists shasum; then
-    shasum -a 256 "$target" | awk '{print $1}'
-    return
-  fi
-
-  python3 - "$target" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-print(hashlib.sha256(path.read_bytes()).hexdigest())
-PY
+add_preflight_note() {
+  PREFLIGHT_NOTES+=("$1")
 }
 
-python_in_venv() {
-  local python_bin="$1"
-  "$python_bin" - <<'PY' >/dev/null 2>&1
-import sys
-raise SystemExit(0 if sys.prefix != getattr(sys, "base_prefix", sys.prefix) else 1)
-PY
+require_directory() {
+  local path="$1"
+  local description="$2"
+  [ -d "$path" ] || add_preflight_error "$description is missing: $path"
 }
 
-venv_is_valid() {
-  local venv_dir="$1"
-  local python_bin="$venv_dir/bin/python"
-
-  [ -d "$venv_dir" ] || return 1
-  [ -x "$python_bin" ] || return 1
-  python_in_venv "$python_bin" || return 1
-  "$python_bin" -m pip --version >/dev/null 2>&1 || return 1
-  "$python_bin" -m pip check >/dev/null 2>&1 || return 1
+require_file() {
+  local path="$1"
+  local description="$2"
+  [ -f "$path" ] || add_preflight_error "$description is missing: $path"
 }
 
-ensure_python_venv() {
+validate_system_command() {
+  local command_name="$1"
+  command_exists "$command_name" || add_preflight_error "Required command is not installed: $command_name"
+}
+
+validate_venv_python() {
   local service_name="$1"
-  local service_dir="$2"
-  local requirements_file="$3"
-  local venv_dir="$service_dir/.venv"
-  local python_bin="$venv_dir/bin/python"
-  local stamp_file="$venv_dir/.requirements.sha256"
-  local desired_hash=""
-  local current_hash=""
+  local python_bin="$2"
 
-  [ -f "$requirements_file" ] || fail "Missing requirements file for $service_name: $requirements_file"
-
-  desired_hash="$(hash_file "$requirements_file")"
-  if [ -f "$stamp_file" ]; then
-    current_hash="$(tr -d '[:space:]' <"$stamp_file")"
-  fi
-
-  if venv_is_valid "$venv_dir" && [ "$desired_hash" = "$current_hash" ]; then
-    log "Reusing cached ${service_name} virtual environment"
+  if [ ! -x "$python_bin" ]; then
+    add_preflight_error "${service_name} virtual environment is missing a Python interpreter: $python_bin"
     return
   fi
 
-  if [ -d "$venv_dir" ] && ! venv_is_valid "$venv_dir"; then
-    warn "$service_name virtual environment is invalid; recreating it"
-    rm -rf "$venv_dir"
+  if ! "$python_bin" -c 'import sys; raise SystemExit(0 if sys.prefix != getattr(sys, "base_prefix", sys.prefix) else 1)' >/dev/null 2>&1; then
+    add_preflight_error "${service_name} virtual environment Python is not runnable: $python_bin"
+  fi
+}
+
+interface_exists() {
+  local interface_name="$1"
+
+  [ -n "$interface_name" ] || return 1
+
+  if command_exists ip && ip link show "$interface_name" >/dev/null 2>&1; then
+    return 0
   fi
 
-  if [ ! -d "$venv_dir" ]; then
-    log "Creating ${service_name} virtual environment"
-    python3 -m venv "$venv_dir"
+  if command_exists iwconfig && iwconfig "$interface_name" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  return 1
+}
+
+select_sensor_interface() {
+  local candidate=""
+  local -a candidates=()
+
+  if [ -n "${SENSOR_INTERFACE:-}" ]; then
+    candidates+=("$SENSOR_INTERFACE")
+  fi
+  candidates+=("wlan0mon" "wlan0")
+
+  for candidate in "${candidates[@]}"; do
+    if interface_exists "$candidate"; then
+      SELECTED_SENSOR_INTERFACE="$candidate"
+      export SENSOR_INTERFACE="$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+print_preflight_failures() {
+  local item
+
+  printf '[start_smart][error] Pre-flight validation failed:\n' >&2
+  for item in "${PREFLIGHT_ERRORS[@]}"; do
+    printf '  - %s\n' "$item" >&2
+  done
+}
+
+run_preflight_checks() {
+  local note=""
+
+  PREFLIGHT_ERRORS=()
+  PREFLIGHT_NOTES=()
+
+  log "Running pre-flight validation"
+
+  require_directory "$FRONTEND_RUNTIME_DIR" "Frontend runtime directory"
+  require_file "$FRONTEND_DIR/package.json" "Frontend package manifest"
+  require_file "$BACKEND_DIR/app.py" "Backend entrypoint"
+  require_file "$SENSOR_DIR/main.py" "Sensor entrypoint"
+
+  validate_system_command python3
+  validate_system_command pnpm
+  validate_system_command sudo
+
+  if [ -d "$BACKEND_DIR/.venv" ]; then
+    validate_venv_python "backend" "$BACKEND_VENV_PYTHON"
   else
-    log "Refreshing ${service_name} dependencies"
+    add_preflight_error "Backend virtual environment is missing: $BACKEND_DIR/.venv"
   fi
 
-  log "Installing ${service_name} dependencies"
-  "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1 || true
-  "$python_bin" -m pip install --upgrade pip setuptools wheel >/dev/null
-  "$python_bin" -m pip install -r "$requirements_file"
-  printf '%s\n' "$desired_hash" >"$stamp_file"
+  if [ -d "$SENSOR_DIR/.venv" ]; then
+    validate_venv_python "sensor" "$SENSOR_VENV_PYTHON"
+  else
+    add_preflight_error "Sensor virtual environment is missing: $SENSOR_DIR/.venv"
+  fi
+
+  if [ -d "$FRONTEND_DIR/node_modules" ]; then
+    add_preflight_note "Frontend dependencies already cached in node_modules"
+  else
+    add_preflight_note "node_modules is missing; pnpm install will run before startup"
+  fi
+
+  if ! command_exists ip && ! command_exists iwconfig; then
+    add_preflight_error "Cannot validate wireless interfaces because neither ip nor iwconfig is installed"
+  elif ! select_sensor_interface; then
+    add_preflight_error "No wireless interface detected. Expected SENSOR_INTERFACE, wlan0, or wlan0mon"
+  fi
+
+  if [ "${#PREFLIGHT_ERRORS[@]}" -gt 0 ]; then
+    print_preflight_failures
+    return 1
+  fi
+
+  for note in "${PREFLIGHT_NOTES[@]}"; do
+    log "$note"
+  done
+  log "Pre-flight validation passed"
+}
+
+ensure_pnpm() {
+  command_exists pnpm || fail "pnpm is required to start the frontend"
 }
 
 ensure_frontend_dependencies() {
@@ -320,51 +371,53 @@ ensure_port_available() {
 }
 
 require_sudo_access() {
+  if command_exists sudo && sudo -n true >/dev/null 2>&1; then
+    return
+  fi
+
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     return
   fi
 
   ensure_command sudo
-  if sudo -n true >/dev/null 2>&1; then
-    return
-  fi
-
   log "Requesting sudo once for the sensor process"
   sudo -v
 }
 
 build_sensor_command() {
   local -n out_command_ref="$1"
-  local sensor_shell_command=""
-  local preserve_env_vars=""
-
-  printf -v sensor_shell_command 'source %q && exec python %q' \
-    "$SENSOR_DIR/.venv/bin/activate" \
-    "$SENSOR_DIR/main.py"
 
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    out_command_ref=(bash -lc "$sensor_shell_command")
+    out_command_ref=("$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py")
     return
   fi
 
-  preserve_env_vars="BACKEND_URL,ZEINAGUARD_NONINTERACTIVE,SENSOR_INTERFACE,ZEINAGUARD_SENSOR_ID,ZEINAGUARD_SENSOR_REGISTRATION_KEY"
-  out_command_ref=(sudo --preserve-env="$preserve_env_vars" bash -lc "$sensor_shell_command")
+  out_command_ref=(sudo -E "$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py")
 }
 
-verify_sensor_launcher() {
-  local sensor_shell_command=""
+run_sensor_preflight_test() {
+  local -a sensor_test_command
 
-  printf -v sensor_shell_command 'source %q && command -v python >/dev/null && python -c %q >/dev/null' \
-    "$SENSOR_DIR/.venv/bin/activate" \
-    'import sys; raise SystemExit(0 if sys.prefix != getattr(sys, "base_prefix", sys.prefix) else 1)'
+  : >"$SENSOR_TEST_LOG"
+  log "Running sensor self-test on interface ${SELECTED_SENSOR_INTERFACE}"
 
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    bash -lc "$sensor_shell_command" || fail "Sensor virtual environment is not usable as root"
+    sensor_test_command=("$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py" --test)
+  else
+    sensor_test_command=(sudo -E "$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py" --test)
+  fi
+
+  if (
+    cd "$SENSOR_DIR"
+    env BACKEND_URL="$BACKEND_URL" ZEINAGUARD_NONINTERACTIVE=1 SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
+      "${sensor_test_command[@]}"
+  ) >>"$SENSOR_TEST_LOG" 2>&1; then
+    log "Sensor self-test passed"
     return
   fi
 
-  sudo --preserve-env=BACKEND_URL,ZEINAGUARD_NONINTERACTIVE,SENSOR_INTERFACE,ZEINAGUARD_SENSOR_ID,ZEINAGUARD_SENSOR_REGISTRATION_KEY \
-    bash -lc "$sensor_shell_command" || fail "Sensor virtual environment is not usable through sudo"
+  tail -n 60 "$SENSOR_TEST_LOG" >&2 || true
+  fail "Sensor self-test failed; see $SENSOR_TEST_LOG"
 }
 
 start_service() {
@@ -482,7 +535,7 @@ on_interrupt() {
 
 on_exit() {
   local exit_code="$?"
-  if [ "$exit_code" -ne 0 ]; then
+  if [ "$exit_code" -ne 0 ] && [ "${#START_ORDER[@]}" -gt 0 ]; then
     warn "Startup supervisor exited unexpectedly; cleaning up"
     cleanup_all "$exit_code"
   fi
@@ -521,26 +574,26 @@ main() {
   trap on_exit EXIT
 
   ensure_command bash
-  ensure_command python3
-  ensure_command setsid
   load_env_file
   ensure_runtime_dirs
+  run_preflight_checks || exit 1
+
+  ensure_command setsid
+  require_sudo_access
+  run_sensor_preflight_test
 
   ensure_frontend_dependencies
-  ensure_python_venv "backend" "$BACKEND_DIR" "$BACKEND_DIR/requirements.txt"
-  ensure_python_venv "sensor" "$SENSOR_DIR" "$SENSOR_DIR/requirements.txt"
 
   ensure_port_available "frontend" "$FRONTEND_PORT"
   ensure_port_available "backend" "$BACKEND_PORT"
   stop_pid_file_if_present "sensor"
 
-  require_sudo_access
-  verify_sensor_launcher
   build_sensor_command sensor_command
 
   start_service "backend" "$BACKEND_DIR" "$BACKEND_LOG" \
     env FLASK_PORT="$BACKEND_PORT" BACKEND_URL="$BACKEND_URL" \
-    "$BACKEND_DIR/.venv/bin/python" "$BACKEND_DIR/app.py"
+    SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
+    "$BACKEND_VENV_PYTHON" "$BACKEND_DIR/app.py"
   wait_for_backend_health || fail "Backend failed health check on port ${BACKEND_PORT}"
 
   start_service "frontend" "$FRONTEND_DIR" "$FRONTEND_LOG" \
@@ -549,7 +602,7 @@ main() {
   wait_for_http_ok "frontend" "http://127.0.0.1:${FRONTEND_PORT}" 90 || fail "Frontend did not become reachable on port ${FRONTEND_PORT}"
 
   start_service "sensor" "$SENSOR_DIR" "$SENSOR_LOG" \
-    env BACKEND_URL="$BACKEND_URL" \
+    env BACKEND_URL="$BACKEND_URL" ZEINAGUARD_NONINTERACTIVE=1 SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
     "${sensor_command[@]}"
 
   print_summary

@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import subprocess
@@ -209,6 +210,50 @@ def ensure_virtualenv():
         raise SystemExit(1)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--test", action="store_true", help="Run a lightweight sensor self-test and exit")
+    return parser.parse_args()
+
+
+def run_self_test():
+    ensure_virtualenv()
+    configure_logging()
+
+    import config
+    from communication.api_client import APIClient  # noqa: F401
+    from communication.ws_client import WSClient  # noqa: F401
+    from detection.threat_manager import ThreatManager  # noqa: F401
+    from monitoring.sniffer import start_monitoring  # noqa: F401
+    from runtime_state import update_status  # noqa: F401
+
+    available_interfaces = set(config.list_wireless_interfaces())
+    requested_interface = os.getenv("SENSOR_INTERFACE") or config.get_interface()
+
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        print("[Sensor Test] Root privileges are required for the sensor self-test.", flush=True)
+        return 1
+
+    if requested_interface and available_interfaces and requested_interface not in available_interfaces:
+        print(
+            f"[Sensor Test] Requested interface '{requested_interface}' is unavailable. "
+            f"Detected interfaces: {', '.join(sorted(available_interfaces))}",
+            flush=True,
+        )
+        return 1
+
+    print(
+        "[Sensor Test] OK",
+        {
+            "backend_url": config.BACKEND_URL,
+            "interface": requested_interface,
+            "interfaces_detected": sorted(available_interfaces),
+        },
+        flush=True,
+    )
+    return 0
+
+
 def main():
     ensure_virtualenv()
     configure_logging()
@@ -268,4 +313,7 @@ def main():
 
 
 if __name__ == "__main__":
+    args = parse_args()
+    if args.test:
+        raise SystemExit(run_self_test())
     main()
