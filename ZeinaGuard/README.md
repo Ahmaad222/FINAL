@@ -13,7 +13,7 @@ ZeinaGuard now runs fully locally without Docker.
 ## Prerequisites
 
 - Python 3
-- Node.js + npm
+- Node.js + pnpm
 - PostgreSQL
 - Redis
 - Linux shell for the helper scripts
@@ -66,9 +66,13 @@ python schema_migration.py
 
 ## Run Everything
 
+`run.sh` is the only supported lifecycle entry point.
+
 ```bash
-bash run-all.sh
+bash run.sh
 ```
+
+Stop the full stack with `Ctrl + C`.
 
 Or use Make:
 
@@ -77,36 +81,13 @@ make setup
 make run
 ```
 
-## Individual Services
-
-### Backend
-
-```bash
-cd backend
-bash run.sh
-```
-
-### Frontend
-
-```bash
-cd frontend
-bash run.sh
-```
-
-### Sensor
-
-```bash
-cd sensor
-sudo -E python3 main.py
-```
-
-The sensor bootstraps its own virtual environment automatically and connects to `http://localhost:5000`.
+All older launcher scripts are deprecated and should not be used.
 
 ## Notes
 
 - The frontend uses `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_SOCKET_URL` directly, so no reverse proxy is required.
 - The backend builds its PostgreSQL and Redis connection settings from the root `.env`.
-- The frontend launcher prefers `pnpm`, but automatically falls back to `npm` when `pnpm` is not installed.
+- `run.sh` requires `pnpm` in the user environment and fails fast if it is missing.
 - If PostgreSQL or Redis are not running, restart them with:
 
 ```bash

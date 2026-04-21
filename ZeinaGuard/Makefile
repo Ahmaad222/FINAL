@@ -2,13 +2,16 @@ setup:
 	bash setup-check.sh
 
 run:
-	bash run-all.sh
+	bash run.sh
 
 backend:
-	bash backend/run.sh
+	@echo "[deprecated] Use ./run.sh from the project root." >&2
+	@exit 1
 
 frontend:
-	bash frontend/run.sh
+	@echo "[deprecated] Use ./run.sh from the project root." >&2
+	@exit 1
 
 sensor:
-	set -a && . ./.env && set +a && cd sensor && sudo -E env BACKEND_URL="$$BACKEND_URL" python3 main.py
+	@echo "[deprecated] Use ./run.sh from the project root." >&2
+	@exit 1

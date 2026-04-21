@@ -1,6 +1,6 @@
 #!/bin/bash
 # ZeinaGuard Pro - E2E Health Check Script
-# Run after starting services locally: ./run-all.sh
+# Run after starting services locally: bash ./run.sh
 
 set -e
 
