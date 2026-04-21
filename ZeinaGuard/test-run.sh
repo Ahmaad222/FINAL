@@ -4,12 +4,52 @@ IFS=$'\n\t'
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_SH="$ROOT_DIR/run.sh"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/zeinaguard-tests.XXXXXX")"
-STUB_BIN="$TEST_ROOT/bin"
+LOCK_FILE="/tmp/zeinaguard.lock"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/zeinaguard-fi.XXXXXX")"
 ARTIFACT_DIR="$TEST_ROOT/artifacts"
+STUB_BIN="$TEST_ROOT/bin"
 PATH_ORIG="$PATH"
 
-mkdir -p "$STUB_BIN" "$ARTIFACT_DIR"
+mkdir -p "$ARTIFACT_DIR" "$STUB_BIN"
+
+declare -a REQUESTED_MODES=()
+declare -a TRACKED_PIDS=()
+
+usage() {
+  cat <<'EOF'
+Usage: ./test-run.sh [--inject-mode MODE]...
+
+Supported modes:
+  sudo_fail
+  port_block
+  zombie_pid
+  backend_crash_mid_start
+  frontend_crash_mid_start
+
+If no mode is supplied, all modes run in sequence.
+EOF
+}
+
+parse_args() {
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --inject-mode)
+        shift
+        [ "$#" -gt 0 ] || { printf '[test-run][error] Missing value for --inject-mode\n' >&2; exit 1; }
+        REQUESTED_MODES+=("$1")
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      *)
+        printf '[test-run][error] Unknown argument: %s\n' "$1" >&2
+        exit 1
+        ;;
+    esac
+    shift
+  done
+}
 
 log() {
   printf '[test-run] %s\n' "$*"
@@ -20,29 +60,27 @@ fail() {
   exit 1
 }
 
+record_pid() {
+  TRACKED_PIDS+=("$1")
+}
+
 cleanup() {
   local pid=""
 
-  if [ -f "$TEST_ROOT/runtime.pids" ]; then
-    while read -r pid; do
-      [ -n "$pid" ] || continue
-      kill -TERM "$pid" >/dev/null 2>&1 || true
-    done <"$TEST_ROOT/runtime.pids"
-    sleep 1
-    while read -r pid; do
-      [ -n "$pid" ] || continue
-      kill -KILL "$pid" >/dev/null 2>&1 || true
-    done <"$TEST_ROOT/runtime.pids"
-  fi
+  for pid in "${TRACKED_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+  done
+  sleep 1
+  for pid in "${TRACKED_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  done
 
   rm -rf "$TEST_ROOT"
 }
 
 trap cleanup EXIT
-
-record_pid() {
-  printf '%s\n' "$1" >>"$TEST_ROOT/runtime.pids"
-}
 
 assert_contains() {
   local file="$1"
@@ -57,6 +95,21 @@ assert_not_contains() {
 
   if grep -Fq "$pattern" "$file"; then
     fail "Did not expect '$pattern' in $file"
+  fi
+}
+
+assert_file_missing() {
+  [ ! -e "$1" ] || fail "Expected file to be absent: $1"
+}
+
+assert_process_alive() {
+  kill -0 "$1" >/dev/null 2>&1 || fail "Expected pid $1 to still be alive"
+}
+
+assert_no_process_match() {
+  local pattern="$1"
+  if ps -eo args= 2>/dev/null | grep -F "$pattern" | grep -vq grep; then
+    fail "Expected no running process to match: $pattern"
   fi
 }
 
@@ -77,9 +130,7 @@ wait_for_pattern() {
   return 1
 }
 
-write_sudo_stub() {
-  local mode="$1"
-
+make_sudo_stub() {
   cat >"$STUB_BIN/sudo" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -87,11 +138,11 @@ mode="${ZEINAGUARD_TEST_SUDO_MODE:-success}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -n|-E|-k)
-      if [ "$1" = "-k" ]; then
-        exit 0
-      fi
+    -n|-E)
       shift
+      ;;
+    -k)
+      exit 0
       ;;
     --)
       shift
@@ -112,46 +163,62 @@ fi
 exec "$@"
 EOF
   chmod +x "$STUB_BIN/sudo"
-  export ZEINAGUARD_TEST_SUDO_MODE="$mode"
 }
 
-write_mock_services() {
-  cat >"$TEST_ROOT/mock-backend.sh" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-trap 'exit 0' INT TERM
-while :; do
-  sleep 1
-done
-EOF
-  chmod +x "$TEST_ROOT/mock-backend.sh"
+write_mock_service() {
+  cat >"$TEST_ROOT/mock_service.py" <<'EOF'
+#!/usr/bin/env python3
+import signal
+import sys
+import time
 
-  cat >"$TEST_ROOT/mock-frontend.sh" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-trap 'exit 0' INT TERM
-while :; do
-  sleep 1
-done
-EOF
-  chmod +x "$TEST_ROOT/mock-frontend.sh"
+mode = sys.argv[1]
 
-  cat >"$TEST_ROOT/mock-sensor.sh" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-if [ "${1:-}" = "--test" ]; then
-  exit 0
-fi
-if [ "${ZEINAGUARD_SENSOR_CRASH:-0}" = "1" ]; then
-  printf 'mock sensor crash\n' >&2
-  exit 1
-fi
-trap 'exit 0' INT TERM
-while :; do
-  sleep 1
-done
+stop = False
+
+def handle(*_args):
+    global stop
+    stop = True
+
+signal.signal(signal.SIGTERM, handle)
+signal.signal(signal.SIGINT, handle)
+
+if mode == "crash":
+    time.sleep(1)
+    sys.exit(1)
+
+while not stop:
+    time.sleep(1)
 EOF
-  chmod +x "$TEST_ROOT/mock-sensor.sh"
+  chmod +x "$TEST_ROOT/mock_service.py"
+}
+
+service_override_command() {
+  local service_name="$1"
+  local mode="$2"
+  local signature=""
+  local prefix=""
+
+  case "$service_name" in
+    backend)
+      signature="$ROOT_DIR/backend/app.py $ROOT_DIR"
+      ;;
+    frontend)
+      signature="$ROOT_DIR/node_modules/.bin/next dev $ROOT_DIR"
+      ;;
+    sensor)
+      signature="$ROOT_DIR/sensor/main.py $ROOT_DIR"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  if [ "$service_name" = "sensor" ]; then
+    prefix='if [ "${1:-}" = "--test" ]; then exit 0; fi; '
+  fi
+
+  printf '%sexec -a %q python3 %q %q "$@"' "$prefix" "$signature" "$TEST_ROOT/mock_service.py" "$mode"
 }
 
 setup_case_env() {
@@ -159,153 +226,211 @@ setup_case_env() {
 
   export PATH="$STUB_BIN:$PATH_ORIG"
   export ZEINAGUARD_LOG_DIR="$TEST_ROOT/$case_name/logs"
-  export SENSOR_INTERFACE="lo"
-  export ZEINAGUARD_BACKEND_CMD_OVERRIDE="$TEST_ROOT/mock-backend.sh"
-  export ZEINAGUARD_FRONTEND_CMD_OVERRIDE="$TEST_ROOT/mock-frontend.sh"
-  export ZEINAGUARD_SENSOR_CMD_OVERRIDE="$TEST_ROOT/mock-sensor.sh"
   export ZEINAGUARD_SKIP_BACKEND_HEALTHCHECK=1
   export ZEINAGUARD_SKIP_FRONTEND_HEALTHCHECK=1
-  export ZEINAGUARD_SENSOR_CRASH=0
+  export SENSOR_INTERFACE="lo"
+  export ZEINAGUARD_TEST_SUDO_MODE="success"
+  export ZEINAGUARD_BACKEND_CMD_OVERRIDE="$(service_override_command backend stable)"
+  export ZEINAGUARD_FRONTEND_CMD_OVERRIDE="$(service_override_command frontend stable)"
+  export ZEINAGUARD_SENSOR_CMD_OVERRIDE="$(service_override_command sensor stable)"
 
   mkdir -p "$ZEINAGUARD_LOG_DIR"
+  rm -f "$LOCK_FILE"
 }
 
-run_port_conflict_test() {
-  local output_file="$ARTIFACT_DIR/port-conflict.out"
-  local listener_pid=""
-  local unsafe_dir="$TEST_ROOT/unsafe-listener"
+start_external_listener() {
+  local port="$1"
+  local cwd="$2"
+  local pid=""
 
-  mkdir -p "$unsafe_dir"
-  setup_case_env "port-conflict"
-  write_sudo_stub success
-
+  mkdir -p "$cwd"
   (
-    cd "$unsafe_dir"
-    python3 -m http.server 3000 --bind 127.0.0.1 >"$ARTIFACT_DIR/port-listener.log" 2>&1
+    cd "$cwd"
+    python3 -m http.server "$port" --bind 127.0.0.1 >"$ARTIFACT_DIR/listener-$port.log" 2>&1
   ) &
-  listener_pid=$!
-  record_pid "$listener_pid"
+  pid=$!
+  record_pid "$pid"
   sleep 1
+  printf '%s\n' "$pid"
+}
+
+run_runsh() {
+  local output_file="$1"
+  shift
 
   (
     cd "$ROOT_DIR"
-    ./run.sh --dry-run
+    ./run.sh "$@"
   ) >"$output_file" 2>&1
-
-  assert_contains "$output_file" "Frontend URL: http://127.0.0.1:3001"
-  log "Port conflict scenario passed"
 }
 
-run_stale_pid_test() {
-  local output_file="$ARTIFACT_DIR/stale-pid.out"
-  local pid_file=""
-
-  setup_case_env "stale-pid"
-  write_sudo_stub success
-  pid_file="$ZEINAGUARD_LOG_DIR/zeinaguard.pids"
-
-  cat >"$pid_file" <<'EOF'
-backend_pid=999999
-backend_pgid=999999
-backend_port=5000
-frontend_pid=888888
-frontend_pgid=888888
-frontend_port=3000
-sensor_pid=777777
-sensor_pgid=777777
-sensor_port=n/a
-final_backend_port=5000
-final_frontend_port=3000
-EOF
+run_runsh_background() {
+  local output_file="$1"
+  local pid=""
+  shift
 
   (
     cd "$ROOT_DIR"
-    ./run.sh --dry-run
-  ) >"$output_file" 2>&1
-
-  assert_not_contains "$pid_file" "999999"
-  assert_not_contains "$pid_file" "888888"
-  assert_not_contains "$pid_file" "777777"
-  log "Stale PID scenario passed"
+    ./run.sh "$@"
+  ) >"$output_file" 2>&1 &
+  pid=$!
+  record_pid "$pid"
+  printf '%s\n' "$pid"
 }
 
-run_sudo_failure_test() {
-  local output_file="$ARTIFACT_DIR/sudo-failure.out"
+run_sudo_fail() {
+  local output_file="$ARTIFACT_DIR/sudo-fail.out"
   local status=0
 
-  setup_case_env "sudo-failure"
-  write_sudo_stub fail
+  setup_case_env "sudo_fail"
+  export ZEINAGUARD_TEST_SUDO_MODE="fail"
 
   set +e
-  (
-    cd "$ROOT_DIR"
-    ./run.sh --dry-run
-  ) >"$output_file" 2>&1
+  run_runsh "$output_file" --dry-run
   status=$?
   set -e
 
-  [ "$status" -ne 0 ] || fail "Expected sudo failure scenario to exit non-zero"
+  [ "$status" -ne 0 ] || fail "sudo_fail should exit non-zero"
   assert_contains "$output_file" "Sensor requires passwordless sudo (NOPASSWD)"
-  log "Sudo failure scenario passed"
+  assert_file_missing "$LOCK_FILE"
+  log "sudo_fail passed"
 }
 
-run_sensor_crash_test() {
-  local output_file="$ARTIFACT_DIR/sensor-crash.out"
+run_port_block() {
+  local output_file="$ARTIFACT_DIR/port-block.out"
+  local run_pid=""
+  local listener_3000=""
+  local listener_5000=""
+  local wait_status=0
+
+  setup_case_env "port_block"
+  listener_3000="$(start_external_listener 3000 "$TEST_ROOT/external-3000")"
+  listener_5000="$(start_external_listener 5000 "$TEST_ROOT/external-5000")"
+
+  run_pid="$(run_runsh_background "$output_file")"
+  wait_for_pattern "$output_file" "ZeinaGuard is running" 20 || fail "port_block did not reach running state"
+
+  assert_contains "$output_file" "Frontend URL : http://127.0.0.1:3001"
+  assert_contains "$output_file" "Backend URL  : http://127.0.0.1:5001"
+  assert_process_alive "$listener_3000"
+  assert_process_alive "$listener_5000"
+
+  kill -INT "$run_pid"
+  wait "$run_pid" || wait_status=$?
+  [ "$wait_status" -eq 0 ] || fail "port_block supervisor did not exit cleanly"
+  assert_process_alive "$listener_3000"
+  assert_process_alive "$listener_5000"
+  assert_file_missing "$LOCK_FILE"
+  kill -TERM "$listener_3000" "$listener_5000" >/dev/null 2>&1 || true
+  log "port_block passed"
+}
+
+run_zombie_pid() {
+  local output_file="$ARTIFACT_DIR/zombie-pid.out"
   local run_pid=""
   local wait_status=0
 
-  setup_case_env "sensor-crash"
-  write_sudo_stub success
-  export ZEINAGUARD_SENSOR_CRASH=1
+  setup_case_env "zombie_pid"
+  cat >"$LOCK_FILE" <<EOF
+session_uuid=dead-session
+start_timestamp=$(date '+%Y-%m-%d %H:%M:%S %z')
+backend_port=5000
+frontend_port=3000
+EOF
 
-  (
-    cd "$ROOT_DIR"
-    ./run.sh
-  ) >"$output_file" 2>&1 &
-  run_pid=$!
-  record_pid "$run_pid"
+  run_pid="$(run_runsh_background "$output_file")"
+  wait_for_pattern "$output_file" "ZeinaGuard is running" 20 || fail "zombie_pid did not recover from stale lock"
+  assert_not_contains "$output_file" "could not be reconciled safely"
 
-  wait_for_pattern "$output_file" "Sensor disabled:" 20 || fail "Sensor crash scenario did not disable the sensor"
-  kill -0 "$run_pid" >/dev/null 2>&1 || fail "Supervisor exited after sensor failure; expected degraded mode"
   kill -INT "$run_pid"
   wait "$run_pid" || wait_status=$?
-  [ "$wait_status" -eq 0 ] || fail "Supervisor did not exit cleanly after SIGINT in sensor crash scenario"
-  log "Sensor crash scenario passed"
+  [ "$wait_status" -eq 0 ] || fail "zombie_pid supervisor did not exit cleanly"
+  assert_file_missing "$LOCK_FILE"
+  log "zombie_pid passed"
 }
 
-run_clean_startup_test() {
-  local output_file="$ARTIFACT_DIR/clean-startup.out"
-  local run_pid=""
-  local wait_status=0
+run_backend_crash_mid_start() {
+  local output_file="$ARTIFACT_DIR/backend-crash.out"
+  local status=0
 
-  setup_case_env "clean-startup"
-  write_sudo_stub success
+  setup_case_env "backend_crash_mid_start"
+  export ZEINAGUARD_BACKEND_CMD_OVERRIDE="$(service_override_command backend crash)"
 
-  (
-    cd "$ROOT_DIR"
-    ./run.sh
-  ) >"$output_file" 2>&1 &
-  run_pid=$!
-  record_pid "$run_pid"
+  set +e
+  run_runsh "$output_file"
+  status=$?
+  set -e
 
-  wait_for_pattern "$output_file" "ZeinaGuard is running" 20 || fail "Clean startup scenario did not reach running state"
-  kill -INT "$run_pid"
-  wait "$run_pid" || wait_status=$?
-  [ "$wait_status" -eq 0 ] || fail "Supervisor did not exit cleanly after SIGINT in clean startup scenario"
-  [ ! -f "$ZEINAGUARD_LOG_DIR/zeinaguard.pids" ] || fail "PID file still exists after clean shutdown"
-  log "Clean startup scenario passed"
+  [ "$status" -ne 0 ] || fail "backend_crash_mid_start should exit non-zero"
+  assert_contains "$output_file" "backend failed to stay running"
+  assert_not_contains "$output_file" "Starting frontend"
+  assert_file_missing "$LOCK_FILE"
+  assert_no_process_match "$ROOT_DIR/backend/app.py $ROOT_DIR"
+  log "backend_crash_mid_start passed"
 }
 
-write_mock_services
+run_frontend_crash_mid_start() {
+  local output_file="$ARTIFACT_DIR/frontend-crash.out"
+  local status=0
 
-log "Validating shell syntax"
-bash -n "$RUN_SH"
-bash -n "$ROOT_DIR/test-run.sh"
+  setup_case_env "frontend_crash_mid_start"
+  export ZEINAGUARD_FRONTEND_CMD_OVERRIDE="$(service_override_command frontend crash)"
 
-run_port_conflict_test
-run_stale_pid_test
-run_sudo_failure_test
-run_sensor_crash_test
-run_clean_startup_test
+  set +e
+  run_runsh "$output_file"
+  status=$?
+  set -e
 
-log "All validation scenarios passed"
+  [ "$status" -ne 0 ] || fail "frontend_crash_mid_start should exit non-zero"
+  assert_contains "$output_file" "frontend failed to stay running"
+  assert_file_missing "$LOCK_FILE"
+  assert_no_process_match "$ROOT_DIR/backend/app.py $ROOT_DIR"
+  assert_no_process_match "$ROOT_DIR/node_modules/.bin/next dev $ROOT_DIR"
+  log "frontend_crash_mid_start passed"
+}
+
+run_requested_mode() {
+  case "$1" in
+    sudo_fail) run_sudo_fail ;;
+    port_block) run_port_block ;;
+    zombie_pid) run_zombie_pid ;;
+    backend_crash_mid_start) run_backend_crash_mid_start ;;
+    frontend_crash_mid_start) run_frontend_crash_mid_start ;;
+    *)
+      fail "Unsupported inject mode: $1"
+      ;;
+  esac
+}
+
+main() {
+  local mode=""
+
+  [ "$(uname -s)" = "Linux" ] || fail "test-run.sh must be executed on Linux"
+  [ ! -e "$LOCK_FILE" ] || fail "Refusing to run fault injection while $LOCK_FILE already exists"
+
+  make_sudo_stub
+  write_mock_service
+
+  bash -n "$RUN_SH"
+  bash -n "$ROOT_DIR/test-run.sh"
+
+  if [ "${#REQUESTED_MODES[@]}" -eq 0 ]; then
+    REQUESTED_MODES=(
+      "sudo_fail"
+      "port_block"
+      "zombie_pid"
+      "backend_crash_mid_start"
+      "frontend_crash_mid_start"
+    )
+  fi
+
+  for mode in "${REQUESTED_MODES[@]}"; do
+    log "Running injection mode: $mode"
+    run_requested_mode "$mode"
+  done
+
+  log "All requested injection modes passed"
+}
+
+parse_args "$@"
+main
