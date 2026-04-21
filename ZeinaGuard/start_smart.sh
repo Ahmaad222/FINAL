@@ -127,16 +127,44 @@ interface_exists() {
   return 1
 }
 
+discover_wireless_interfaces() {
+  local interface_name=""
+
+  if [ -d /sys/class/net ]; then
+    for interface_name in /sys/class/net/*; do
+      [ -e "$interface_name/wireless" ] || continue
+      basename "$interface_name"
+    done
+    return
+  fi
+
+  if command_exists iwconfig; then
+    iwconfig 2>/dev/null | awk '/^[[:alnum:]_.:-]+/ && $0 !~ /no wireless extensions/ {print $1}'
+  fi
+}
+
 select_sensor_interface() {
   local candidate=""
   local -a candidates=()
+  local discovered_interface=""
+  local -A seen_candidates=()
 
   if [ -n "${SENSOR_INTERFACE:-}" ]; then
     candidates+=("$SENSOR_INTERFACE")
   fi
   candidates+=("wlan0mon" "wlan0")
+  while read -r discovered_interface; do
+    [ -n "$discovered_interface" ] || continue
+    candidates+=("$discovered_interface")
+  done < <(discover_wireless_interfaces)
 
   for candidate in "${candidates[@]}"; do
+    [ -n "$candidate" ] || continue
+    if [ -n "${seen_candidates[$candidate]:-}" ]; then
+      continue
+    fi
+    seen_candidates["$candidate"]=1
+
     if interface_exists "$candidate"; then
       SELECTED_SENSOR_INTERFACE="$candidate"
       export SENSOR_INTERFACE="$candidate"
@@ -194,7 +222,9 @@ run_preflight_checks() {
   if ! command_exists ip && ! command_exists iwconfig; then
     add_preflight_error "Cannot validate wireless interfaces because neither ip nor iwconfig is installed"
   elif ! select_sensor_interface; then
-    add_preflight_error "No wireless interface detected. Expected SENSOR_INTERFACE, wlan0, or wlan0mon"
+    add_preflight_error "No wireless interface detected. Set SENSOR_INTERFACE or attach a wireless interface such as wlan0, wlan0mon, or wlx*"
+  else
+    add_preflight_note "Using sensor interface: $SELECTED_SENSOR_INTERFACE"
   fi
 
   if [ "${#PREFLIGHT_ERRORS[@]}" -gt 0 ]; then
