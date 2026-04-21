@@ -36,6 +36,9 @@ def ensure_virtualenv():
         except OSError:
             return Path(sys.prefix) == VENV_DIR
 
+    if running_inside_target_venv() and _venv_python_path().exists():
+        return
+
     if os.environ.get(BOOTSTRAP_FLAG) == "1" and running_inside_target_venv():
         return
 

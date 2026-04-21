@@ -18,7 +18,7 @@ from runtime_state import get_status_snapshot, log_attack, mark_sent, update_sta
 
 LOGGER = logging.getLogger("zeinaguard.sensor.ws")
 
-DEFAULT_BACKEND_URL = os.getenv("BACKEND_URL", os.getenv("ZEINAGUARD_BACKEND_URL", "http://localhost:8000"))
+DEFAULT_BACKEND_URL = os.getenv("BACKEND_URL", os.getenv("ZEINAGUARD_BACKEND_URL", "http://localhost:5000"))
 
 SCAN_EMIT_BATCH_SIZE = int(os.getenv("SCAN_EMIT_BATCH_SIZE", "25"))
 SCAN_EMIT_INTERVAL_SECONDS = float(os.getenv("SCAN_EMIT_INTERVAL_SECONDS", "3.0"))
@@ -26,6 +26,14 @@ SCAN_DEDUP_SIGNAL_DELTA = int(os.getenv("SCAN_DEDUP_SIGNAL_DELTA", "5"))
 SCAN_DEDUP_MAX_AGE_SECONDS = float(os.getenv("SCAN_DEDUP_MAX_AGE_SECONDS", "30"))
 SENSOR_STATUS_INTERVAL_SECONDS = float(os.getenv("SENSOR_STATUS_INTERVAL_SECONDS", "5"))
 OUTBOUND_QUEUE_MAXSIZE = int(os.getenv("SENSOR_OUTBOUND_QUEUE_MAXSIZE", "4000"))
+BACKEND_CONNECT_MAX_RETRIES = int(os.getenv("SENSOR_BACKEND_MAX_RETRIES", "5"))
+DISCONNECTED_LOG_INTERVAL_SECONDS = float(os.getenv("SENSOR_DISCONNECTED_LOG_INTERVAL_SECONDS", "15"))
+RETRY_BACKOFF_SEQUENCE = [1, 2, 5, 10]
+
+
+def retry_delay_seconds(attempt_number: int) -> int:
+    index = max(0, min(attempt_number - 1, len(RETRY_BACKOFF_SEQUENCE) - 1))
+    return RETRY_BACKOFF_SEQUENCE[index]
 
 
 def utc_iso() -> str:
@@ -41,6 +49,10 @@ class WSClient:
         self.sensor_id = None
         self.started_at = time.time()
         self.is_running = False
+        self.remote_enabled = bool(token)
+        self._remote_disabled_reason = None
+        self._connect_attempts = 0
+        self._last_disconnect_log_at = 0.0
         self.local_logger = LocalDataLogger()
         self.outbound_queue = Queue(maxsize=OUTBOUND_QUEUE_MAXSIZE)
         self._sender_lock = threading.Lock()
@@ -48,9 +60,7 @@ class WSClient:
         self._scan_batch_lock = threading.Lock()
         self.last_sent_cache = {}
         self.sio = socketio.Client(
-            reconnection=True,
-            reconnection_attempts=0,
-            reconnection_delay=3,
+            reconnection=False,
             logger=False,
             engineio_logger=False,
         )
@@ -61,7 +71,9 @@ class WSClient:
     def _register_handlers(self):
         @self.sio.event
         def connect():
-            LOGGER.info("[QUEUE] backend connected, queueing sensor_register registration_key=%s", self.sensor_registration_key)
+            self._connect_attempts = 0
+            self._last_disconnect_log_at = 0.0
+            LOGGER.info("[Sensor] Backend connected")
             update_status(backend_status="connected", message=f"Connected to {self.backend_url}")
             self._enqueue_event(
                 "sensor_register",
@@ -83,7 +95,7 @@ class WSClient:
         @self.sio.on("registration_success")
         def registration_success(data):
             self.sensor_id = self._safe_int(data.get("sensor_id"), default=0) or None
-            LOGGER.info("[QUEUE] registration_success sensor_id=%s", self.sensor_id)
+            LOGGER.info("[Sensor] Registered with backend as sensor_id=%s", self.sensor_id)
             update_status(
                 backend_status="registered",
                 message=f"Sensor registered as #{self.sensor_id}",
@@ -109,12 +121,12 @@ class WSClient:
         threading.Thread(target=self._sender_worker, daemon=True, name="WSSenderWorker").start()
 
         if not self.token:
-            update_status(backend_status="offline", message="Offline mode: local logging only")
+            self._disable_remote("missing_token", "Backend authentication unavailable; local logging only")
             while self.is_running:
                 time.sleep(1)
             return
 
-        while self.is_running:
+        while self.is_running and self.remote_enabled:
             if self.sio.connected:
                 time.sleep(1)
                 continue
@@ -128,11 +140,45 @@ class WSClient:
                     wait=True,
                 )
                 self.sio.wait()
+                if self.is_running and self.remote_enabled and not self.sio.connected:
+                    raise RuntimeError("Backend socket disconnected")
             except Exception:
-                update_status(backend_status="offline", message="Retrying backend connection")
-                time.sleep(5)
+                self._connect_attempts += 1
+                if self._connect_attempts >= BACKEND_CONNECT_MAX_RETRIES:
+                    self._disable_remote(
+                        "retry_limit",
+                        f"Backend unavailable after {self._connect_attempts} attempts; local logging only",
+                    )
+                    break
+
+                retry_delay = retry_delay_seconds(self._connect_attempts)
+                update_status(
+                    backend_status="offline",
+                    message=f"Backend retry {self._connect_attempts}/{BACKEND_CONNECT_MAX_RETRIES} in {retry_delay}s",
+                )
+                time.sleep(retry_delay)
+
+        while self.is_running:
+            time.sleep(1)
+
+    def _disable_remote(self, reason, message):
+        if self._remote_disabled_reason == reason:
+            return
+
+        self.remote_enabled = False
+        self._remote_disabled_reason = reason
+        if self.sio.connected:
+            try:
+                self.sio.disconnect()
+            except Exception:
+                pass
+        LOGGER.warning("[Sensor] %s", message)
+        update_status(backend_status="offline", message=message)
 
     def _enqueue_event(self, event_name, payload):
+        if not self.remote_enabled:
+            return False
+
         envelope = {
             "event_name": event_name,
             "payload": payload,
@@ -141,7 +187,8 @@ class WSClient:
 
         try:
             self.outbound_queue.put(envelope, timeout=1)
-            LOGGER.info("[QUEUE] queued %s", event_name)
+            if event_name not in {"network_scan", "sensor_heartbeat"}:
+                LOGGER.info("[QUEUE] queued %s", event_name)
             return True
         except Full:
             LOGGER.warning("[QUEUE] outbound queue full, dropped %s", event_name)
@@ -154,6 +201,14 @@ class WSClient:
         next_flush_deadline = time.monotonic() + SCAN_EMIT_INTERVAL_SECONDS
 
         while self.is_running:
+            if not self.remote_enabled:
+                deferred_events.clear()
+                with self._scan_batch_lock:
+                    scan_batch.clear()
+                self._drain_outbound_queue()
+                time.sleep(1)
+                continue
+
             if deferred_events and self.sio.connected:
                 envelope = deferred_events.popleft()
                 if envelope["event_name"] == "network_scan":
@@ -205,13 +260,13 @@ class WSClient:
             "sent_at": utc_iso(),
             "networks": batch,
         }
+        if not self.remote_enabled:
+            return
         if payload["sensor_id"] is None:
-            LOGGER.info("[SEND] sensor_id unavailable, deferring network_scan batch size=%s", len(batch))
             for item in batch:
                 deferred_events.appendleft({"event_name": "network_scan", "payload": item})
             return
         if self._send_event("network_scan", payload):
-            LOGGER.info("[SENT] network_scan sensor_id=%s batch_size=%s", payload["sensor_id"], len(batch))
             self._mark_scan_batch_sent(batch)
             return
 
@@ -219,19 +274,38 @@ class WSClient:
             deferred_events.appendleft({"event_name": "network_scan", "payload": item})
 
     def _send_event(self, event_name, payload):
+        if not self.remote_enabled:
+            return False
+
         if not self.sio.connected:
-            LOGGER.info("[SEND] socket disconnected, deferring %s", event_name)
+            if event_name not in {"network_scan", "sensor_heartbeat"}:
+                self._log_disconnected_once(f"Backend socket unavailable; deferring {event_name}")
             return False
 
         try:
             with self._sender_lock:
-                LOGGER.info("[SEND] event=%s payload=%s", event_name, self._payload_preview(payload))
+                if event_name not in {"network_scan", "sensor_heartbeat"}:
+                    LOGGER.info("[SEND] event=%s payload=%s", event_name, self._payload_preview(payload))
                 self.sio.emit(event_name, payload)
             return True
         except Exception as exc:
             LOGGER.warning("[SEND] failed event=%s error=%s", event_name, exc)
             update_status(backend_status="degraded", message=f"Send failed for {event_name}")
             return False
+
+    def _log_disconnected_once(self, message):
+        now = time.monotonic()
+        if (now - self._last_disconnect_log_at) < DISCONNECTED_LOG_INTERVAL_SECONDS:
+            return
+        self._last_disconnect_log_at = now
+        LOGGER.warning("[Sensor] %s", message)
+
+    def _drain_outbound_queue(self):
+        while True:
+            try:
+                self.outbound_queue.get_nowait()
+            except Empty:
+                return
 
     def _payload_preview(self, payload):
         if not isinstance(payload, dict):
@@ -293,7 +367,7 @@ class WSClient:
 
     def _status_publisher(self):
         while self.is_running:
-            if self.sensor_id:
+            if self.remote_enabled and self.sensor_id:
                 payload = self._build_sensor_status_payload()
                 self._enqueue_event("sensor_heartbeat", payload)
             time.sleep(SENSOR_STATUS_INTERVAL_SECONDS)

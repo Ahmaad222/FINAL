@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$ROOT_DIR/logs"
 
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
-BACKEND_PORT="${BACKEND_PORT:-8000}"
+BACKEND_PORT="${BACKEND_PORT:-5000}"
 
 log() {
   printf '[stop_all] %s\n' "$*"
@@ -16,12 +16,12 @@ warn() {
   printf '[stop_all][warn] %s\n' "$*" >&2
 }
 
-pid_file_for() {
-  printf '%s/%s.pid\n' "$LOG_DIR" "$1"
-}
-
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+pid_file_for() {
+  printf '%s/%s.pid\n' "$LOG_DIR" "$1"
 }
 
 process_running() {
@@ -118,43 +118,74 @@ port_listeners() {
   local port="$1"
 
   if command_exists fuser; then
-    fuser -n tcp "$port" 2>/dev/null || true
+    fuser -n tcp "$port" 2>/dev/null || sudo -n fuser -n tcp "$port" 2>/dev/null || true
     return
   fi
 
   if command_exists lsof; then
     lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null || true
-    return
   fi
 }
 
 cleanup_port() {
   local port="$1"
-  local listeners=""
 
-  listeners="$(port_listeners "$port")"
-  [ -n "$listeners" ] || return 0
+  if [ -z "$(port_listeners "$port")" ]; then
+    return
+  fi
 
-  log "Cleaning up processes still bound to port $port"
+  log "Cleaning up listeners on port $port"
   if command_exists fuser; then
-    fuser -k -TERM -n tcp "$port" >/dev/null 2>&1 || true
+    fuser -k -TERM -n tcp "$port" >/dev/null 2>&1 || sudo -n fuser -k -TERM -n tcp "$port" >/dev/null 2>&1 || true
     sleep 2
     if [ -n "$(port_listeners "$port")" ]; then
-      fuser -k -KILL -n tcp "$port" >/dev/null 2>&1 || true
+      fuser -k -KILL -n tcp "$port" >/dev/null 2>&1 || sudo -n fuser -k -KILL -n tcp "$port" >/dev/null 2>&1 || true
       sleep 1
     fi
   elif command_exists lsof; then
     while read -r pid; do
       [ -n "$pid" ] || continue
-      kill -TERM "$pid" >/dev/null 2>&1 || true
-    done <<<"$listeners"
+      signal_pid TERM "$pid"
+    done <<<"$(port_listeners "$port")"
     sleep 2
+    while read -r pid; do
+      [ -n "$pid" ] || continue
+      signal_pid KILL "$pid"
+    done <<<"$(port_listeners "$port")"
+    sleep 1
   else
     warn "Neither fuser nor lsof is available; port cleanup skipped for $port"
-    return 0
   fi
+}
 
-  [ -z "$(port_listeners "$port")" ] || warn "Port $port is still busy after cleanup"
+find_project_processes() {
+  ps -eo pid=,args= | awk -v root="$ROOT_DIR" '
+    index($0, root) && (
+      index($0, "/backend/app.py") ||
+      index($0, "/sensor/main.py") ||
+      index($0, " pnpm dev") ||
+      index($0, "next dev") ||
+      index($0, ".next")
+    ) {
+      print $1
+    }
+  ' | sort -u
+}
+
+cleanup_project_processes() {
+  local pid=""
+
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    terminate_pid "$pid" "project-process"
+  done < <(find_project_processes)
+}
+
+remove_stale_pid_files() {
+  rm -f \
+    "$(pid_file_for frontend)" \
+    "$(pid_file_for backend)" \
+    "$(pid_file_for sensor)"
 }
 
 main() {
@@ -164,10 +195,12 @@ main() {
   stop_service_from_pid_file "backend"
   stop_service_from_pid_file "frontend"
 
+  cleanup_project_processes
   cleanup_port "$BACKEND_PORT"
   cleanup_port "$FRONTEND_PORT"
+  remove_stale_pid_files
 
-  log "ZeinaGuard Pro services have been stopped"
+  log "ZeinaGuard services have been stopped"
 }
 
 main "$@"

@@ -11,7 +11,7 @@ SENSOR_DIR="$ROOT_DIR/sensor"
 ENV_FILE="$ROOT_DIR/.env"
 
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
-BACKEND_PORT="${BACKEND_PORT:-8000}"
+BACKEND_PORT="${BACKEND_PORT:-5000}"
 BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
 BACKEND_VENV_PYTHON="$BACKEND_DIR/.venv/bin/python"
 SENSOR_VENV_PYTHON="$SENSOR_DIR/.venv/bin/python"
@@ -59,7 +59,6 @@ load_env_file() {
     set +a
   fi
 
-  # Force a consistent local topology for this supervisor.
   BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
   export FLASK_PORT="$BACKEND_PORT"
   export BACKEND_URL="$BACKEND_URL"
@@ -92,7 +91,7 @@ require_file() {
   [ -f "$path" ] || add_preflight_error "$description is missing: $path"
 }
 
-validate_system_command() {
+validate_command() {
   local command_name="$1"
   command_exists "$command_name" || add_preflight_error "Required command is not installed: $command_name"
 }
@@ -102,13 +101,35 @@ validate_venv_python() {
   local python_bin="$2"
 
   if [ ! -x "$python_bin" ]; then
-    add_preflight_error "${service_name} virtual environment is missing a Python interpreter: $python_bin"
+    add_preflight_error "${service_name} virtual environment is missing Python: $python_bin"
     return
   fi
 
-  if ! "$python_bin" -c 'import sys; raise SystemExit(0 if sys.prefix != getattr(sys, "base_prefix", sys.prefix) else 1)' >/dev/null 2>&1; then
+  if ! "$python_bin" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
     add_preflight_error "${service_name} virtual environment Python is not runnable: $python_bin"
+    return
   fi
+
+  "$python_bin" -m pip --version >/dev/null 2>&1 || add_preflight_error "${service_name} virtual environment pip is unavailable"
+}
+
+validate_noninteractive_sudo() {
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    add_preflight_note "Running as root; sudo password prompt is not required"
+    return
+  fi
+
+  if ! command_exists sudo; then
+    add_preflight_error "Required command is not installed: sudo"
+    return
+  fi
+
+  if sudo -n true >/dev/null 2>&1; then
+    add_preflight_note "sudo is available in non-interactive mode"
+    return
+  fi
+
+  add_preflight_error "sudo requires a password or terminal prompt. Configure NOPASSWD or run as root."
 }
 
 interface_exists() {
@@ -128,12 +149,12 @@ interface_exists() {
 }
 
 discover_wireless_interfaces() {
-  local interface_name=""
+  local interface_path=""
 
   if [ -d /sys/class/net ]; then
-    for interface_name in /sys/class/net/*; do
-      [ -e "$interface_name/wireless" ] || continue
-      basename "$interface_name"
+    for interface_path in /sys/class/net/*; do
+      [ -e "$interface_path/wireless" ] || continue
+      basename "$interface_path"
     done
     return
   fi
@@ -145,14 +166,15 @@ discover_wireless_interfaces() {
 
 select_sensor_interface() {
   local candidate=""
-  local -a candidates=()
   local discovered_interface=""
+  local -a candidates=()
   local -A seen_candidates=()
 
   if [ -n "${SENSOR_INTERFACE:-}" ]; then
     candidates+=("$SENSOR_INTERFACE")
   fi
   candidates+=("wlan0mon" "wlan0")
+
   while read -r discovered_interface; do
     [ -n "$discovered_interface" ] || continue
     candidates+=("$discovered_interface")
@@ -197,9 +219,10 @@ run_preflight_checks() {
   require_file "$BACKEND_DIR/app.py" "Backend entrypoint"
   require_file "$SENSOR_DIR/main.py" "Sensor entrypoint"
 
-  validate_system_command python3
-  validate_system_command pnpm
-  validate_system_command sudo
+  validate_command python3
+  validate_command pnpm
+  validate_command setsid
+  validate_noninteractive_sudo
 
   if [ -d "$BACKEND_DIR/.venv" ]; then
     validate_venv_python "backend" "$BACKEND_VENV_PYTHON"
@@ -238,13 +261,7 @@ run_preflight_checks() {
   log "Pre-flight validation passed"
 }
 
-ensure_pnpm() {
-  command_exists pnpm || fail "pnpm is required to start the frontend"
-}
-
 ensure_frontend_dependencies() {
-  ensure_pnpm
-
   if [ -d "$FRONTEND_DIR/node_modules" ]; then
     log "Reusing cached frontend dependencies"
     return
@@ -265,16 +282,13 @@ port_listeners() {
   local port="$1"
 
   if command_exists fuser; then
-    fuser -n tcp "$port" 2>/dev/null || true
+    fuser -n tcp "$port" 2>/dev/null || sudo -n fuser -n tcp "$port" 2>/dev/null || true
     return
   fi
 
   if command_exists lsof; then
     lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null || true
-    return
   fi
-
-  warn "Neither fuser nor lsof is available for port inspection"
 }
 
 process_running() {
@@ -334,7 +348,6 @@ terminate_pid() {
   local label="$2"
 
   [ -n "$pid" ] || return 0
-
   if ! process_running "$pid"; then
     return 0
   fi
@@ -359,33 +372,35 @@ stop_pid_file_if_present() {
   local pid=""
 
   pid_file="$(pid_file_for "$service_name")"
-  if [ -f "$pid_file" ]; then
-    pid="$(tr -d '[:space:]' <"$pid_file" || true)"
-    terminate_pid "$pid" "$service_name"
-    rm -f "$pid_file"
+  if [ ! -f "$pid_file" ]; then
+    return
   fi
+
+  pid="$(tr -d '[:space:]' <"$pid_file" || true)"
+  terminate_pid "$pid" "$service_name"
+  rm -f "$pid_file"
 }
 
 cleanup_port_if_needed() {
   local port="$1"
-  local listeners=""
 
-  listeners="$(port_listeners "$port")"
-  [ -n "$listeners" ] || return 0
+  if [ -z "$(port_listeners "$port")" ]; then
+    return 0
+  fi
 
   warn "Port $port is busy; attempting cleanup"
   if command_exists fuser; then
-    fuser -k -TERM -n tcp "$port" >/dev/null 2>&1 || true
+    fuser -k -TERM -n tcp "$port" >/dev/null 2>&1 || sudo -n fuser -k -TERM -n tcp "$port" >/dev/null 2>&1 || true
     sleep 2
     if [ -n "$(port_listeners "$port")" ]; then
-      fuser -k -KILL -n tcp "$port" >/dev/null 2>&1 || true
+      fuser -k -KILL -n tcp "$port" >/dev/null 2>&1 || sudo -n fuser -k -KILL -n tcp "$port" >/dev/null 2>&1 || true
       sleep 1
     fi
   elif command_exists lsof; then
     while read -r port_pid; do
       [ -n "$port_pid" ] || continue
       kill -TERM "$port_pid" >/dev/null 2>&1 || true
-    done <<<"$listeners"
+    done <<<"$(port_listeners "$port")"
     sleep 2
   fi
 
@@ -398,56 +413,6 @@ ensure_port_available() {
 
   stop_pid_file_if_present "$service_name"
   cleanup_port_if_needed "$port"
-}
-
-require_sudo_access() {
-  if command_exists sudo && sudo -n true >/dev/null 2>&1; then
-    return
-  fi
-
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    return
-  fi
-
-  ensure_command sudo
-  log "Requesting sudo once for the sensor process"
-  sudo -v
-}
-
-build_sensor_command() {
-  local -n out_command_ref="$1"
-
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    out_command_ref=("$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py")
-    return
-  fi
-
-  out_command_ref=(sudo -E "$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py")
-}
-
-run_sensor_preflight_test() {
-  local -a sensor_test_command
-
-  : >"$SENSOR_TEST_LOG"
-  log "Running sensor self-test on interface ${SELECTED_SENSOR_INTERFACE}"
-
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    sensor_test_command=("$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py" --test)
-  else
-    sensor_test_command=(sudo -E "$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py" --test)
-  fi
-
-  if (
-    cd "$SENSOR_DIR"
-    env BACKEND_URL="$BACKEND_URL" ZEINAGUARD_NONINTERACTIVE=1 SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
-      "${sensor_test_command[@]}"
-  ) >>"$SENSOR_TEST_LOG" 2>&1; then
-    log "Sensor self-test passed"
-    return
-  fi
-
-  tail -n 60 "$SENSOR_TEST_LOG" >&2 || true
-  fail "Sensor self-test failed; see $SENSOR_TEST_LOG"
 }
 
 start_service() {
@@ -472,55 +437,37 @@ start_service() {
   SERVICE_PIDS["$service_name"]="$pid"
   START_ORDER+=("$service_name")
 
-  sleep 1
+  sleep 2
   process_running "$pid" || fail "$service_name failed to start; see $log_file"
 }
 
-wait_for_http_ok() {
-  local name="$1"
-  local url="$2"
-  local timeout_seconds="$3"
+wait_for_http() {
+  local url="$1"
+  local timeout_seconds="$2"
+  local expected_json_key="${3:-}"
+  local expected_json_value="${4:-}"
   local deadline=$((SECONDS + timeout_seconds))
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if python3 - "$url" <<'PY' >/dev/null 2>&1
-import sys
-import urllib.request
-
-url = sys.argv[1]
-try:
-    with urllib.request.urlopen(url, timeout=2) as response:
-        raise SystemExit(0 if 200 <= response.status < 500 else 1)
-except Exception:
-    raise SystemExit(1)
-PY
-    then
-      return 0
-    fi
-    sleep 2
-  done
-
-  tail -n 40 "$LOG_DIR/$name.log" >&2 || true
-  return 1
-}
-
-wait_for_backend_health() {
-  local deadline=$((SECONDS + 60))
-
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if python3 - "$BACKEND_URL/health" <<'PY' >/dev/null 2>&1
+    if python3 - "$url" "$expected_json_key" "$expected_json_value" <<'PY' >/dev/null 2>&1
 import json
 import sys
 import urllib.request
 
 url = sys.argv[1]
+expected_key = sys.argv[2]
+expected_value = sys.argv[3]
+
 try:
     with urllib.request.urlopen(url, timeout=2) as response:
-        payload = json.load(response)
+        body = response.read().decode("utf-8", errors="replace")
+        if not expected_key:
+            raise SystemExit(0 if 200 <= response.status < 300 else 1)
+        payload = json.loads(body)
 except Exception:
     raise SystemExit(1)
 
-raise SystemExit(0 if payload.get("status") == "healthy" else 1)
+raise SystemExit(0 if str(payload.get(expected_key, "")) == expected_value else 1)
 PY
     then
       return 0
@@ -528,8 +475,79 @@ PY
     sleep 2
   done
 
-  tail -n 60 "$BACKEND_LOG" >&2 || true
   return 1
+}
+
+wait_for_socketio_endpoint() {
+  local timeout_seconds="${1:-30}"
+  local deadline=$((SECONDS + timeout_seconds))
+
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if python3 - "$BACKEND_URL" <<'PY' >/dev/null 2>&1
+import sys
+import urllib.request
+
+base_url = sys.argv[1].rstrip("/")
+url = f"{base_url}/socket.io/?transport=polling&EIO=4&t=preflight"
+
+try:
+    with urllib.request.urlopen(url, timeout=2) as response:
+        body = response.read().decode("utf-8", errors="replace")
+except Exception:
+    raise SystemExit(1)
+
+raise SystemExit(0 if response.status == 200 and "sid" in body else 1)
+PY
+    then
+      return 0
+    fi
+    sleep 2
+  done
+
+  return 1
+}
+
+verify_backend_runtime_readiness() {
+  log "Waiting for backend health endpoint on ${BACKEND_URL}"
+  wait_for_http "$BACKEND_URL/health" 60 status healthy || fail "Backend health check failed; see $BACKEND_LOG"
+  wait_for_http "$BACKEND_URL/ready" 60 ready True || fail "Backend readiness check failed; see $BACKEND_LOG"
+  wait_for_socketio_endpoint 30 || fail "Backend Socket.IO endpoint is not ready; see $BACKEND_LOG"
+  log "Backend is fully ready"
+}
+
+run_sensor_preflight_test() {
+  local -a command
+
+  : >"$SENSOR_TEST_LOG"
+  log "Running sensor self-test on interface ${SELECTED_SENSOR_INTERFACE}"
+
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    command=("$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py" --test)
+  else
+    command=(sudo -n -E "$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py" --test)
+  fi
+
+  if (
+    cd "$SENSOR_DIR"
+    env BACKEND_URL="$BACKEND_URL" ZEINAGUARD_NONINTERACTIVE=1 SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
+      "${command[@]}"
+  ) >>"$SENSOR_TEST_LOG" 2>&1; then
+    log "Sensor self-test passed"
+    return 0
+  fi
+
+  fail "Sensor self-test failed; see $SENSOR_TEST_LOG"
+}
+
+build_sensor_command() {
+  local -n out_command_ref="$1"
+
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    out_command_ref=("$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py")
+    return
+  fi
+
+  out_command_ref=(sudo -n -E "$SENSOR_VENV_PYTHON" "$SENSOR_DIR/main.py")
 }
 
 cleanup_all() {
@@ -550,10 +568,6 @@ cleanup_all() {
 
   cleanup_port_if_needed "$FRONTEND_PORT" || true
   cleanup_port_if_needed "$BACKEND_PORT" || true
-
-  if [ "$exit_code" -eq 0 ]; then
-    log "All services stopped cleanly"
-  fi
 }
 
 on_interrupt() {
@@ -566,7 +580,7 @@ on_interrupt() {
 on_exit() {
   local exit_code="$?"
   if [ "$exit_code" -ne 0 ] && [ "${#START_ORDER[@]}" -gt 0 ]; then
-    warn "Startup supervisor exited unexpectedly; cleaning up"
+    warn "Startup failed; cleaning up running services"
     cleanup_all "$exit_code"
   fi
 }
@@ -581,18 +595,16 @@ EOF
 }
 
 monitor_services() {
-  while true; do
-    local service_name
-    local pid
+  local service_name
+  local pid
 
+  while true; do
     for service_name in "${START_ORDER[@]}"; do
       pid="${SERVICE_PIDS[$service_name]:-}"
       if ! process_running "$pid"; then
-        tail -n 40 "$LOG_DIR/$service_name.log" >&2 || true
         fail "$service_name exited unexpectedly; see $LOG_DIR/$service_name.log"
       fi
     done
-
     sleep 2
   done
 }
@@ -608,28 +620,24 @@ main() {
   ensure_runtime_dirs
   run_preflight_checks || exit 1
 
-  ensure_command setsid
-  require_sudo_access
-  run_sensor_preflight_test
-
   ensure_frontend_dependencies
 
-  ensure_port_available "frontend" "$FRONTEND_PORT"
   ensure_port_available "backend" "$BACKEND_PORT"
+  ensure_port_available "frontend" "$FRONTEND_PORT"
   stop_pid_file_if_present "sensor"
 
-  build_sensor_command sensor_command
-
   start_service "backend" "$BACKEND_DIR" "$BACKEND_LOG" \
-    env FLASK_PORT="$BACKEND_PORT" BACKEND_URL="$BACKEND_URL" \
-    SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
+    env FLASK_PORT="$BACKEND_PORT" BACKEND_URL="$BACKEND_URL" SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
     "$BACKEND_VENV_PYTHON" "$BACKEND_DIR/app.py"
-  wait_for_backend_health || fail "Backend failed health check on port ${BACKEND_PORT}"
+  verify_backend_runtime_readiness
 
   start_service "frontend" "$FRONTEND_DIR" "$FRONTEND_LOG" \
     env NEXT_PUBLIC_API_URL="$BACKEND_URL" NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL" \
     pnpm dev
-  wait_for_http_ok "frontend" "http://127.0.0.1:${FRONTEND_PORT}" 90 || fail "Frontend did not become reachable on port ${FRONTEND_PORT}"
+  wait_for_http "http://127.0.0.1:${FRONTEND_PORT}" 90 || fail "Frontend failed health check; see $FRONTEND_LOG"
+
+  run_sensor_preflight_test
+  build_sensor_command sensor_command
 
   start_service "sensor" "$SENSOR_DIR" "$SENSOR_LOG" \
     env BACKEND_URL="$BACKEND_URL" ZEINAGUARD_NONINTERACTIVE=1 SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \

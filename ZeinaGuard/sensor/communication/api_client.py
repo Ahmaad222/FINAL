@@ -3,7 +3,7 @@ import requests
 
 class APIClient:
     def __init__(self, backend_url=None):
-        self.backend_url = (backend_url or "http://localhost:8000").rstrip("/")
+        self.backend_url = (backend_url or "http://localhost:5000").rstrip("/")
         self.username = "admin"
         self.password = "admin123"
         self.token = None
