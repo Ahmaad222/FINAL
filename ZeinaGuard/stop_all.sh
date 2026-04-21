@@ -26,7 +26,41 @@ command_exists() {
 
 process_running() {
   local pid="$1"
-  [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1
+  local state=""
+
+  [ -n "$pid" ] || return 1
+  state="$(ps -o stat= -p "$pid" 2>/dev/null | awk 'NR==1 {print $1}')"
+  [ -n "$state" ] && [[ "$state" != Z* ]]
+}
+
+signal_pid() {
+  local signal_name="$1"
+  local pid="$2"
+
+  [ -n "$pid" ] || return 0
+
+  if kill "-${signal_name}" "$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command_exists sudo; then
+    sudo -n kill "-${signal_name}" "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+signal_process_group() {
+  local signal_name="$1"
+  local pid="$2"
+
+  [ -n "$pid" ] || return 0
+
+  if kill "-${signal_name}" -- "-$pid" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if command_exists sudo; then
+    sudo -n kill "-${signal_name}" -- "-$pid" >/dev/null 2>&1 || true
+  fi
 }
 
 wait_for_exit() {
@@ -52,16 +86,16 @@ terminate_pid() {
   fi
 
   log "Stopping $label (pid $pid)"
-  kill -TERM -- "-$pid" >/dev/null 2>&1 || true
-  kill -TERM "$pid" >/dev/null 2>&1 || true
+  signal_process_group TERM "$pid"
+  signal_pid TERM "$pid"
 
   if wait_for_exit "$pid" 10; then
     return 0
   fi
 
   warn "$label did not stop gracefully; forcing shutdown"
-  kill -KILL -- "-$pid" >/dev/null 2>&1 || true
-  kill -KILL "$pid" >/dev/null 2>&1 || true
+  signal_process_group KILL "$pid"
+  signal_pid KILL "$pid"
   wait_for_exit "$pid" 5 || true
 }
 
