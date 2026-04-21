@@ -4,6 +4,7 @@ IFS=$'\n\t'
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="$ROOT_DIR/logs"
+PID_FILE="${TMPDIR:-/tmp}/zeinaguard.pids"
 FRONTEND_DIR="$ROOT_DIR"
 BACKEND_DIR="$ROOT_DIR/backend"
 SENSOR_DIR="$ROOT_DIR/sensor"
@@ -11,7 +12,7 @@ ENV_FILE="$ROOT_DIR/.env"
 
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 BACKEND_PORT="${BACKEND_PORT:-5000}"
-BACKEND_URL="http://127.0.0.1:${BACKEND_PORT}"
+BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:${BACKEND_PORT}}"
 BACKEND_VENV_PYTHON="$BACKEND_DIR/.venv/bin/python"
 SENSOR_VENV_PYTHON="$SENSOR_DIR/.venv/bin/python"
 SENSOR_MAIN="$SENSOR_DIR/main.py"
@@ -24,6 +25,7 @@ declare -A SERVICE_PIDS=()
 declare -a SERVICE_ORDER=("sensor" "backend" "frontend")
 declare -a PREFLIGHT_ERRORS=()
 declare -a PREFLIGHT_NOTES=()
+declare -a BACKEND_RETRY_DELAYS=(1 1 2 2 3 3 5 5 8 10)
 
 SELECTED_SENSOR_INTERFACE=""
 SHUTDOWN_DONE=0
@@ -45,6 +47,20 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+current_user() {
+  id -un
+}
+
+sensor_sudoers_python_rule() {
+  printf '%s ALL=(root) NOPASSWD: SETENV: %s %s *' "$(current_user)" "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN"
+}
+
+sensor_sudoers_cleanup_rule() {
+  local kill_bin="/bin/kill"
+  local pkill_bin="${PKILL_BIN:-$(command -v pkill 2>/dev/null || echo /usr/bin/pkill)}"
+  printf '%s ALL=(root) NOPASSWD: %s, %s' "$(current_user)" "$kill_bin" "$pkill_bin"
+}
+
 load_env_file() {
   if [ -f "$ENV_FILE" ]; then
     set -a
@@ -58,10 +74,23 @@ load_env_file() {
   export NEXT_PUBLIC_API_URL="$BACKEND_URL"
   export NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL"
   export ZEINAGUARD_NONINTERACTIVE=1
+  export PYTHONUNBUFFERED=1
 }
 
 ensure_runtime_dirs() {
   mkdir -p "$LOG_DIR"
+}
+
+reset_runtime_state() {
+  rm -f "$PID_FILE"
+}
+
+write_pid_file() {
+  cat >"$PID_FILE" <<EOF
+frontend=${SERVICE_PIDS[frontend]:-}
+backend=${SERVICE_PIDS[backend]:-}
+sensor=${SERVICE_PIDS[sensor]:-}
+EOF
 }
 
 add_preflight_error() {
@@ -86,7 +115,54 @@ require_file() {
 
 validate_command() {
   local command_name="$1"
-  command_exists "$command_name" || add_preflight_error "Required command is not installed: $command_name"
+  local install_hint="${2:-}"
+
+  if command_exists "$command_name"; then
+    return 0
+  fi
+
+  if [ -n "$install_hint" ]; then
+    add_preflight_error "Required command is not installed: $command_name. $install_hint"
+  else
+    add_preflight_error "Required command is not installed: $command_name"
+  fi
+}
+
+ensure_pnpm() {
+  if command_exists pnpm; then
+    return 0
+  fi
+
+  if ! command_exists npm; then
+    add_preflight_error "pnpm is missing and npm is unavailable. Install Node.js with npm, then run: npm install -g pnpm"
+    return 1
+  fi
+
+  log "pnpm not found; attempting automatic install with npm"
+  if npm install -g pnpm >/dev/null 2>&1; then
+    hash -r
+    add_preflight_note "Installed pnpm with npm install -g pnpm"
+    return 0
+  fi
+
+  if [ -n "${HOME:-}" ]; then
+    local user_prefix="$HOME/.local"
+    mkdir -p "$user_prefix"
+    if npm install -g pnpm --prefix "$user_prefix" >/dev/null 2>&1; then
+      export PATH="$user_prefix/bin:$PATH"
+      hash -r
+      add_preflight_note "Installed pnpm under $user_prefix/bin for the current user"
+      return 0
+    fi
+  fi
+
+  add_preflight_error "pnpm is missing and automatic installation failed. Install it manually with: npm install -g pnpm"
+  return 1
+}
+
+validate_python_runtime() {
+  python3 -m pip --version >/dev/null 2>&1 || add_preflight_error "python3 pip is unavailable. Install it with: sudo apt-get install python3-pip"
+  python3 -m venv --help >/dev/null 2>&1 || add_preflight_error "python3 venv support is unavailable. Install it with: sudo apt-get install python3-venv"
 }
 
 validate_venv_python() {
@@ -123,7 +199,7 @@ port_listeners() {
   fi
 
   if command_exists fuser; then
-    fuser -n tcp "$port" 2>/dev/null || true
+    fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | awk 'NF'
   fi
 }
 
@@ -156,6 +232,11 @@ process_group_running() {
   fi
 
   process_running "$pgid"
+}
+
+process_group_id() {
+  local pid="$1"
+  ps -o pgid= -p "$pid" 2>/dev/null | awk 'NR==1 {gsub(/[[:space:]]/, "", $1); print $1}'
 }
 
 wait_for_service_exit() {
@@ -239,11 +320,11 @@ PY
 }
 
 wait_for_backend_health() {
-  local -a delays=(1 2 5 10 10 10 10 10 10 10)
   local attempt=0
   local delay=0
+  local max_attempts="${#BACKEND_RETRY_DELAYS[@]}"
 
-  while [ "$attempt" -lt "${#delays[@]}" ]; do
+  while [ "$attempt" -lt "$max_attempts" ]; do
     if ! process_running "${SERVICE_PIDS[backend]:-}"; then
       return 1
     fi
@@ -255,9 +336,9 @@ wait_for_backend_health() {
       return 0
     fi
 
-    delay="${delays[$attempt]}"
+    delay="${BACKEND_RETRY_DELAYS[$attempt]}"
     attempt=$((attempt + 1))
-    warn "Backend is not ready yet (attempt ${attempt}/${#delays[@]}). Retrying in ${delay}s"
+    warn "Backend is not ready yet (attempt ${attempt}/${max_attempts}). Retrying in ${delay}s"
     sleep "$delay"
   done
 
@@ -329,37 +410,73 @@ select_sensor_interface() {
   return 1
 }
 
-require_noninteractive_sudo() {
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    add_preflight_error "Do not run run.sh as root. Run it as your normal user so frontend and backend stay unprivileged."
-    return
-  fi
-
-  command_exists sudo || add_preflight_error "Required command is not installed: sudo"
-  if command_exists sudo && ! sudo -n true >/dev/null 2>&1; then
-    add_preflight_error "sudo -n is not permitted. Configure NOPASSWD for the sensor command."
-  fi
-}
-
 run_sensor_command() {
-  local sensor_mode=("$@")
-
   (
     cd "$SENSOR_DIR"
-    exec sudo -n env -i \
-      PATH="/usr/sbin:/usr/bin:/bin" \
-      BACKEND_URL="$BACKEND_URL" \
-      SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
-      ZEINAGUARD_NONINTERACTIVE=1 \
-      PYTHONUNBUFFERED=1 \
-      "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" "${sensor_mode[@]}"
+    BACKEND_URL="$BACKEND_URL" \
+    SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
+    ZEINAGUARD_NONINTERACTIVE=1 \
+    PYTHONUNBUFFERED=1 \
+    exec sudo -n \
+      --preserve-env=BACKEND_URL,SENSOR_INTERFACE,ZEINAGUARD_NONINTERACTIVE,PYTHONUNBUFFERED \
+      "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" "$@"
   )
 }
 
-run_sensor_preflight_test() {
+validate_sensor_sudo() {
   : >"$SENSOR_LOG"
-  log "Running privileged sensor self-test on interface ${SELECTED_SENSOR_INTERFACE}"
-  run_sensor_command --test >>"$SENSOR_LOG" 2>&1 || fail "Sensor self-test failed. See $SENSOR_LOG"
+
+  if run_sensor_command --test 2>&1 | awk -v prefix="[sensor] " '{ print prefix $0; fflush() }' >>"$SENSOR_LOG"; then
+    add_preflight_note "Privileged sensor self-test passed"
+    return 0
+  fi
+
+  add_preflight_error "Sensor privileged self-test failed. See $SENSOR_LOG"
+  add_preflight_error "Configure passwordless sudo for sensor startup and shutdown. Suggested sudoers entries:"
+  add_preflight_error "  $(sensor_sudoers_python_rule)"
+  add_preflight_error "  $(sensor_sudoers_cleanup_rule)"
+  return 1
+}
+
+terminate_process_group() {
+  local service_name="$1"
+  local pid="$2"
+  local signal_name="$3"
+  local pgid="$4"
+
+  [ -n "$pid" ] || return 0
+  [ -n "$pgid" ] || pgid="$pid"
+
+  kill "-$signal_name" -- "-$pgid" >/dev/null 2>&1 || true
+  kill "-$signal_name" "$pid" >/dev/null 2>&1 || true
+
+  if [ "$service_name" = "sensor" ] && command_exists sudo; then
+    sudo -n kill "-$signal_name" -- "-$pgid" >/dev/null 2>&1 || true
+    sudo -n kill "-$signal_name" "$pid" >/dev/null 2>&1 || true
+    sudo -n pkill "-$signal_name" -f "$SENSOR_MAIN" >/dev/null 2>&1 || true
+  fi
+}
+
+kill_listeners_on_port() {
+  local port="$1"
+  local pid=""
+
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -TERM "$pid" >/dev/null 2>&1 || sudo -n kill -TERM "$pid" >/dev/null 2>&1 || true
+  done < <(port_listeners "$port")
+
+  sleep 2
+
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -KILL "$pid" >/dev/null 2>&1 || sudo -n kill -KILL "$pid" >/dev/null 2>&1 || true
+  done < <(port_listeners "$port")
+}
+
+cleanup_ports() {
+  kill_listeners_on_port "$FRONTEND_PORT"
+  kill_listeners_on_port "$BACKEND_PORT"
 }
 
 start_service() {
@@ -368,16 +485,22 @@ start_service() {
   local log_file="$3"
   shift 3
 
-  local pid
+  local pid=""
 
   : >"$log_file"
   (
     cd "$workdir"
-    exec setsid "$@"
+    exec setsid bash -lc '
+      set -o pipefail
+      service_prefix="$1"
+      shift
+      "$@" 2>&1 | awk -v prefix="[$service_prefix] " '"'"'{ print prefix $0; fflush() }'"'"'
+    ' _ "$service_name" "$@"
   ) >>"$log_file" 2>&1 &
 
   pid="$!"
   SERVICE_PIDS["$service_name"]="$pid"
+  write_pid_file
 
   sleep 2
   process_running "$pid" || fail "$service_name failed to stay running. See $log_file"
@@ -386,24 +509,27 @@ start_service() {
 stop_service() {
   local service_name="$1"
   local pid="${SERVICE_PIDS[$service_name]:-}"
-  local pgid="$pid"
+  local pgid=""
 
   [ -n "$pid" ] || return 0
+  pgid="$(process_group_id "$pid")"
 
   log "Stopping $service_name (pid $pid)"
-  kill -TERM -- "-$pid" >/dev/null 2>&1 || true
-  kill -TERM "$pid" >/dev/null 2>&1 || true
+  terminate_process_group "$service_name" "$pid" TERM "${pgid:-$pid}"
 
-  if wait_for_service_exit "$pid" "$pgid" 10; then
+  if wait_for_service_exit "$pid" "${pgid:-$pid}" 10; then
     wait "$pid" 2>/dev/null || true
+    SERVICE_PIDS["$service_name"]=""
+    write_pid_file
     return 0
   fi
 
   warn "$service_name did not stop gracefully; forcing shutdown"
-  kill -KILL -- "-$pid" >/dev/null 2>&1 || true
-  kill -KILL "$pid" >/dev/null 2>&1 || true
-  wait_for_service_exit "$pid" "$pgid" 5 || true
+  terminate_process_group "$service_name" "$pid" KILL "${pgid:-$pid}"
+  wait_for_service_exit "$pid" "${pgid:-$pid}" 5 || true
   wait "$pid" 2>/dev/null || true
+  SERVICE_PIDS["$service_name"]=""
+  write_pid_file
 }
 
 cleanup_child_processes() {
@@ -437,6 +563,8 @@ shutdown_all() {
   done
 
   cleanup_child_processes
+  cleanup_ports
+  rm -f "$PID_FILE"
   wait 2>/dev/null || true
 
   if [ "$exit_code" -eq 0 ]; then
@@ -445,7 +573,7 @@ shutdown_all() {
 }
 
 print_preflight_failures() {
-  local item
+  local item=""
 
   printf '[run.sh][error] Pre-flight validation failed:\n' >&2
   for item in "${PREFLIGHT_ERRORS[@]}"; do
@@ -461,21 +589,31 @@ run_preflight_checks() {
 
   log "Running pre-flight validation"
 
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    add_preflight_error "Do not run run.sh as root. Run it as your normal user so frontend and backend stay unprivileged."
+  fi
+
   require_directory "$BACKEND_DIR" "Backend directory"
   require_directory "$SENSOR_DIR" "Sensor directory"
   require_file "$FRONTEND_DIR/package.json" "Frontend package manifest"
   require_file "$BACKEND_DIR/app.py" "Backend entrypoint"
   require_file "$SENSOR_MAIN" "Sensor entrypoint"
 
-  validate_command node
-  validate_command pnpm
-  validate_command python3
-  validate_command setsid
+  validate_command node "Install Node.js first."
+  validate_command python3 "Install Python 3 first."
+  validate_command sudo "Install sudo and configure non-root access for the sensor."
+  validate_command setsid "Install util-linux so the launcher can isolate process groups."
+
+  ensure_pnpm
+  validate_python_runtime
+
   if ! command_exists lsof && ! command_exists fuser; then
     add_preflight_error "Port inspection requires lsof or fuser to be installed"
   fi
 
-  require_noninteractive_sudo
+  if ! command_exists ip && ! command_exists iwconfig; then
+    add_preflight_error "Wireless interface discovery requires iproute2 or wireless-tools"
+  fi
 
   if [ -d "$BACKEND_DIR/.venv" ]; then
     validate_venv_python "backend" "$BACKEND_VENV_PYTHON"
@@ -504,6 +642,10 @@ run_preflight_checks() {
     add_preflight_error "No usable wireless interface found. Set SENSOR_INTERFACE or attach a wireless adapter."
   else
     add_preflight_note "Using sensor interface: $SELECTED_SENSOR_INTERFACE"
+  fi
+
+  if [ "${#PREFLIGHT_ERRORS[@]}" -eq 0 ]; then
+    validate_sensor_sudo
   fi
 
   if [ "${#PREFLIGHT_ERRORS[@]}" -gt 0 ]; then
@@ -536,6 +678,7 @@ ZeinaGuard is running
 Frontend URL: http://127.0.0.1:${FRONTEND_PORT}
 Backend URL : ${BACKEND_URL}
 Logs        : ${LOG_DIR}
+PID file    : ${PID_FILE}
 EOF
 }
 
@@ -578,6 +721,7 @@ main() {
 
   load_env_file
   ensure_runtime_dirs
+  reset_runtime_state
   run_preflight_checks || exit 1
   ensure_frontend_dependencies
 
@@ -597,21 +741,16 @@ main() {
     "$FRONTEND_LOG" \
     env NEXT_PUBLIC_API_URL="$BACKEND_URL" NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL" pnpm dev
 
-  wait_for_http "http://127.0.0.1:${FRONTEND_PORT}" 30 || fail "Frontend failed health check. See $FRONTEND_LOG"
+  wait_for_http "http://127.0.0.1:${FRONTEND_PORT}" 10 || fail "Frontend failed health check. See $FRONTEND_LOG"
 
   log "Starting sensor"
-  run_sensor_preflight_test
   start_service \
     "sensor" \
     "$SENSOR_DIR" \
     "$SENSOR_LOG" \
-    sudo -n env -i \
-      PATH="/usr/sbin:/usr/bin:/bin" \
-      BACKEND_URL="$BACKEND_URL" \
-      SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
-      ZEINAGUARD_NONINTERACTIVE=1 \
-      PYTHONUNBUFFERED=1 \
-      "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN"
+    env BACKEND_URL="$BACKEND_URL" SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" ZEINAGUARD_NONINTERACTIVE=1 PYTHONUNBUFFERED=1 \
+    sudo -n --preserve-env=BACKEND_URL,SENSOR_INTERFACE,ZEINAGUARD_NONINTERACTIVE,PYTHONUNBUFFERED \
+    "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN"
 
   print_summary
   monitor_services
