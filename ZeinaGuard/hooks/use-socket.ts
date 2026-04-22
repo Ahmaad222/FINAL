@@ -17,9 +17,13 @@ export interface LiveNetworkEvent {
 }
 
 export interface NetworkSnapshotEvent {
-  event: 'network_snapshot';
+  event: 'network_snapshot' | 'networks_snapshot';
   data: LiveNetworkEvent[];
 }
+
+type NetworkSnapshotPayload =
+  | NetworkSnapshotEvent
+  | LiveNetworkEvent[];
 
 export interface NetworkRemovedEvent {
   bssid: string;
@@ -111,6 +115,7 @@ interface UseSocketOptions {
 
 const SOCKET_EVENTS = [
   'network_snapshot',
+  'networks_snapshot',
   'sensor_snapshot',
   'sensor_status_update',
   'network_removed',
@@ -127,8 +132,25 @@ function resolveSocketUrl(): string {
     process.env.NEXT_PUBLIC_SOCKET_URL ||
     process.env.NEXT_PUBLIC_API_URL ||
     process.env.NEXT_PUBLIC_BACKEND_URL ||
-    'http://localhost:8000'
+    'http://localhost:5000'
   );
+}
+
+function normalizeNetworkSnapshot(
+  eventName: NetworkSnapshotEvent['event'],
+  payload: NetworkSnapshotPayload,
+): NetworkSnapshotEvent {
+  if (Array.isArray(payload)) {
+    return {
+      event: eventName,
+      data: payload,
+    };
+  }
+
+  return {
+    event: payload.event ?? eventName,
+    data: Array.isArray(payload.data) ? payload.data : [],
+  };
 }
 
 
@@ -218,8 +240,13 @@ export function useSocket(options: UseSocketOptions = {}) {
       console.log('[EVENT RECEIVED] connection_response', data);
     });
 
-    socket.on('network_snapshot', (event: NetworkSnapshotEvent) => {
-      console.log('SNAPSHOT', event.data);
+    socket.on('network_snapshot', (payload: NetworkSnapshotPayload) => {
+      const event = normalizeNetworkSnapshot('network_snapshot', payload);
+      handlersRef.current.onNetworkSnapshot?.(event);
+    });
+
+    socket.on('networks_snapshot', (payload: NetworkSnapshotPayload) => {
+      const event = normalizeNetworkSnapshot('networks_snapshot', payload);
       handlersRef.current.onNetworkSnapshot?.(event);
     });
 

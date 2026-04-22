@@ -13,6 +13,7 @@ from realtime_state import get_sensor_snapshot as get_realtime_sensor_snapshot
 sensors_bp = Blueprint('sensors', __name__, url_prefix='/api/sensors')
 
 
+@sensors_bp.route('', methods=['GET'])
 @sensors_bp.route('/', methods=['GET'])
 @jwt_required(optional=True)
 def get_sensors():

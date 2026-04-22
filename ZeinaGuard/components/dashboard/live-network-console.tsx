@@ -105,7 +105,7 @@ function classificationClasses(classification: LiveNetworkEvent['classification'
 function normalizeNetwork(network: LiveNetworkEvent): LiveNetworkEvent {
   return {
     ...network,
-    bssid: network.bssid.toUpperCase(),
+    bssid: String(network.bssid || '').toUpperCase(),
     classification: network.classification ?? 'LEGIT',
     last_seen: network.last_seen || network.timestamp || new Date().toISOString(),
   };
@@ -127,7 +127,7 @@ export function LiveNetworkConsole() {
   const apiBase = (
     process.env.NEXT_PUBLIC_API_URL ||
     process.env.NEXT_PUBLIC_BACKEND_URL ||
-    'http://localhost:8000'
+    'http://localhost:5000'
   ).replace(/\/$/, '');
 
   const appendActivity = (item: ActivityItem) => {
@@ -279,11 +279,9 @@ export function LiveNetworkConsole() {
     };
 
     refreshActiveNetworks();
-    const interval = window.setInterval(refreshActiveNetworks, 60000);
 
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
     };
   }, [apiBase]);
 

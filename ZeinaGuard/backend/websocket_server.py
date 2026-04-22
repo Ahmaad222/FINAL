@@ -52,7 +52,7 @@ CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
 LIVE_NETWORK_WINDOW_SECONDS = float(os.getenv("LIVE_NETWORK_TTL_SECONDS", "60"))
 LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS = float(os.getenv("LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS", "60"))
 SENSOR_HEARTBEAT_TIMEOUT_SECONDS = float(os.getenv("LIVE_SENSOR_TTL_SECONDS", "30"))
-LIVE_STATE_SWEEP_INTERVAL_SECONDS = float(os.getenv("LIVE_STATE_SWEEP_INTERVAL_SECONDS", "15"))
+LIVE_STATE_SWEEP_INTERVAL_SECONDS = float(os.getenv("LIVE_STATE_SWEEP_INTERVAL_SECONDS", "5"))
 SNAPSHOT_INTERVAL_SECONDS = float(os.getenv("SNAPSHOT_INTERVAL_SECONDS", "1"))
 SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "6"))
 THREAT_RETENTION_HOURS = int(os.getenv("THREAT_RETENTION_HOURS", "24"))
@@ -1377,7 +1377,7 @@ def _persist_sensor_timeout(sensor_id: int, payload: dict[str, Any]) -> None:
     db.session.commit()
 
 
-def _emit_snapshot(socketio: SocketIO) -> None:
+def _emit_snapshot(socketio: SocketIO, room: str | None = DASHBOARD_ROOM) -> None:
     live_networks = get_realtime_network_snapshot()
     network_snapshot = {
         "event": NETWORK_SNAPSHOT_EVENT,
@@ -1392,20 +1392,20 @@ def _emit_snapshot(socketio: SocketIO) -> None:
         "data": get_realtime_sensor_snapshot(),
     }
     LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORK_SNAPSHOT_EVENT, len(network_snapshot["data"]))
-    _emit_socket_event(socketio, NETWORK_SNAPSHOT_EVENT, network_snapshot, room=DASHBOARD_ROOM)
+    _emit_socket_event(socketio, NETWORK_SNAPSHOT_EVENT, network_snapshot, room=room)
     LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORKS_SNAPSHOT_EVENT, len(networks_snapshot["data"]))
-    _emit_socket_event(socketio, NETWORKS_SNAPSHOT_EVENT, networks_snapshot, room=DASHBOARD_ROOM)
+    _emit_socket_event(socketio, NETWORKS_SNAPSHOT_EVENT, networks_snapshot, room=room)
     LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", SENSOR_SNAPSHOT_EVENT, len(sensor_snapshot["data"]))
-    _emit_socket_event(socketio, SENSOR_SNAPSHOT_EVENT, sensor_snapshot, room=DASHBOARD_ROOM)
+    _emit_socket_event(socketio, SENSOR_SNAPSHOT_EVENT, sensor_snapshot, room=room)
 
 
 def _realtime_state_loop(app, socketio: SocketIO) -> None:
     next_cleanup_at = time.monotonic()
     next_db_cleanup_at = time.monotonic()
-    next_snapshot_at = time.monotonic()
 
     while True:
         now = time.monotonic()
+        state_changed = False
 
         if now >= next_cleanup_at:
             removed_networks, updated_sensors = prune_expired_state()
@@ -1417,6 +1417,7 @@ def _realtime_state_loop(app, socketio: SocketIO) -> None:
                     {"bssid": network.get("bssid")},
                     room=DASHBOARD_ROOM,
                 )
+                state_changed = True
             for sensor in updated_sensors:
                 LOGGER.info("[STATE REMOVE] sensor sensor_id=%s status=%s", sensor.get("sensor_id"), sensor.get("status"))
                 with app.app_context():
@@ -1431,6 +1432,7 @@ def _realtime_state_loop(app, socketio: SocketIO) -> None:
                     {"event": SENSOR_STATUS_UPDATE_EVENT, "data": sensor},
                     room=DASHBOARD_ROOM,
                 )
+                state_changed = True
             next_cleanup_at = now + LIVE_STATE_SWEEP_INTERVAL_SECONDS
 
         if now >= next_db_cleanup_at:
@@ -1444,9 +1446,8 @@ def _realtime_state_loop(app, socketio: SocketIO) -> None:
                     CLEANUP_LOGGER.warning("[Cleanup] Failed to mark stale wifi networks inactive: %s", exc)
             next_db_cleanup_at = now + LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS
 
-        if now >= next_snapshot_at:
+        if state_changed:
             _emit_snapshot(socketio)
-            next_snapshot_at = now + SNAPSHOT_INTERVAL_SECONDS
 
         time.sleep(0.2)
 
@@ -1509,6 +1510,7 @@ def init_socketio(app):
                 "timestamp": datetime.utcnow().isoformat(),
             },
         )
+        _emit_snapshot(socketio, room=client_id)
 
     @socketio.on("disconnect")
     def handle_disconnect():
@@ -1618,6 +1620,7 @@ def init_socketio(app):
                     live_network.get("sensor_id"),
                     live_network.get("classification"),
                 )
+                _emit_snapshot(socketio)
                 if persistence_manager.ingest(network_data):
                     queued += 1
             except Exception as exc:
@@ -1637,7 +1640,6 @@ def init_socketio(app):
                 "timestamp": datetime.utcnow().isoformat(),
             },
         )
-        _emit_snapshot(socketio)
 
     @socketio.on("new_threat")
     def handle_new_threat(payload):

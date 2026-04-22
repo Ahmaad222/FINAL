@@ -8,6 +8,8 @@ from auth import auth_bp
 from routes_threats import threats_bp
 from routes_sensors import sensors_bp
 from routes_dashboard import active_networks_bp, dashboard_bp
+from routes_alerts import alerts_bp
+from routes_incidents import incidents_bp
 from routes_topology import topology_bp
 from notification_routes import notifications_bp
 
@@ -25,6 +27,8 @@ def register_blueprints(app):
     
     # Sensor Infrastructure & Health
     app.register_blueprint(sensors_bp)
+    app.register_blueprint(alerts_bp)
+    app.register_blueprint(incidents_bp)
     
     # Security Dashboard & Metrics
     app.register_blueprint(dashboard_bp)

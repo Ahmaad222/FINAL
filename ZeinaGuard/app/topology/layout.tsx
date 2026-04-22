@@ -1,4 +1,5 @@
 import { Metadata } from 'next';
+import { AppLayout } from '@/components/layout/app-layout';
 
 export const metadata: Metadata = {
   title: 'Network Map - ZeinaGuard',
@@ -10,5 +11,5 @@ export default function TopologyLayout({
 }: {
   children: React.ReactNode;
 }) {
-  return children;
+  return <AppLayout>{children}</AppLayout>;
 }
