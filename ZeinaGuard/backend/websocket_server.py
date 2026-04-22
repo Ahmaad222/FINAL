@@ -241,7 +241,9 @@ class ScanPersistenceManager:
 
         channel = _safe_int(network_data.get("channel"), default=0) or None
         signal_strength = _safe_int(network_data.get("signal"), default=0) or None
-        clients_count = _safe_int(network_data.get("clients"), default=0)
+        clients_count = _extract_clients_count(
+            network_data.get("clients_count", network_data.get("clients"))
+        )
         risk_score = _safe_int(network_data.get("score"), default=0)
         uptime_seconds = _safe_int(
             network_data.get("uptime_seconds"),
@@ -1028,6 +1030,68 @@ def _format_network_contract(update: BufferedNetworkUpdate) -> dict[str, Any]:
     }
 
 
+def _extract_clients_count(value: Any) -> int:
+    if isinstance(value, list):
+        return len(value)
+    return _safe_int(value, default=0) or 0
+
+
+def _normalize_live_clients(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_clients: list[dict[str, Any]] = []
+    seen_macs: set[str] = set()
+    for item in value:
+        if isinstance(item, dict):
+            mac = _normalize_bssid(item.get("mac"))
+            client_type = sanitize_input(str(item.get("type") or "device"), max_length=50).lower() or "device"
+        else:
+            mac = _normalize_bssid(item)
+            client_type = "device"
+
+        if not mac or mac in seen_macs:
+            continue
+
+        seen_macs.add(mac)
+        normalized_clients.append(
+            {
+                "mac": mac,
+                "type": client_type,
+            }
+        )
+
+    return normalized_clients
+
+
+def _normalize_last_seen_iso(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
+        try:
+            return datetime.fromisoformat(normalized).replace(tzinfo=None).isoformat()
+        except ValueError:
+            pass
+
+    return datetime.utcnow().isoformat()
+
+
+def _format_networks_snapshot_item(network: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sensor_id": _safe_int(network.get("sensor_id"), default=0) or None,
+        "bssid": _normalize_bssid(network.get("bssid")),
+        "ssid": _normalize_ssid(network.get("ssid")),
+        "signal": _safe_int(network.get("signal"), default=0),
+        "classification": _normalize_classification(network.get("classification")).lower(),
+        "last_seen": _normalize_last_seen_iso(network.get("last_seen") or network.get("timestamp")),
+        "clients": _normalize_live_clients(network.get("clients")),
+    }
+
+
 def _broadcast_network_event(socketio: SocketIO, event_name: str, update: BufferedNetworkUpdate) -> None:
     payload = _format_network_contract(update)
     _emit_socket_event(socketio, event_name, payload, room=DASHBOARD_ROOM)
@@ -1380,12 +1444,9 @@ def _persist_sensor_timeout(sensor_id: int, payload: dict[str, Any]) -> None:
 
 def _emit_snapshot(socketio: SocketIO, room: str | None = DASHBOARD_ROOM) -> None:
     live_networks = get_realtime_network_snapshot()
+    networks_snapshot = [_format_networks_snapshot_item(network) for network in live_networks]
     network_snapshot = {
         "event": NETWORK_SNAPSHOT_EVENT,
-        "data": live_networks,
-    }
-    networks_snapshot = {
-        "event": NETWORKS_SNAPSHOT_EVENT,
         "data": live_networks,
     }
     sensor_snapshot = {
@@ -1394,7 +1455,7 @@ def _emit_snapshot(socketio: SocketIO, room: str | None = DASHBOARD_ROOM) -> Non
     }
     LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORK_SNAPSHOT_EVENT, len(network_snapshot["data"]))
     _emit_socket_event(socketio, NETWORK_SNAPSHOT_EVENT, network_snapshot, room=room)
-    LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORKS_SNAPSHOT_EVENT, len(networks_snapshot["data"]))
+    LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORKS_SNAPSHOT_EVENT, len(networks_snapshot))
     _emit_socket_event(socketio, NETWORKS_SNAPSHOT_EVENT, networks_snapshot, room=room)
     LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", SENSOR_SNAPSHOT_EVENT, len(sensor_snapshot["data"]))
     _emit_socket_event(socketio, SENSOR_SNAPSHOT_EVENT, sensor_snapshot, room=room)

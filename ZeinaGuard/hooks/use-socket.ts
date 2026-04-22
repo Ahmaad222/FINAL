@@ -14,6 +14,10 @@ export interface LiveNetworkEvent {
   last_seen: string;
   timestamp?: string;
   manufacturer: string | null;
+  clients?: Array<{
+    mac: string;
+    type?: string | null;
+  }>;
 }
 
 export interface NetworkSnapshotEvent {
@@ -136,6 +140,80 @@ function resolveSocketUrl(): string {
   );
 }
 
+function normalizeLastSeen(value: unknown): string {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const timestamp = value > 1_000_000_000_000 ? value : value * 1000;
+    return new Date(timestamp).toISOString();
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (/^\d+$/.test(trimmed)) {
+      const numericValue = Number(trimmed);
+      const timestamp = numericValue > 1_000_000_000_000 ? numericValue : numericValue * 1000;
+      return new Date(timestamp).toISOString();
+    }
+
+    const parsed = new Date(trimmed);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toISOString();
+    }
+  }
+
+  return new Date().toISOString();
+}
+
+function normalizeClassification(value: unknown): LiveNetworkEvent['classification'] {
+  const classification = String(value || 'LEGIT').trim().toUpperCase();
+  if (classification === 'ROGUE' || classification === 'SUSPICIOUS') {
+    return classification;
+  }
+  return 'LEGIT';
+}
+
+function normalizeClients(value: unknown): LiveNetworkEvent['clients'] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((client) => {
+      if (!client || typeof client !== 'object') {
+        return null;
+      }
+
+      const clientRecord = client as Record<string, unknown>;
+      const mac = String(clientRecord.mac || '').trim().toUpperCase();
+      if (!mac) {
+        return null;
+      }
+
+      return {
+        mac,
+        type: String(clientRecord.type || 'device').trim().toLowerCase() || 'device',
+      };
+    })
+    .filter((client): client is NonNullable<typeof client> => Boolean(client));
+}
+
+function normalizeNetworkItem(item: unknown): LiveNetworkEvent {
+  const network = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+  const lastSeen = normalizeLastSeen(network.last_seen ?? network.timestamp);
+
+  return {
+    sensor_id: Number(network.sensor_id || 0),
+    ssid: String(network.ssid || 'Hidden').trim() || 'Hidden',
+    bssid: String(network.bssid || '').trim().toUpperCase(),
+    signal: typeof network.signal === 'number' ? network.signal : network.signal == null ? null : Number(network.signal),
+    channel: typeof network.channel === 'number' ? network.channel : network.channel == null ? null : Number(network.channel),
+    classification: normalizeClassification(network.classification),
+    last_seen: lastSeen,
+    timestamp: typeof network.timestamp === 'string' ? network.timestamp : lastSeen,
+    manufacturer: network.manufacturer == null ? null : String(network.manufacturer),
+    clients: normalizeClients(network.clients),
+  };
+}
+
 function normalizeNetworkSnapshot(
   eventName: NetworkSnapshotEvent['event'],
   payload: NetworkSnapshotPayload,
@@ -143,13 +221,13 @@ function normalizeNetworkSnapshot(
   if (Array.isArray(payload)) {
     return {
       event: eventName,
-      data: payload,
+      data: payload.map(normalizeNetworkItem),
     };
   }
 
   return {
     event: payload.event ?? eventName,
-    data: Array.isArray(payload.data) ? payload.data : [],
+    data: Array.isArray(payload.data) ? payload.data.map(normalizeNetworkItem) : [],
   };
 }
 

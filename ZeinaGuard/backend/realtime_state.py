@@ -69,12 +69,42 @@ def _normalize_classification(value: Any) -> str:
     return classification
 
 
+def _normalize_clients(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_clients: list[dict[str, Any]] = []
+    seen_macs: set[str] = set()
+
+    for item in value:
+        if isinstance(item, dict):
+            mac = _normalize_bssid(item.get("mac"))
+            client_type = str(item.get("type") or "device").strip().lower() or "device"
+        else:
+            mac = _normalize_bssid(item)
+            client_type = "device"
+
+        if not mac or mac in seen_macs:
+            continue
+
+        seen_macs.add(mac)
+        normalized_clients.append(
+            {
+                "mac": mac,
+                "type": client_type,
+            }
+        )
+
+    return normalized_clients
+
+
 def upsert_network(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     bssid = _normalize_bssid(payload.get("bssid"))
     if not bssid:
         raise ValueError("network missing bssid")
 
     seen_at = _utcnow()
+    clients = _normalize_clients(payload.get("clients"))
     snapshot = {
         "ssid": _normalize_ssid(payload.get("ssid")),
         "classification": _normalize_classification(payload.get("classification")),
@@ -85,6 +115,8 @@ def upsert_network(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "bssid": bssid,
         "signal": _safe_int(payload.get("signal")),
         "manufacturer": (str(payload.get("manufacturer") or "").strip() or None),
+        "clients": clients,
+        "clients_count": len(clients),
     }
 
     with _state_lock:

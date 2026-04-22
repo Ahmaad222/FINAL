@@ -363,6 +363,8 @@ class WSClient:
             LOGGER.warning("[DROP] event=network_scan invalid sensor_id payload=%s", {"bssid": scan.get("bssid")})
             return None
 
+        clients = self._build_clients_payload(scan.get("bssid"))
+
         return {
             "sensor_id": sensor_id,
             "timestamp": scan.get("timestamp") or datetime.utcnow().isoformat(),
@@ -377,7 +379,28 @@ class WSClient:
             "wps": scan.get("wps"),
             "distance": scan.get("distance"),
             "raw_beacon": scan.get("raw_beacon"),
+            "clients": clients,
+            "clients_count": len(clients),
         }
+
+    def _build_clients_payload(self, bssid):
+        if not bssid:
+            return []
+
+        try:
+            from monitoring.sniffer import clients_map
+
+            client_set = (
+                clients_map.get(bssid)
+                or clients_map.get(str(bssid).upper())
+                or clients_map.get(str(bssid).lower())
+                or set()
+            )
+            client_macs = sorted(str(mac).strip().upper() for mac in client_set if mac)
+            return [{"mac": mac, "type": "device"} for mac in client_macs]
+        except Exception as exc:
+            LOGGER.debug("[SCAN PAYLOAD] failed to build clients for %s: %s", bssid, exc)
+            return []
 
     def _build_sensor_status_payload(self):
         sensor_id = self._sensor_id_value()
