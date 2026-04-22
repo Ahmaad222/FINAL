@@ -1,84 +1,77 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -uo pipefail
 IFS=$'\n\t'
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG_DIR="${ZEINAGUARD_LOG_DIR:-$ROOT_DIR/logs}"
-LOCK_FILE="/tmp/zeinaguard.lock"
 FRONTEND_DIR="$ROOT_DIR"
 BACKEND_DIR="$ROOT_DIR/backend"
 SENSOR_DIR="$ROOT_DIR/sensor"
 ENV_FILE="$ROOT_DIR/.env"
 
-FRONTEND_REQUESTED_PORT="${FRONTEND_PORT:-3000}"
-BACKEND_REQUESTED_PORT="${BACKEND_PORT:-5000}"
-FRONTEND_PORT_MAX_ATTEMPTS="${FRONTEND_PORT_MAX_ATTEMPTS:-4}"
-BACKEND_PORT_MAX_ATTEMPTS="${BACKEND_PORT_MAX_ATTEMPTS:-4}"
+RUNTIME_DIR="${ZEINAGUARD_RUNTIME_DIR:-$ROOT_DIR/.runtime}"
+LOG_DIR="${ZEINAGUARD_LOG_DIR:-$ROOT_DIR/logs}"
+PID_DIR="$RUNTIME_DIR/pids"
+LOCK_FILE="${ZEINAGUARD_LOCK_FILE:-/tmp/zeinaguard.lock}"
 
-BACKEND_VENV_PYTHON="$BACKEND_DIR/.venv/bin/python"
-SENSOR_VENV_PYTHON="$SENSOR_DIR/.venv/bin/python"
-SENSOR_MAIN="$SENSOR_DIR/main.py"
-FRONTEND_NEXT_BIN="$ROOT_DIR/node_modules/.bin/next"
-
-FRONTEND_LOG="$LOG_DIR/frontend.log"
+SUPERVISOR_LOG="$LOG_DIR/supervisor.log"
 BACKEND_LOG="$LOG_DIR/backend.log"
+FRONTEND_LOG="$LOG_DIR/frontend.log"
 SENSOR_LOG="$LOG_DIR/sensor.log"
 
+CURRENT_USER_NAME="$(id -un 2>/dev/null || printf 'unknown')"
+
+REQUESTED_FRONTEND_PORT=""
+REQUESTED_BACKEND_PORT=""
+FINAL_FRONTEND_PORT=""
+FINAL_BACKEND_PORT=""
+BACKEND_URL=""
+FRONTEND_URL=""
+SESSION_UUID=""
+SESSION_STARTED_AT=""
+SELECTED_SENSOR_INTERFACE=""
+BACKEND_PYTHON=""
+SENSOR_PYTHON=""
+FRONTEND_NEXT_BIN="$ROOT_DIR/node_modules/.bin/next"
+
+DRY_RUN=0
+RUN_TESTS=0
+SHUTDOWN_REQUESTED=0
+SHUTDOWN_DONE=0
+INTERRUPTED=0
+SENSOR_DISABLED=0
+SENSOR_DISABLE_REASON=""
+SENSOR_RETRY_COUNT=0
+SENSOR_MAX_RETRIES=1
+USE_SETSID=0
+PORT_FALLBACK_COUNT=5
+MONITOR_INTERVAL="${ZEINAGUARD_MONITOR_INTERVAL:-2}"
+BACKEND_HEALTH_TIMEOUT="${ZEINAGUARD_BACKEND_HEALTH_TIMEOUT:-45}"
+FRONTEND_HEALTH_TIMEOUT="${ZEINAGUARD_FRONTEND_HEALTH_TIMEOUT:-60}"
+
+declare -A SERVICE_PID=([backend]="" [frontend]="" [sensor]="")
+declare -A SERVICE_PGID=([backend]="" [frontend]="" [sensor]="")
+declare -A SERVICE_PORT=([backend]="" [frontend]="" [sensor]="n/a")
+declare -A SERVICE_STARTED_AT=([backend]="" [frontend]="" [sensor]="")
 declare -A SERVICE_LOG=(
   [backend]="$BACKEND_LOG"
   [frontend]="$FRONTEND_LOG"
   [sensor]="$SENSOR_LOG"
 )
-declare -A SERVICE_PORT=(
-  [backend]=""
-  [frontend]=""
-  [sensor]="n/a"
-)
-declare -A SERVICE_RUNTIME_PID=(
-  [backend]=""
-  [frontend]=""
-  [sensor]=""
-)
-declare -A SERVICE_RETRY=(
-  [backend]=0
-  [frontend]=0
-  [sensor]=0
-)
+declare -A SERVICE_MATCH_TOKEN=([backend]="" [frontend]="" [sensor]="")
 
-FINAL_FRONTEND_PORT=""
-FINAL_BACKEND_PORT=""
-BACKEND_URL=""
-SELECTED_SENSOR_INTERFACE=""
-
-SESSION_UUID=""
-SESSION_STARTED_AT=""
-LOCK_SESSION_UUID=""
-LOCK_STARTED_AT=""
-LOCK_BACKEND_PORT=""
-LOCK_FRONTEND_PORT=""
-
-DRY_RUN=0
-SENSOR_DISABLED=0
-SHUTDOWN_DONE=0
-INTERRUPTED=0
-SKIP_BACKEND_HEALTHCHECK="${ZEINAGUARD_SKIP_BACKEND_HEALTHCHECK:-0}"
-SKIP_FRONTEND_HEALTHCHECK="${ZEINAGUARD_SKIP_FRONTEND_HEALTHCHECK:-0}"
-SENSOR_MAX_RETRIES=1
-
-declare -a PREFLIGHT_ERRORS=()
-declare -a PREFLIGHT_NOTES=()
-declare -a BACKEND_RETRY_DELAYS=(1 1 2 2 3 3 5 5 8 10)
-declare -a STARTUP_ORDER=("backend" "frontend" "sensor")
-declare -a SHUTDOWN_ORDER=("sensor" "frontend" "backend")
+declare -A THROTTLE_WINDOW_START=()
+declare -A THROTTLE_COUNT=()
+declare -A THROTTLE_SUPPRESSED=()
+declare -A THROTTLE_MESSAGE=()
 
 usage() {
   cat <<'EOF'
-Usage: ./run.sh [--dry-run] [--help]
+Usage: ./run.sh [--dry-run] [--test] [--help]
 
 Options:
-  --dry-run   Run reconciliation, preflight, and port allocation without
-              starting services or modifying the active lock session.
-  --help      Show this help message.
+  --dry-run   Validate, reconcile, and allocate ports without starting services.
+  --test      Run the built-in stability simulations and print PASS/FAIL.
+  --help      Show this help text.
 EOF
 }
 
@@ -87,6 +80,9 @@ parse_args() {
     case "$1" in
       --dry-run)
         DRY_RUN=1
+        ;;
+      --test)
+        RUN_TESTS=1
         ;;
       --help|-h)
         usage
@@ -105,37 +101,106 @@ timestamp() {
   date '+%Y-%m-%d %H:%M:%S %z'
 }
 
-log() {
-  printf '[run.sh] %s\n' "$*"
-}
-
-warn() {
-  printf '[run.sh][warn] %s\n' "$*" >&2
-}
-
-fail() {
-  printf '[run.sh][error] %s\n' "$*" >&2
-  exit 1
+compact_text() {
+  printf '%s' "$*" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
 }
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
-compact_text() {
-  printf '%s' "$*" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
+is_numeric() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
 }
 
-is_dry_run() {
-  [ "$DRY_RUN" -eq 1 ]
+ensure_runtime_dirs() {
+  mkdir -p "$LOG_DIR" "$PID_DIR"
 }
 
-dry_run_log() {
-  printf '[run.sh][dry-run] %s\n' "$*"
+prepare_log_files() {
+  touch "$SUPERVISOR_LOG" "$BACKEND_LOG" "$FRONTEND_LOG" "$SENSOR_LOG"
 }
 
-current_user() {
-  id -un
+log() {
+  local message
+  message="$(compact_text "$*")"
+  printf '%s [run.sh] %s\n' "$(timestamp)" "$message" | tee -a "$SUPERVISOR_LOG"
+}
+
+warn() {
+  local message
+  message="$(compact_text "$*")"
+  printf '%s [run.sh][warn] %s\n' "$(timestamp)" "$message" | tee -a "$SUPERVISOR_LOG" >&2
+}
+
+error_log() {
+  local message
+  message="$(compact_text "$*")"
+  printf '%s [run.sh][error] %s\n' "$(timestamp)" "$message" | tee -a "$SUPERVISOR_LOG" >&2
+}
+
+warn_throttled() {
+  local key="$1"
+  local message="$2"
+  local now="${SECONDS:-0}"
+  local start="${THROTTLE_WINDOW_START[$key]:-0}"
+  local count="${THROTTLE_COUNT[$key]:-0}"
+  local suppressed="${THROTTLE_SUPPRESSED[$key]:-0}"
+  local window=10
+  local limit=3
+
+  if [ "$start" -eq 0 ] || [ $((now - start)) -ge "$window" ]; then
+    if [ "$suppressed" -gt 0 ]; then
+      warn "Suppressed ${suppressed} repeated warnings in the last ${window}s: ${THROTTLE_MESSAGE[$key]}"
+    fi
+    THROTTLE_WINDOW_START["$key"]="$now"
+    THROTTLE_COUNT["$key"]=0
+    THROTTLE_SUPPRESSED["$key"]=0
+    THROTTLE_MESSAGE["$key"]="$message"
+    count=0
+  fi
+
+  count=$((count + 1))
+  THROTTLE_COUNT["$key"]="$count"
+  THROTTLE_MESSAGE["$key"]="$message"
+
+  if [ "$count" -le "$limit" ]; then
+    warn "$message"
+    return
+  fi
+
+  suppressed=$((suppressed + 1))
+  THROTTLE_SUPPRESSED["$key"]="$suppressed"
+  if [ "$suppressed" -eq 1 ]; then
+    warn "Suppressing repeated warnings for 10s: $message"
+  fi
+}
+
+flush_throttled_warnings() {
+  local key=""
+  for key in "${!THROTTLE_SUPPRESSED[@]}"; do
+    if [ "${THROTTLE_SUPPRESSED[$key]:-0}" -gt 0 ]; then
+      warn "Suppressed ${THROTTLE_SUPPRESSED[$key]} repeated warnings: ${THROTTLE_MESSAGE[$key]}"
+      THROTTLE_SUPPRESSED["$key"]=0
+    fi
+  done
+}
+
+service_log_event() {
+  local service="$1"
+  local event="$2"
+  local reason="${3:-}"
+  local pid="${SERVICE_PID[$service]:-none}"
+  local port="${SERVICE_PORT[$service]:-n/a}"
+  local started="${SERVICE_STARTED_AT[$service]:-n/a}"
+  printf '%s [supervisor] service=%s event=%s pid=%s port=%s start_time="%s" reason="%s"\n' \
+    "$(timestamp)" \
+    "$service" \
+    "$event" \
+    "${pid:-none}" \
+    "${port:-n/a}" \
+    "${started:-n/a}" \
+    "$(compact_text "$reason")" >>"${SERVICE_LOG[$service]}"
 }
 
 generate_uuid() {
@@ -150,121 +215,59 @@ print(uuid.uuid4())
 PY
 }
 
-service_requested_port() {
-  case "$1" in
-    backend) printf '%s\n' "$BACKEND_REQUESTED_PORT" ;;
-    frontend) printf '%s\n' "$FRONTEND_REQUESTED_PORT" ;;
-    sensor) printf 'n/a\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-service_port_attempts() {
-  case "$1" in
-    backend) printf '%s\n' "$BACKEND_PORT_MAX_ATTEMPTS" ;;
-    frontend) printf '%s\n' "$FRONTEND_PORT_MAX_ATTEMPTS" ;;
-    sensor) printf '0\n' ;;
-    *) return 1 ;;
-  esac
-}
-
-service_port_for_session() {
-  local service_name="$1"
-  local session_uuid="$2"
-
-  case "$service_name" in
-    sensor)
-      printf 'n/a\n'
-      ;;
-    backend)
-      if [ "$session_uuid" = "$SESSION_UUID" ]; then
-        printf '%s\n' "$FINAL_BACKEND_PORT"
-      else
-        printf '%s\n' "$LOCK_BACKEND_PORT"
-      fi
-      ;;
-    frontend)
-      if [ "$session_uuid" = "$SESSION_UUID" ]; then
-        printf '%s\n' "$FINAL_FRONTEND_PORT"
-      else
-        printf '%s\n' "$LOCK_FRONTEND_PORT"
-      fi
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-record_service_event() {
-  local service_name="$1"
-  local event_name="$2"
-  local reason="${3:-}"
-  local pid_override="${4:-none}"
-  local port_override="${5:-${SERVICE_PORT[$service_name]:-n/a}}"
-  local retry_override="${6:-${SERVICE_RETRY[$service_name]:-0}}"
-  local log_file="${SERVICE_LOG[$service_name]}"
-  local session_value="${SESSION_UUID:-${LOCK_SESSION_UUID:-unlocked}}"
-  local message=""
-
-  message="ts=\"$(timestamp)\" session_uuid=${session_value} service=${service_name} event=${event_name} pid=${pid_override:-none} port=${port_override:-n/a} retry=${retry_override}"
-  if [ -n "$reason" ]; then
-    message="${message} reason=\"$(compact_text "$reason")\""
+load_env_file() {
+  if [ "${ZEINAGUARD_IGNORE_ENV_FILE:-0}" = "1" ]; then
+    return
   fi
 
-  printf '%s\n' "$message" >>"$log_file"
-}
-
-ensure_runtime_dirs() {
-  mkdir -p "$LOG_DIR"
-}
-
-prepare_log_files() {
-  touch "$FRONTEND_LOG" "$BACKEND_LOG" "$SENSOR_LOG"
-  printf '%s %s\n' "$(timestamp)" "----- ZeinaGuard session boundary -----" >>"$FRONTEND_LOG"
-  printf '%s %s\n' "$(timestamp)" "----- ZeinaGuard session boundary -----" >>"$BACKEND_LOG"
-  printf '%s %s\n' "$(timestamp)" "----- ZeinaGuard session boundary -----" >>"$SENSOR_LOG"
-}
-
-load_env_file() {
   if [ -f "$ENV_FILE" ]; then
     set -a
     # shellcheck source=/dev/null
-    source "$ENV_FILE"
+    . "$ENV_FILE"
     set +a
   fi
-
-  SKIP_BACKEND_HEALTHCHECK="${ZEINAGUARD_SKIP_BACKEND_HEALTHCHECK:-0}"
-  SKIP_FRONTEND_HEALTHCHECK="${ZEINAGUARD_SKIP_FRONTEND_HEALTHCHECK:-0}"
-
-  export ZEINAGUARD_NONINTERACTIVE=1
-  export PYTHONUNBUFFERED=1
 }
 
-clear_loaded_lock() {
-  LOCK_SESSION_UUID=""
-  LOCK_STARTED_AT=""
-  LOCK_BACKEND_PORT=""
-  LOCK_FRONTEND_PORT=""
+refresh_config() {
+  REQUESTED_FRONTEND_PORT="${ZEINAGUARD_FRONTEND_PORT:-${FRONTEND_PORT:-3000}}"
+  REQUESTED_BACKEND_PORT="${ZEINAGUARD_BACKEND_PORT:-${BACKEND_PORT:-5000}}"
+  PORT_FALLBACK_COUNT="${ZEINAGUARD_PORT_FALLBACK_COUNT:-5}"
+
+  BACKEND_PYTHON="${ZEINAGUARD_BACKEND_PYTHON:-$BACKEND_DIR/.venv/bin/python}"
+  SENSOR_PYTHON="${ZEINAGUARD_SENSOR_PYTHON:-$SENSOR_DIR/.venv/bin/python}"
+
+  if [ ! -x "$BACKEND_PYTHON" ]; then
+    BACKEND_PYTHON="${ZEINAGUARD_BACKEND_PYTHON_FALLBACK:-python3}"
+  fi
+
+  if [ ! -x "$SENSOR_PYTHON" ]; then
+    SENSOR_PYTHON="${ZEINAGUARD_SENSOR_PYTHON_FALLBACK:-python3}"
+  fi
+
+  SERVICE_MATCH_TOKEN[backend]="$BACKEND_DIR/app.py"
+  SERVICE_MATCH_TOKEN[frontend]="$FRONTEND_NEXT_BIN"
+  SERVICE_MATCH_TOKEN[sensor]="$SENSOR_DIR/main.py"
+  USE_SETSID=0
+  command_exists setsid && USE_SETSID=1
 }
 
-load_lock_file() {
-  local key=""
-  local value=""
+refresh_runtime_environment() {
+  BACKEND_URL="http://127.0.0.1:${FINAL_BACKEND_PORT}"
+  FRONTEND_URL="http://127.0.0.1:${FINAL_FRONTEND_PORT}"
 
-  clear_loaded_lock
-  [ -f "$LOCK_FILE" ] || return 1
-
-  while IFS='=' read -r key value; do
-    case "$key" in
-      session_uuid) LOCK_SESSION_UUID="$value" ;;
-      start_timestamp) LOCK_STARTED_AT="$value" ;;
-      backend_port) LOCK_BACKEND_PORT="$value" ;;
-      frontend_port) LOCK_FRONTEND_PORT="$value" ;;
-    esac
-  done <"$LOCK_FILE"
-
-  [ -n "$LOCK_SESSION_UUID" ]
+  export SESSION_UUID
+  export FINAL_BACKEND_PORT
+  export FINAL_FRONTEND_PORT
+  export BACKEND_PORT="$FINAL_BACKEND_PORT"
+  export FRONTEND_PORT="$FINAL_FRONTEND_PORT"
+  export FLASK_PORT="$FINAL_BACKEND_PORT"
+  export PORT="$FINAL_FRONTEND_PORT"
+  export BACKEND_URL
+  export NEXT_PUBLIC_API_URL="$BACKEND_URL"
+  export NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL"
+  export ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR"
+  export ZEINAGUARD_LOCK_FILE="$LOCK_FILE"
+  export ZEINAGUARD_SUPERVISOR_PID="$$"
 }
 
 write_lock_file() {
@@ -276,86 +279,101 @@ frontend_port=${FINAL_FRONTEND_PORT}
 EOF
 }
 
-remove_lock_file_if_current_session() {
-  if load_lock_file && [ "$LOCK_SESSION_UUID" = "$SESSION_UUID" ]; then
-    rm -f "$LOCK_FILE"
-  fi
-  clear_loaded_lock
+remove_lock_file() {
+  rm -f "$LOCK_FILE"
 }
 
-refresh_runtime_environment() {
-  BACKEND_URL="http://127.0.0.1:${FINAL_BACKEND_PORT}"
+pid_file_path() {
+  printf '%s/%s.pid\n' "$PID_DIR" "$1"
+}
 
-  SERVICE_PORT[backend]="$FINAL_BACKEND_PORT"
-  SERVICE_PORT[frontend]="$FINAL_FRONTEND_PORT"
-  SERVICE_PORT[sensor]="n/a"
+write_pid_file() {
+  local service="$1"
+  local file
+  file="$(pid_file_path "$service")"
+  cat >"$file" <<EOF
+pid=${SERVICE_PID[$service]}
+pgid=${SERVICE_PGID[$service]}
+port=${SERVICE_PORT[$service]}
+start_time=${SERVICE_STARTED_AT[$service]}
+session_uuid=${SESSION_UUID}
+EOF
+}
 
-  export SESSION_UUID
-  export SESSION_STARTED_AT
-  export FINAL_FRONTEND_PORT
-  export FINAL_BACKEND_PORT
-  export FRONTEND_PORT="$FINAL_FRONTEND_PORT"
-  export BACKEND_PORT="$FINAL_BACKEND_PORT"
-  export FLASK_PORT="$FINAL_BACKEND_PORT"
-  export PORT="$FINAL_FRONTEND_PORT"
-  export BACKEND_URL
-  export NEXT_PUBLIC_API_URL="$BACKEND_URL"
-  export NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL"
-  export ZEINAGUARD_LOCK_FILE="$LOCK_FILE"
-  export ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR"
-  export ZEINAGUARD_SUPERVISOR_PID="$$"
+remove_pid_file() {
+  rm -f "$(pid_file_path "$1")"
+}
+
+read_pid_file() {
+  local service="$1"
+  local __pid_var="$2"
+  local __port_var="$3"
+  local file
+  local pid=""
+  local port=""
+  local key=""
+  local value=""
+
+  file="$(pid_file_path "$service")"
+  [ -f "$file" ] || return 1
+
+  while IFS='=' read -r key value; do
+    case "$key" in
+      pid) pid="$value" ;;
+      port) port="$value" ;;
+    esac
+  done <"$file"
+
+  printf -v "$__pid_var" '%s' "$pid"
+  printf -v "$__port_var" '%s' "$port"
+  [ -n "$pid" ]
 }
 
 pid_is_alive() {
   local pid="${1:-}"
-  [ -n "$pid" ] || return 1
-  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  is_numeric "$pid" || return 1
   kill -0 "$pid" >/dev/null 2>&1
 }
 
-pid_cmdline() {
-  local pid="$1"
-  [ -r "/proc/$pid/cmdline" ] || return 1
-  tr '\0' ' ' <"/proc/$pid/cmdline" | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
+ps_user_for_pid() {
+  ps -p "$1" -o user= 2>/dev/null | awk '{$1=$1; print}'
 }
 
-pid_cwd() {
-  local pid="$1"
-  [ -L "/proc/$pid/cwd" ] || return 1
-  readlink -f "/proc/$pid/cwd" 2>/dev/null || true
+ps_cmd_for_pid() {
+  ps -p "$1" -o args= 2>/dev/null | sed 's/^[[:space:]]*//'
 }
 
-pid_ppid() {
-  local pid="$1"
-  [ -r "/proc/$pid/status" ] || return 1
-  awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status"
+ps_summary_for_pid() {
+  ps -p "$1" -o pid=,user=,args= 2>/dev/null | sed 's/^[[:space:]]*//'
 }
 
-pid_group() {
-  local pid="$1"
-  ps -o pgid= -p "$pid" 2>/dev/null | awk 'NR==1 {gsub(/[[:space:]]/, "", $1); print $1}'
+pgid_for_pid() {
+  ps -p "$1" -o pgid= 2>/dev/null | awk '{$1=$1; print}'
 }
 
-pid_environ_contains() {
-  local pid="$1"
-  local expected="$2"
-  [ -r "/proc/$pid/environ" ] || return 1
-  tr '\0' '\n' <"/proc/$pid/environ" | grep -Fxq "$expected"
-}
+pid_matches_service() {
+  local service="$1"
+  local pid="$2"
+  local user=""
+  local cmd=""
 
-cmdline_matches_service_signature() {
-  local service_name="$1"
-  local cmdline="$2"
+  pid_is_alive "$pid" || return 1
+  user="$(ps_user_for_pid "$pid")"
+  cmd="$(ps_cmd_for_pid "$pid")"
 
-  case "$service_name" in
+  [ -n "$user" ] || return 1
+  [ -n "$cmd" ] || return 1
+  [ "$user" = "$CURRENT_USER_NAME" ] || return 1
+
+  case "$service" in
     backend)
-      [[ "$cmdline" == *"$BACKEND_DIR/app.py"* ]] || [[ "$cmdline" == *"backend/app.py"* ]]
+      [[ "$cmd" == *"$BACKEND_DIR/app.py"* ]] || [[ "$cmd" == *"${SERVICE_MATCH_TOKEN[$service]}"* ]]
       ;;
     frontend)
-      [[ "$cmdline" == *"next dev"* ]] || [[ "$cmdline" == *"$FRONTEND_NEXT_BIN"* ]]
+      [[ "$cmd" == *"$FRONTEND_NEXT_BIN"* ]] || [[ "$cmd" == *"next dev"* ]] || [[ "$cmd" == *"${SERVICE_MATCH_TOKEN[$service]}"* ]]
       ;;
     sensor)
-      [[ "$cmdline" == *"$SENSOR_MAIN"* ]] || [[ "$cmdline" == *"sensor/main.py"* ]]
+      [[ "$cmd" == *"$SENSOR_DIR/main.py"* ]] || [[ "$cmd" == *"${SERVICE_MATCH_TOKEN[$service]}"* ]]
       ;;
     *)
       return 1
@@ -363,294 +381,157 @@ cmdline_matches_service_signature() {
   esac
 }
 
-ancestor_chain_has_session() {
-  local pid="$1"
-  local session_uuid="$2"
-  local ancestor=""
-  local safety=0
-
-  ancestor="$(pid_ppid "$pid" || true)"
-  while [ -n "$ancestor" ] && [ "$ancestor" -gt 1 ] 2>/dev/null; do
-    if pid_environ_contains "$ancestor" "ZEINAGUARD_SESSION_UUID=$session_uuid" \
-      && pid_environ_contains "$ancestor" "ZEINAGUARD_LOCK_FILE=$LOCK_FILE"; then
-      return 0
-    fi
-    ancestor="$(pid_ppid "$ancestor" || true)"
-    safety=$((safety + 1))
-    [ "$safety" -lt 64 ] || break
-  done
-
-  return 1
-}
-
-fingerprint_process() {
-  local service_name="$1"
-  local pid="$2"
-  local session_uuid="$3"
-  local cmdline=""
-  local cwd=""
-
-  pid_is_alive "$pid" || return 1
-
-  cmdline="$(pid_cmdline "$pid" || true)"
-  [ -n "$cmdline" ] || return 1
-  [[ "$cmdline" == *"$ROOT_DIR"* ]] || return 1
-  cmdline_matches_service_signature "$service_name" "$cmdline" || return 1
-
-  cwd="$(pid_cwd "$pid" || true)"
-  [ -n "$cwd" ] || return 1
-  [[ "$cwd" == "$ROOT_DIR"* ]] || return 1
-
-  pid_environ_contains "$pid" "ZEINAGUARD_SESSION_UUID=$session_uuid" || return 1
-  pid_environ_contains "$pid" "ZEINAGUARD_LOCK_FILE=$LOCK_FILE" || return 1
-  pid_environ_contains "$pid" "ZEINAGUARD_PROJECT_ROOT=$ROOT_DIR" || return 1
-  ancestor_chain_has_session "$pid" "$session_uuid" || return 1
-}
-
-port_has_listener() {
-  local port="$1"
-  ss -ltnH "( sport = :$port )" 2>/dev/null | grep -q .
-}
-
 listener_pids_for_port() {
   local port="$1"
-  ss -ltnpH "( sport = :$port )" 2>/dev/null | grep -o 'pid=[0-9]\+' | cut -d= -f2 | sort -u || true
-}
 
-warn_external_process() {
-  local service_name="$1"
-  local pid="$2"
-  local reason="$3"
-  warn "Skipping external process for $service_name (pid $pid): $reason"
-  record_service_event "$service_name" "external-process-skipped" "$reason" "$pid" "${SERVICE_PORT[$service_name]:-n/a}"
-}
-
-ps_candidates_for_service() {
-  local service_name="$1"
-  local line=""
-  local pid=""
-  local args=""
-
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    line="${line#"${line%%[![:space:]]*}"}"
-    pid="${line%% *}"
-    args="${line#* }"
-    [ -n "$pid" ] || continue
-    [ -n "$args" ] || continue
-    [[ "$args" == *"$ROOT_DIR"* ]] || continue
-    if cmdline_matches_service_signature "$service_name" "$args"; then
-      printf '%s\n' "$pid"
-    fi
-  done < <(ps -eo pid=,args= 2>/dev/null)
-}
-
-find_service_candidates() {
-  local service_name="$1"
-  local hinted_port="$2"
-
-  if [ -n "$hinted_port" ] && [ "$hinted_port" != "n/a" ]; then
-    listener_pids_for_port "$hinted_port"
+  if command_exists ss; then
+    ss -ltnpH "( sport = :$port )" 2>/dev/null | grep -o 'pid=[0-9]\+' | cut -d= -f2 | sort -u || true
+    return
   fi
 
-  ps_candidates_for_service "$service_name"
+  if command_exists lsof; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | sort -u || true
+    return
+  fi
+
+  if command_exists fuser; then
+    fuser -n tcp "$port" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' | sort -u || true
+  fi
 }
 
-find_verified_service_pids() {
-  local service_name="$1"
-  local session_uuid="$2"
-  local hinted_port="$3"
-  local pid=""
-  declare -A seen=()
-
-  while read -r pid; do
-    [ -n "$pid" ] || continue
-    if [ -n "${seen[$pid]:-}" ]; then
-      continue
-    fi
-    seen["$pid"]=1
-
-    if fingerprint_process "$service_name" "$pid" "$session_uuid"; then
-      printf '%s\n' "$pid"
-    else
-      if pid_is_alive "$pid"; then
-        warn_external_process "$service_name" "$pid" "fingerprint validation failed"
-      fi
-    fi
-  done < <(find_service_candidates "$service_name" "$hinted_port")
+port_is_free() {
+  [ -z "$(listener_pids_for_port "$1")" ]
 }
 
-wait_for_pid_exit() {
-  local pid="$1"
-  local timeout_seconds="${2:-10}"
-  local elapsed=0
-
-  while pid_is_alive "$pid" && [ "$elapsed" -lt "$timeout_seconds" ]; do
-    sleep 1
-    elapsed=$((elapsed + 1))
-  done
-
-  ! pid_is_alive "$pid"
+recent_log_excerpt() {
+  local file="$1"
+  local lines="${2:-25}"
+  [ -f "$file" ] || return 0
+  tail -n "$lines" "$file" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
 }
 
-terminate_verified_service_pid() {
-  local service_name="$1"
+stop_pid_and_group() {
+  local service="$1"
   local pid="$2"
   local reason="$3"
-  local port_value="$4"
-  local retry_value="${SERVICE_RETRY[$service_name]:-0}"
   local pgid=""
+  local waited=0
 
-  pgid="$(pid_group "$pid" || true)"
-  record_service_event "$service_name" "stop-requested" "$reason" "$pid" "$port_value" "$retry_value"
+  pid_is_alive "$pid" || {
+    remove_pid_file "$service"
+    return 0
+  }
 
-  if is_dry_run; then
-    dry_run_log "Would stop $service_name pid=$pid pgid=${pgid:-unknown} port=${port_value:-n/a} reason=$reason"
+  pgid="$(pgid_for_pid "$pid")"
+  service_log_event "$service" "stop-requested" "$reason"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Dry-run: would stop $service pid=$pid pgid=${pgid:-unknown} reason=$reason"
     return 0
   fi
 
-  if [ -n "$pgid" ]; then
+  if is_numeric "$pgid" && [ "$pgid" -gt 1 ]; then
     kill -TERM -- "-$pgid" >/dev/null 2>&1 || true
   fi
   kill -TERM "$pid" >/dev/null 2>&1 || true
 
-  if ! wait_for_pid_exit "$pid" 10; then
-    record_service_event "$service_name" "stop-escalated" "TERM timeout, sending KILL" "$pid" "$port_value" "$retry_value"
-    if [ -n "$pgid" ]; then
+  while pid_is_alive "$pid" && [ "$waited" -lt 8 ]; do
+    sleep 1
+    waited=$((waited + 1))
+  done
+
+  if pid_is_alive "$pid"; then
+    if is_numeric "$pgid" && [ "$pgid" -gt 1 ]; then
       kill -KILL -- "-$pgid" >/dev/null 2>&1 || true
     fi
     kill -KILL "$pid" >/dev/null 2>&1 || true
-    wait_for_pid_exit "$pid" 5 || true
+    sleep 1
   fi
 
-  record_service_event "$service_name" "stopped" "$reason" "$pid" "$port_value" "$retry_value"
+  SERVICE_PID["$service"]=""
+  SERVICE_PGID["$service"]=""
+  remove_pid_file "$service"
+  service_log_event "$service" "stopped" "$reason"
 }
 
-stop_service_for_session() {
-  local service_name="$1"
-  local session_uuid="$2"
-  local reason="$3"
-  local hinted_port="${4:-}"
+reconcile_pid_file() {
+  local service="$1"
+  local reason="$2"
   local pid=""
-  local found=0
+  local port=""
 
-  while read -r pid; do
-    [ -n "$pid" ] || continue
-    found=1
-    terminate_verified_service_pid "$service_name" "$pid" "$reason" "${hinted_port:-${SERVICE_PORT[$service_name]:-n/a}}"
-  done < <(find_verified_service_pids "$service_name" "$session_uuid" "$hinted_port")
-
-  [ "$found" -eq 1 ] || return 0
-}
-
-session_has_live_service() {
-  local service_name="$1"
-  local session_uuid="$2"
-  local hinted_port="${3:-}"
-  local pid=""
-
-  while read -r pid; do
-    [ -n "$pid" ] || continue
-    return 0
-  done < <(find_verified_service_pids "$service_name" "$session_uuid" "$hinted_port")
-
-  return 1
-}
-
-session_has_live_processes() {
-  local session_uuid="$1"
-  local service_name=""
-
-  for service_name in "${STARTUP_ORDER[@]}"; do
-    if session_has_live_service "$service_name" "$session_uuid" "$(service_port_for_session "$service_name" "$session_uuid")"; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-reconcile_existing_session() {
-  if ! load_lock_file; then
+  if ! read_pid_file "$service" pid port; then
     return 0
   fi
 
-  log "Reconciling existing lock session $LOCK_SESSION_UUID"
-
-  stop_service_for_session "sensor" "$LOCK_SESSION_UUID" "startup reconciliation" "n/a"
-  stop_service_for_session "frontend" "$LOCK_SESSION_UUID" "startup reconciliation" "$LOCK_FRONTEND_PORT"
-  stop_service_for_session "backend" "$LOCK_SESSION_UUID" "startup reconciliation" "$LOCK_BACKEND_PORT"
-
-  if is_dry_run; then
-    if session_has_live_processes "$LOCK_SESSION_UUID"; then
-      dry_run_log "Would replace active lock session $LOCK_SESSION_UUID after stopping its verified processes"
-    else
-      dry_run_log "Would replace stale lock session $LOCK_SESSION_UUID"
-    fi
-    clear_loaded_lock
+  if pid_matches_service "$service" "$pid"; then
+    SERVICE_PID["$service"]="$pid"
+    SERVICE_PORT["$service"]="${port:-${SERVICE_PORT[$service]}}"
+    stop_pid_and_group "$service" "$pid" "$reason"
     return 0
   fi
 
-  if session_has_live_processes "$LOCK_SESSION_UUID"; then
-    fail "Existing ZeinaGuard lock session could not be reconciled safely"
-  fi
-
-  rm -f "$LOCK_FILE"
-
-  clear_loaded_lock
+  warn_throttled "stale-pid-$service" "Ignoring stale or reused PID for $service: ${pid:-unknown}"
+  remove_pid_file "$service"
 }
 
-resolve_service_port() {
-  local service_name="$1"
-  local requested_port="$2"
-  local max_attempts="$3"
-  local target_var="$4"
-  local offset=0
-  local candidate=""
+try_reclaim_port() {
+  local service="$1"
+  local port="$2"
   local pids=""
   local pid=""
 
-  while [ "$offset" -lt "$max_attempts" ]; do
+  pids="$(listener_pids_for_port "$port")"
+  [ -n "$pids" ] || return 0
+
+  while read -r pid; do
+    [ -n "$pid" ] || continue
+    if pid_matches_service "$service" "$pid"; then
+      SERVICE_PID["$service"]="$pid"
+      SERVICE_PORT["$service"]="$port"
+      stop_pid_and_group "$service" "$pid" "freeing port $port before restart"
+    else
+      warn_throttled "external-port-$service-$port" "Port $port is busy by another process: $(ps_summary_for_pid "$pid" || printf 'pid=%s' "$pid"). Trying next port."
+      return 1
+    fi
+  done <<<"$pids"
+
+  sleep 1
+  port_is_free "$port"
+}
+
+allocate_port() {
+  local service="$1"
+  local requested_port="$2"
+  local __result_var="$3"
+  local offset=0
+  local candidate=0
+
+  while [ "$offset" -lt "$PORT_FALLBACK_COUNT" ]; do
     candidate=$((requested_port + offset))
 
-    if ! port_has_listener "$candidate"; then
-      printf -v "$target_var" '%s' "$candidate"
-      PREFLIGHT_NOTES+=("${service_name} port selected: $candidate")
+    if port_is_free "$candidate"; then
+      printf -v "$__result_var" '%s' "$candidate"
       return 0
     fi
 
-    pids="$(listener_pids_for_port "$candidate")"
-    if [ -z "$pids" ]; then
-      warn "${service_name} port $candidate is in use and listener details are unavailable; trying next port"
-    else
-      while read -r pid; do
-        [ -n "$pid" ] || continue
-        warn_external_process "$service_name" "$pid" "port $candidate is busy and not owned by the active lock session"
-      done <<<"$pids"
+    if try_reclaim_port "$service" "$candidate"; then
+      printf -v "$__result_var" '%s' "$candidate"
+      return 0
     fi
 
     offset=$((offset + 1))
   done
 
-  PREFLIGHT_ERRORS+=("No free ${service_name} port was found in the fallback range starting at ${requested_port}")
   return 1
 }
 
-resolve_runtime_ports() {
-  resolve_service_port "backend" "$BACKEND_REQUESTED_PORT" "$BACKEND_PORT_MAX_ATTEMPTS" FINAL_BACKEND_PORT || return 1
-  resolve_service_port "frontend" "$FRONTEND_REQUESTED_PORT" "$FRONTEND_PORT_MAX_ATTEMPTS" FINAL_FRONTEND_PORT || return 1
-  refresh_runtime_environment
-}
-
-wait_for_http() {
+http_check() {
   local url="$1"
-  local timeout_seconds="$2"
-  local expected_json_key="${3:-}"
-  local expected_json_value="${4:-}"
-  local deadline=$((SECONDS + timeout_seconds))
+  local expected_key="${2:-}"
+  local expected_value="${3:-}"
 
-  while [ "$SECONDS" -lt "$deadline" ]; do
-    if python3 - "$url" "$expected_json_key" "$expected_json_value" <<'PY' >/dev/null 2>&1
+  python3 - "$url" "$expected_key" "$expected_value" <<'PY'
 import json
 import sys
 import urllib.request
@@ -662,43 +543,26 @@ expected_value = sys.argv[3]
 try:
     with urllib.request.urlopen(url, timeout=2) as response:
         body = response.read().decode("utf-8", errors="replace")
+        if not (200 <= response.status < 300):
+            raise SystemExit(1)
         if not expected_key:
-            raise SystemExit(0 if 200 <= response.status < 300 else 1)
+            raise SystemExit(0)
         payload = json.loads(body)
+        raise SystemExit(0 if str(payload.get(expected_key, "")) == expected_value else 1)
 except Exception:
     raise SystemExit(1)
-
-raise SystemExit(0 if str(payload.get(expected_key, "")) == expected_value else 1)
 PY
-    then
-      return 0
-    fi
-    sleep 1
-  done
-
-  return 1
 }
 
-wait_for_backend_socketio() {
-  local deadline=$((SECONDS + ${1:-10}))
+wait_for_http() {
+  local url="$1"
+  local timeout_seconds="$2"
+  local expected_key="${3:-}"
+  local expected_value="${4:-}"
+  local deadline=$((SECONDS + timeout_seconds))
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if python3 - "$BACKEND_URL" <<'PY' >/dev/null 2>&1
-import sys
-import urllib.request
-
-base = sys.argv[1].rstrip("/")
-url = f"{base}/socket.io/?transport=polling&EIO=4&t=supervisor"
-
-try:
-    with urllib.request.urlopen(url, timeout=2) as response:
-        body = response.read().decode("utf-8", errors="replace")
-except Exception:
-    raise SystemExit(1)
-
-raise SystemExit(0 if response.status == 200 and "sid" in body else 1)
-PY
-    then
+    if http_check "$url" "$expected_key" "$expected_value"; then
       return 0
     fi
     sleep 1
@@ -707,478 +571,363 @@ PY
   return 1
 }
 
-wait_for_backend_health() {
-  local attempt=0
-  local max_attempts="${#BACKEND_RETRY_DELAYS[@]}"
-  local delay=0
+backend_healthy() {
+  http_check "$BACKEND_URL/health" status healthy
+}
 
-  if [ "$SKIP_BACKEND_HEALTHCHECK" = "1" ]; then
-    record_service_event "backend" "health-skipped" "backend health checks skipped by configuration" "${SERVICE_RUNTIME_PID[backend]:-none}" "$FINAL_BACKEND_PORT"
-    log "Backend health gate skipped by configuration"
-    return 0
-  fi
-
-  while [ "$attempt" -lt "$max_attempts" ]; do
-    if ! session_has_live_service "backend" "$SESSION_UUID" "$FINAL_BACKEND_PORT"; then
-      return 1
-    fi
-
-    if wait_for_http "$BACKEND_URL/health" 2 status healthy \
-      && wait_for_http "$BACKEND_URL/ready" 2 ready True \
-      && wait_for_backend_socketio 2; then
-      record_service_event "backend" "health-passed" "backend passed health gates" "${SERVICE_RUNTIME_PID[backend]:-none}" "$FINAL_BACKEND_PORT"
-      log "Backend health gate passed"
-      return 0
-    fi
-
-    delay="${BACKEND_RETRY_DELAYS[$attempt]}"
-    attempt=$((attempt + 1))
-    warn "Backend health gate pending (${attempt}/${max_attempts}); retrying in ${delay}s"
-    sleep "$delay"
-  done
-
-  return 1
+frontend_healthy() {
+  http_check "$FRONTEND_URL"
 }
 
 interface_exists() {
   local interface_name="$1"
-
   [ -n "$interface_name" ] || return 1
-
-  if command_exists ip && ip link show "$interface_name" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  if command_exists iwconfig && iwconfig "$interface_name" >/dev/null 2>&1; then
-    return 0
-  fi
-
+  [ -d "/sys/class/net/$interface_name" ] && return 0
+  command_exists ip && ip link show "$interface_name" >/dev/null 2>&1 && return 0
+  command_exists ifconfig && ifconfig "$interface_name" >/dev/null 2>&1 && return 0
   return 1
 }
 
-discover_wireless_interfaces() {
-  local interface_path=""
-
+discover_interfaces() {
   if [ -d /sys/class/net ]; then
-    for interface_path in /sys/class/net/*; do
-      [ -e "$interface_path/wireless" ] || continue
-      basename "$interface_path"
-    done
+    find /sys/class/net -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null
     return
   fi
 
-  if command_exists iwconfig; then
-    iwconfig 2>/dev/null | awk '/^[[:alnum:]_.:-]+/ && $0 !~ /no wireless extensions/ {print $1}'
+  if command_exists ip; then
+    ip -o link show 2>/dev/null | awk -F': ' '{print $2}'
   fi
 }
 
 select_sensor_interface() {
   local candidate=""
-  local discovered=""
-  local -a candidates=()
-  declare -A seen=()
 
-  if [ -n "${SENSOR_INTERFACE:-}" ]; then
-    candidates+=("$SENSOR_INTERFACE")
+  if [ -n "${SENSOR_INTERFACE:-}" ] && interface_exists "$SENSOR_INTERFACE"; then
+    SELECTED_SENSOR_INTERFACE="$SENSOR_INTERFACE"
+    return 0
   fi
-  candidates+=("wlan0mon" "wlan0")
 
-  while read -r discovered; do
-    [ -n "$discovered" ] || continue
-    candidates+=("$discovered")
-  done < <(discover_wireless_interfaces)
-
-  for candidate in "${candidates[@]}"; do
+  while read -r candidate; do
     [ -n "$candidate" ] || continue
-    if [ -n "${seen[$candidate]:-}" ]; then
-      continue
-    fi
-    seen["$candidate"]=1
-
     if interface_exists "$candidate"; then
       SELECTED_SENSOR_INTERFACE="$candidate"
-      export SENSOR_INTERFACE="$candidate"
       return 0
     fi
-  done
+  done < <(discover_interfaces)
 
   return 1
-}
-
-sensor_command_overridden() {
-  [ -n "${ZEINAGUARD_SENSOR_CMD_OVERRIDE:-}" ]
-}
-
-backend_command_overridden() {
-  [ -n "${ZEINAGUARD_BACKEND_CMD_OVERRIDE:-}" ]
-}
-
-frontend_command_overridden() {
-  [ -n "${ZEINAGUARD_FRONTEND_CMD_OVERRIDE:-}" ]
-}
-
-run_sensor_command() {
-  if sensor_command_overridden; then
-    env ZEINAGUARD_SESSION_UUID="${SESSION_UUID:-${LOCK_SESSION_UUID:-preflight}}" \
-      ZEINAGUARD_LOCK_FILE="$LOCK_FILE" \
-      ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR" \
-      ZEINAGUARD_SERVICE="sensor" \
-      BACKEND_URL="$BACKEND_URL" \
-      SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
-      SENSOR_LOG_FILE="$SENSOR_LOG" \
-      sudo -n -E bash -lc "$ZEINAGUARD_SENSOR_CMD_OVERRIDE" -- "$@"
-    return
-  fi
-
-  env ZEINAGUARD_SESSION_UUID="${SESSION_UUID:-${LOCK_SESSION_UUID:-preflight}}" \
-    ZEINAGUARD_LOCK_FILE="$LOCK_FILE" \
-    ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR" \
-    ZEINAGUARD_SERVICE="sensor" \
-    BACKEND_URL="$BACKEND_URL" \
-    SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" \
-    SENSOR_LOG_FILE="$SENSOR_LOG" \
-    sudo -n -E "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" "$@"
-}
-
-validate_sensor_sudo() {
-  local output=""
-  local compact_output=""
-
-  sudo -k >/dev/null 2>&1 || true
-  if ! sudo -n true >/dev/null 2>&1; then
-    PREFLIGHT_ERRORS+=("Sensor requires passwordless sudo (NOPASSWD)")
-    return 1
-  fi
-
-  if output="$(run_sensor_command --test 2>&1)"; then
-    [ -n "$output" ] && printf '%s\n' "$output" | awk -v prefix="[sensor] " '{ print prefix $0; fflush() }' >>"$SENSOR_LOG"
-    PREFLIGHT_NOTES+=("Privileged sensor self-test passed")
-    return 0
-  fi
-
-  [ -n "$output" ] && printf '%s\n' "$output" | awk -v prefix="[sensor] " '{ print prefix $0; fflush() }' >>"$SENSOR_LOG"
-  compact_output="$(compact_text "$output")"
-
-  if printf '%s' "$output" | grep -qi 'password .*required'; then
-    PREFLIGHT_ERRORS+=("Sensor requires passwordless sudo (NOPASSWD)")
-  else
-    PREFLIGHT_ERRORS+=("Sensor privileged self-test failed. See $SENSOR_LOG")
-  fi
-  [ -n "$compact_output" ] && PREFLIGHT_ERRORS+=("Sensor validation output: $compact_output")
-  return 1
-}
-
-require_directory() {
-  local path="$1"
-  local description="$2"
-  [ -d "$path" ] || PREFLIGHT_ERRORS+=("$description is missing: $path")
-}
-
-require_file() {
-  local path="$1"
-  local description="$2"
-  [ -f "$path" ] || PREFLIGHT_ERRORS+=("$description is missing: $path")
-}
-
-validate_command() {
-  local command_name="$1"
-  local hint="${2:-}"
-
-  if command_exists "$command_name"; then
-    return 0
-  fi
-
-  if [ -n "$hint" ]; then
-    PREFLIGHT_ERRORS+=("Required command is not installed: $command_name. $hint")
-  else
-    PREFLIGHT_ERRORS+=("Required command is not installed: $command_name")
-  fi
-}
-
-ensure_pnpm() {
-  if command_exists pnpm; then
-    return 0
-  fi
-
-  if ! command_exists npm; then
-    PREFLIGHT_ERRORS+=("pnpm is missing and npm is unavailable. Install Node.js and pnpm before running ZeinaGuard.")
-    return 1
-  fi
-
-  PREFLIGHT_ERRORS+=("pnpm is missing. Install it before running ZeinaGuard.")
-  return 1
-}
-
-validate_python_runtime() {
-  python3 -m pip --version >/dev/null 2>&1 || PREFLIGHT_ERRORS+=("python3 pip is unavailable. Install python3-pip.")
-  python3 -m venv --help >/dev/null 2>&1 || PREFLIGHT_ERRORS+=("python3 venv support is unavailable. Install python3-venv.")
-}
-
-validate_venv_python() {
-  local service_name="$1"
-  local python_bin="$2"
-
-  if [ ! -x "$python_bin" ]; then
-    PREFLIGHT_ERRORS+=("${service_name} virtual environment Python is missing: $python_bin")
-    return
-  fi
-
-  "$python_bin" -m pip --version >/dev/null 2>&1 || PREFLIGHT_ERRORS+=("${service_name} virtual environment pip is unavailable")
-}
-
-validate_python_file() {
-  local python_bin="$1"
-  local path="$2"
-  local description="$3"
-
-  "$python_bin" -m py_compile "$path" >/dev/null 2>&1 || PREFLIGHT_ERRORS+=("$description failed Python compilation: $path")
-}
-
-print_preflight_failures() {
-  local item=""
-  printf '[run.sh][error] Pre-flight validation failed:\n' >&2
-  for item in "${PREFLIGHT_ERRORS[@]}"; do
-    printf '  - %s\n' "$item" >&2
-  done
-}
-
-run_preflight_checks() {
-  local note=""
-
-  PREFLIGHT_ERRORS=()
-  PREFLIGHT_NOTES=()
-
-  log "Running pre-flight validation"
-
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    PREFLIGHT_ERRORS+=("Do not run run.sh as root. Backend and frontend must remain unprivileged.")
-  fi
-
-  require_directory "$BACKEND_DIR" "Backend directory"
-  require_directory "$SENSOR_DIR" "Sensor directory"
-  require_file "$FRONTEND_DIR/package.json" "Frontend package manifest"
-  require_file "$BACKEND_DIR/app.py" "Backend entrypoint"
-  require_file "$SENSOR_MAIN" "Sensor entrypoint"
-
-  if ! frontend_command_overridden; then
-    validate_command node "Install Node.js first."
-  fi
-  validate_command python3 "Install Python 3 first."
-  validate_command sudo "Install sudo and configure NOPASSWD for the sensor."
-  validate_command setsid "Install util-linux so services can run in isolated process groups."
-  validate_command ss "Install iproute2 so ports can be inspected safely."
-  validate_command ps "Install procps so process ancestry can be verified."
-  validate_command readlink "Install coreutils so process cwd validation works."
-
-  if frontend_command_overridden; then
-    PREFLIGHT_NOTES+=("Using frontend override command; skipping pnpm checks")
-  else
-    ensure_pnpm || true
-  fi
-
-  validate_python_runtime
-
-  if ! command_exists ip && ! command_exists iwconfig; then
-    PREFLIGHT_ERRORS+=("Wireless interface discovery requires iproute2 or wireless-tools")
-  fi
-
-  if backend_command_overridden; then
-    PREFLIGHT_NOTES+=("Using backend override command; skipping backend virtualenv validation")
-  elif [ -d "$BACKEND_DIR/.venv" ]; then
-    validate_venv_python "backend" "$BACKEND_VENV_PYTHON"
-    validate_python_file "$BACKEND_VENV_PYTHON" "$BACKEND_DIR/app.py" "Backend entrypoint"
-  else
-    PREFLIGHT_ERRORS+=("Backend virtual environment is missing: $BACKEND_DIR/.venv")
-  fi
-
-  if sensor_command_overridden; then
-    PREFLIGHT_NOTES+=("Using sensor override command; skipping sensor virtualenv validation")
-  elif [ -d "$SENSOR_DIR/.venv" ]; then
-    validate_venv_python "sensor" "$SENSOR_VENV_PYTHON"
-    validate_python_file "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN" "Sensor entrypoint"
-  else
-    PREFLIGHT_ERRORS+=("Sensor virtual environment is missing: $SENSOR_DIR/.venv")
-  fi
-
-  if ! frontend_command_overridden && [ -d "$FRONTEND_DIR/node_modules" ]; then
-    PREFLIGHT_NOTES+=("Frontend dependencies already cached in node_modules")
-  elif ! frontend_command_overridden; then
-    PREFLIGHT_NOTES+=("node_modules is missing; pnpm install will run before startup")
-  fi
-
-  if [ "${#PREFLIGHT_ERRORS[@]}" -eq 0 ]; then
-    if ! select_sensor_interface; then
-      PREFLIGHT_ERRORS+=("No usable wireless interface found. Set SENSOR_INTERFACE or attach a wireless adapter.")
-    else
-      PREFLIGHT_NOTES+=("Using sensor interface: $SELECTED_SENSOR_INTERFACE")
-    fi
-  fi
-
-  if [ "${#PREFLIGHT_ERRORS[@]}" -eq 0 ]; then
-    validate_sensor_sudo || true
-  fi
-
-  if [ "${#PREFLIGHT_ERRORS[@]}" -gt 0 ]; then
-    print_preflight_failures
-    return 1
-  fi
-
-  for note in "${PREFLIGHT_NOTES[@]}"; do
-    log "$note"
-  done
-  log "Pre-flight validation passed"
-  return 0
-}
-
-ensure_frontend_dependencies() {
-  if frontend_command_overridden; then
-    log "Frontend override command configured; skipping dependency install"
-    return
-  fi
-
-  if [ -d "$FRONTEND_DIR/node_modules" ]; then
-    log "Reusing cached frontend dependencies"
-    [ -x "$FRONTEND_NEXT_BIN" ] || fail "Next.js binary is missing: $FRONTEND_NEXT_BIN"
-    return
-  fi
-
-  log "Installing frontend dependencies with pnpm"
-  (
-    cd "$FRONTEND_DIR"
-    pnpm install
-  )
-
-  [ -x "$FRONTEND_NEXT_BIN" ] || fail "Next.js binary is missing after pnpm install: $FRONTEND_NEXT_BIN"
-}
-
-recent_log_excerpt() {
-  local log_file="$1"
-  local lines="${2:-20}"
-
-  [ -f "$log_file" ] || return 0
-  tail -n "$lines" "$log_file" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
-}
-
-start_service() {
-  local service_name="$1"
-  local workdir="$2"
-  local log_file="$3"
-  local service_port="$4"
-  shift 4
-
-  local wrapper_pid=""
-  local failure_reason=""
-
-  SERVICE_PORT["$service_name"]="$service_port"
-  record_service_event "$service_name" "start-requested" "launching service" "pending" "$service_port"
-
-  (
-    cd "$workdir"
-    exec env ZEINAGUARD_SESSION_UUID="$SESSION_UUID" \
-      ZEINAGUARD_LOCK_FILE="$LOCK_FILE" \
-      ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR" \
-      ZEINAGUARD_SUPERVISOR_PID="$$" \
-      ZEINAGUARD_SERVICE="$service_name" \
-      setsid bash -lc '
-        set -o pipefail
-        service_name="$1"
-        shift
-        "$@" 2>&1 | awk -v prefix="[""$service_name""] " '"'"'{ print prefix $0; fflush() }'"'"'
-      ' _ "$service_name" "$@"
-  ) >>"$log_file" 2>&1 &
-
-  wrapper_pid="$!"
-  SERVICE_RUNTIME_PID["$service_name"]="$wrapper_pid"
-  record_service_event "$service_name" "started" "service wrapper launched" "$wrapper_pid" "$service_port"
-  log "Started $service_name (wrapper pid $wrapper_pid, port $service_port)"
-
-  sleep 2
-  if session_has_live_service "$service_name" "$SESSION_UUID" "$service_port"; then
-    return 0
-  fi
-
-  failure_reason="$(recent_log_excerpt "$log_file" 40)"
-  record_service_event "$service_name" "startup-failed" "${failure_reason:-failed to stay running}" "$wrapper_pid" "$service_port"
-  return 1
-}
-
-launch_backend() {
-  if backend_command_overridden; then
-    start_service "backend" "$BACKEND_DIR" "$BACKEND_LOG" "$FINAL_BACKEND_PORT" \
-      bash -lc "$ZEINAGUARD_BACKEND_CMD_OVERRIDE"
-    return
-  fi
-
-  start_service "backend" "$BACKEND_DIR" "$BACKEND_LOG" "$FINAL_BACKEND_PORT" \
-    "$BACKEND_VENV_PYTHON" "$BACKEND_DIR/app.py"
-}
-
-launch_frontend() {
-  if frontend_command_overridden; then
-    start_service "frontend" "$FRONTEND_DIR" "$FRONTEND_LOG" "$FINAL_FRONTEND_PORT" \
-      bash -lc "$ZEINAGUARD_FRONTEND_CMD_OVERRIDE"
-    return
-  fi
-
-  start_service "frontend" "$FRONTEND_DIR" "$FRONTEND_LOG" "$FINAL_FRONTEND_PORT" \
-    "$FRONTEND_NEXT_BIN" dev --port "$FINAL_FRONTEND_PORT" --hostname 0.0.0.0
-}
-
-launch_sensor_once() {
-  if sensor_command_overridden; then
-    start_service "sensor" "$SENSOR_DIR" "$SENSOR_LOG" "n/a" \
-      sudo -n -E bash -lc "$ZEINAGUARD_SENSOR_CMD_OVERRIDE"
-    return
-  fi
-
-  start_service "sensor" "$SENSOR_DIR" "$SENSOR_LOG" "n/a" \
-    sudo -n -E "$SENSOR_VENV_PYTHON" "$SENSOR_MAIN"
 }
 
 disable_sensor() {
   local reason="$1"
   SENSOR_DISABLED=1
-  record_service_event "sensor" "disabled" "$reason" "${SERVICE_RUNTIME_PID[sensor]:-none}" "n/a" "${SERVICE_RETRY[sensor]}"
+  SENSOR_DISABLE_REASON="$reason"
+  service_log_event "sensor" "disabled" "$reason"
   warn "Sensor disabled: $reason"
-  stop_service_for_session "sensor" "$SESSION_UUID" "$reason" "n/a"
+
+  if [ -n "${SERVICE_PID[sensor]:-}" ] && pid_is_alive "${SERVICE_PID[sensor]}"; then
+    stop_pid_and_group "sensor" "${SERVICE_PID[sensor]}" "$reason"
+  else
+    remove_pid_file "sensor"
+  fi
+}
+
+sensor_dry_run_command() {
+  if [ -n "${ZEINAGUARD_SENSOR_CMD_OVERRIDE:-}" ]; then
+    sudo -n env \
+      ZEINAGUARD_SESSION_UUID="${SESSION_UUID:-preflight}" \
+      ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR" \
+      ZEINAGUARD_SERVICE="sensor" \
+      BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:${REQUESTED_BACKEND_PORT:-5000}}" \
+      SENSOR_INTERFACE="${SELECTED_SENSOR_INTERFACE:-${SENSOR_INTERFACE:-}}" \
+      SENSOR_LOG_FILE="$SENSOR_LOG" \
+      bash -lc "${ZEINAGUARD_SENSOR_CMD_OVERRIDE} --dry-run"
+    return
+  fi
+
+  sudo -n env \
+    ZEINAGUARD_SESSION_UUID="${SESSION_UUID:-preflight}" \
+    ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR" \
+    ZEINAGUARD_SERVICE="sensor" \
+    BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:${REQUESTED_BACKEND_PORT:-5000}}" \
+    SENSOR_INTERFACE="${SELECTED_SENSOR_INTERFACE:-${SENSOR_INTERFACE:-}}" \
+    SENSOR_LOG_FILE="$SENSOR_LOG" \
+    "$SENSOR_PYTHON" "$SENSOR_DIR/main.py" --dry-run
+}
+
+validate_sensor_sudo() {
+  local output=""
+  local status=0
+
+  output="$(sensor_dry_run_command 2>&1)" || status=$?
+
+  if [ "$status" -eq 0 ]; then
+    [ -n "$output" ] && printf '%s\n' "$output" >>"$SENSOR_LOG"
+    return 0
+  fi
+
+  [ -n "$output" ] && printf '%s\n' "$output" >>"$SENSOR_LOG"
+  if printf '%s' "$output" | grep -qi 'password .*required'; then
+    disable_sensor "sudo dry-run failed; sensor will stay optional"
+  else
+    disable_sensor "sensor dry-run failed: ${output:-unknown error}"
+  fi
+  return 1
+}
+
+ensure_frontend_dependencies() {
+  if [ -n "${ZEINAGUARD_FRONTEND_CMD_OVERRIDE:-}" ]; then
+    return 0
+  fi
+
+  if [ -x "$FRONTEND_NEXT_BIN" ]; then
+    return 0
+  fi
+
+  if [ "${ZEINAGUARD_SKIP_FRONTEND_INSTALL:-0}" = "1" ]; then
+    return 1
+  fi
+
+  if command_exists pnpm; then
+    log "Frontend dependencies missing; running pnpm install"
+    (
+      cd "$FRONTEND_DIR" &&
+      pnpm install >>"$FRONTEND_LOG" 2>&1
+    ) || return 1
+  elif command_exists npm; then
+    log "Frontend dependencies missing; running npm install"
+    (
+      cd "$FRONTEND_DIR" &&
+      npm install >>"$FRONTEND_LOG" 2>&1
+    ) || return 1
+  else
+    return 1
+  fi
+
+  [ -x "$FRONTEND_NEXT_BIN" ]
+}
+
+run_preflight_checks() {
+  local errors=()
+
+  if ! command_exists python3; then
+    errors+=("python3 is required")
+  fi
+
+  if ! command_exists ps; then
+    errors+=("ps is required for safe PID validation")
+  fi
+
+  if [ -z "${ZEINAGUARD_BACKEND_CMD_OVERRIDE:-}" ] && [ ! -f "$BACKEND_DIR/app.py" ]; then
+    errors+=("backend entrypoint is missing: $BACKEND_DIR/app.py")
+  fi
+
+  if [ -z "${ZEINAGUARD_FRONTEND_CMD_OVERRIDE:-}" ] && [ ! -f "$FRONTEND_DIR/package.json" ]; then
+    errors+=("frontend package manifest is missing: $FRONTEND_DIR/package.json")
+  fi
+
+  if [ -z "${ZEINAGUARD_FRONTEND_CMD_OVERRIDE:-}" ] && ! command_exists node; then
+    errors+=("node is required for the frontend")
+  fi
+
+  if [ -z "${ZEINAGUARD_BACKEND_CMD_OVERRIDE:-}" ] && ! command_exists "$BACKEND_PYTHON"; then
+    errors+=("backend Python is unavailable: $BACKEND_PYTHON")
+  fi
+
+  if ! ensure_frontend_dependencies; then
+    errors+=("frontend runtime is unavailable: $FRONTEND_NEXT_BIN")
+  fi
+
+  if [ "${#errors[@]}" -gt 0 ]; then
+    local item=""
+    for item in "${errors[@]}"; do
+      error_log "$item"
+    done
+    return 1
+  fi
+
+  SENSOR_DISABLED=0
+  SENSOR_DISABLE_REASON=""
+
+  if [ ! -f "$SENSOR_DIR/main.py" ] && [ -z "${ZEINAGUARD_SENSOR_CMD_OVERRIDE:-}" ]; then
+    disable_sensor "sensor entrypoint missing"
+    return 0
+  fi
+
+  if ! command_exists sudo; then
+    disable_sensor "sudo is unavailable"
+    return 0
+  fi
+
+  if ! select_sensor_interface; then
+    disable_sensor "no network interface found for sensor startup"
+    return 0
+  fi
+
+  validate_sensor_sudo || true
+  return 0
+}
+
+start_service_process() {
+  local service="$1"
+  local workdir="$2"
+  local log_file="$3"
+  local port="$4"
+  shift 4
+
+  local pid=""
+  local pgid=""
+
+  SERVICE_PORT["$service"]="$port"
+  SERVICE_STARTED_AT["$service"]="$(timestamp)"
+  service_log_event "$service" "start-requested" "starting service"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Dry-run: would start $service on port $port"
+    return 0
+  fi
+
+  (
+    cd "$workdir" || exit 1
+    if [ "$USE_SETSID" -eq 1 ]; then
+      exec env \
+        ZEINAGUARD_SESSION_UUID="$SESSION_UUID" \
+        ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR" \
+        ZEINAGUARD_LOCK_FILE="$LOCK_FILE" \
+        ZEINAGUARD_SERVICE="$service" \
+        BACKEND_URL="$BACKEND_URL" \
+        SENSOR_INTERFACE="${SELECTED_SENSOR_INTERFACE:-}" \
+        SENSOR_LOG_FILE="$SENSOR_LOG" \
+        BACKEND_PORT="$FINAL_BACKEND_PORT" \
+        FRONTEND_PORT="$FINAL_FRONTEND_PORT" \
+        FLASK_PORT="$FINAL_BACKEND_PORT" \
+        PORT="$FINAL_FRONTEND_PORT" \
+        NEXT_PUBLIC_API_URL="$BACKEND_URL" \
+        NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL" \
+        setsid "$@" >>"$log_file" 2>&1
+    else
+      exec env \
+        ZEINAGUARD_SESSION_UUID="$SESSION_UUID" \
+        ZEINAGUARD_PROJECT_ROOT="$ROOT_DIR" \
+        ZEINAGUARD_LOCK_FILE="$LOCK_FILE" \
+        ZEINAGUARD_SERVICE="$service" \
+        BACKEND_URL="$BACKEND_URL" \
+        SENSOR_INTERFACE="${SELECTED_SENSOR_INTERFACE:-}" \
+        SENSOR_LOG_FILE="$SENSOR_LOG" \
+        BACKEND_PORT="$FINAL_BACKEND_PORT" \
+        FRONTEND_PORT="$FINAL_FRONTEND_PORT" \
+        FLASK_PORT="$FINAL_BACKEND_PORT" \
+        PORT="$FINAL_FRONTEND_PORT" \
+        NEXT_PUBLIC_API_URL="$BACKEND_URL" \
+        NEXT_PUBLIC_SOCKET_URL="$BACKEND_URL" \
+        "$@" >>"$log_file" 2>&1
+    fi
+  ) &
+
+  pid=$!
+  sleep 1
+
+  if ! pid_is_alive "$pid"; then
+    SERVICE_PID["$service"]=""
+    SERVICE_PGID["$service"]=""
+    service_log_event "$service" "startup-failed" "$(recent_log_excerpt "$log_file" 30)"
+    return 1
+  fi
+
+  pgid="$(pgid_for_pid "$pid")"
+  [ -n "$pgid" ] || pgid="$pid"
+
+  SERVICE_PID["$service"]="$pid"
+  SERVICE_PGID["$service"]="$pgid"
+  write_pid_file "$service"
+  service_log_event "$service" "started" "service running"
+  log "$service started pid=$pid port=$port"
+  return 0
+}
+
+launch_backend() {
+  if [ -n "${ZEINAGUARD_BACKEND_CMD_OVERRIDE:-}" ]; then
+    start_service_process "backend" "$BACKEND_DIR" "$BACKEND_LOG" "$FINAL_BACKEND_PORT" bash -lc "$ZEINAGUARD_BACKEND_CMD_OVERRIDE"
+    return
+  fi
+
+  start_service_process "backend" "$BACKEND_DIR" "$BACKEND_LOG" "$FINAL_BACKEND_PORT" "$BACKEND_PYTHON" "$BACKEND_DIR/app.py"
+}
+
+launch_frontend() {
+  if [ -n "${ZEINAGUARD_FRONTEND_CMD_OVERRIDE:-}" ]; then
+    start_service_process "frontend" "$FRONTEND_DIR" "$FRONTEND_LOG" "$FINAL_FRONTEND_PORT" bash -lc "$ZEINAGUARD_FRONTEND_CMD_OVERRIDE"
+    return
+  fi
+
+  start_service_process "frontend" "$FRONTEND_DIR" "$FRONTEND_LOG" "$FINAL_FRONTEND_PORT" "$FRONTEND_NEXT_BIN" dev --port "$FINAL_FRONTEND_PORT" --hostname 0.0.0.0
+}
+
+launch_sensor_once() {
+  if [ "$SENSOR_DISABLED" -eq 1 ]; then
+    return 0
+  fi
+
+  if [ -n "${ZEINAGUARD_SENSOR_CMD_OVERRIDE:-}" ]; then
+    start_service_process "sensor" "$SENSOR_DIR" "$SENSOR_LOG" "n/a" sudo -n env SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" SENSOR_LOG_FILE="$SENSOR_LOG" BACKEND_URL="$BACKEND_URL" bash -lc "$ZEINAGUARD_SENSOR_CMD_OVERRIDE"
+    return
+  fi
+
+  start_service_process "sensor" "$SENSOR_DIR" "$SENSOR_LOG" "n/a" sudo -n env SENSOR_INTERFACE="$SELECTED_SENSOR_INTERFACE" SENSOR_LOG_FILE="$SENSOR_LOG" BACKEND_URL="$BACKEND_URL" "$SENSOR_PYTHON" "$SENSOR_DIR/main.py"
 }
 
 start_sensor_service() {
-  local startup_reason=""
+  local failure_reason=""
+
+  if [ "$SENSOR_DISABLED" -eq 1 ]; then
+    return 0
+  fi
 
   if launch_sensor_once; then
     return 0
   fi
 
-  startup_reason="$(recent_log_excerpt "$SENSOR_LOG" 40)"
-  record_service_event "sensor" "startup-failed" "${startup_reason:-unknown}" "${SERVICE_RUNTIME_PID[sensor]:-none}" "n/a" "${SERVICE_RETRY[sensor]}"
+  failure_reason="$(recent_log_excerpt "$SENSOR_LOG" 30)"
+  if printf '%s' "$failure_reason" | grep -qi 'password .*required'; then
+    disable_sensor "sudo launch failed; sensor disabled without blocking stack"
+    return 0
+  fi
 
-  if [ "${SERVICE_RETRY[sensor]}" -lt "$SENSOR_MAX_RETRIES" ]; then
-    SERVICE_RETRY[sensor]=$((SERVICE_RETRY[sensor] + 1))
-    warn "Sensor exited during startup. Restarting once (${SERVICE_RETRY[sensor]}/${SENSOR_MAX_RETRIES}). Reason: ${startup_reason:-unknown}"
+  if [ "$SENSOR_RETRY_COUNT" -lt "$SENSOR_MAX_RETRIES" ]; then
+    SENSOR_RETRY_COUNT=$((SENSOR_RETRY_COUNT + 1))
     sleep 2
     if launch_sensor_once; then
       return 0
     fi
-    startup_reason="$(recent_log_excerpt "$SENSOR_LOG" 40)"
-    record_service_event "sensor" "startup-retry-failed" "${startup_reason:-unknown}" "${SERVICE_RUNTIME_PID[sensor]:-none}" "n/a" "${SERVICE_RETRY[sensor]}"
+    failure_reason="$(recent_log_excerpt "$SENSOR_LOG" 30)"
   fi
 
-  disable_sensor "sensor failed to stay running after $((SERVICE_RETRY[sensor] + 1)) attempts: ${startup_reason:-unknown}"
+  disable_sensor "sensor failed after one retry: ${failure_reason:-unknown error}"
   return 0
 }
 
-print_summary() {
-  local sensor_state="active"
+reconcile_existing_runtime() {
+  reconcile_pid_file "sensor" "preflight cleanup"
+  reconcile_pid_file "frontend" "preflight cleanup"
+  reconcile_pid_file "backend" "preflight cleanup"
 
-  if [ "$SENSOR_DISABLED" -eq 1 ]; then
-    sensor_state="disabled"
+  if [ -f "$LOCK_FILE" ]; then
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "Dry-run: found existing lock file at $LOCK_FILE"
+    else
+      rm -f "$LOCK_FILE"
+    fi
   fi
+}
+
+print_summary() {
+  local sensor_state="running"
+  [ "$SENSOR_DISABLED" -eq 1 ] && sensor_state="disabled"
 
   cat <<EOF
 ZeinaGuard is running
 Session UUID : ${SESSION_UUID}
-Frontend URL : http://127.0.0.1:${FINAL_FRONTEND_PORT}
+Frontend URL : ${FRONTEND_URL}
 Backend URL  : ${BACKEND_URL}
 Sensor       : ${sensor_state}
 Logs         : ${LOG_DIR}
@@ -1191,27 +940,42 @@ print_dry_run_summary() {
 ZeinaGuard dry-run completed
 Session UUID : ${SESSION_UUID}
 Frontend URL : http://127.0.0.1:${FINAL_FRONTEND_PORT}
-Backend URL  : ${BACKEND_URL}
-Lock file    : ${LOCK_FILE}
+Backend URL  : http://127.0.0.1:${FINAL_BACKEND_PORT}
+Sensor       : $([ "$SENSOR_DISABLED" -eq 1 ] && printf 'disabled' || printf 'ready')
 EOF
 }
 
 shutdown_all() {
   local exit_code="${1:-0}"
-  local service_name=""
 
   if [ "$SHUTDOWN_DONE" -eq 1 ]; then
     return
   fi
   SHUTDOWN_DONE=1
+  SHUTDOWN_REQUESTED=1
 
-  for service_name in "${SHUTDOWN_ORDER[@]}"; do
-    stop_service_for_session "$service_name" "$SESSION_UUID" "supervisor shutdown" "$(service_port_for_session "$service_name" "$SESSION_UUID")"
-  done
-
-  if ! session_has_live_processes "$SESSION_UUID"; then
-    remove_lock_file_if_current_session
+  if [ -n "${SERVICE_PID[sensor]:-}" ]; then
+    stop_pid_and_group "sensor" "${SERVICE_PID[sensor]}" "supervisor shutdown"
+  else
+    reconcile_pid_file "sensor" "supervisor shutdown"
   fi
+
+  if [ -n "${SERVICE_PID[frontend]:-}" ]; then
+    stop_pid_and_group "frontend" "${SERVICE_PID[frontend]}" "supervisor shutdown"
+  else
+    reconcile_pid_file "frontend" "supervisor shutdown"
+  fi
+
+  if [ -n "${SERVICE_PID[backend]:-}" ]; then
+    stop_pid_and_group "backend" "${SERVICE_PID[backend]}" "supervisor shutdown"
+  else
+    reconcile_pid_file "backend" "supervisor shutdown"
+  fi
+
+  if [ "$DRY_RUN" -eq 0 ]; then
+    remove_lock_file
+  fi
+  flush_throttled_warnings
 
   if [ "$exit_code" -eq 0 ]; then
     log "Shutdown complete"
@@ -1235,91 +999,101 @@ on_exit() {
   fi
 
   if [ "$INTERRUPTED" -eq 0 ] && [ "$exit_code" -ne 0 ]; then
-    warn "Lifecycle supervisor exiting with failure"
+    error_log "Lifecycle supervisor exiting with failure"
   fi
 
   shutdown_all "$exit_code"
 }
 
+supervisor_fail() {
+  error_log "$1"
+  exit 1
+}
+
 monitor_services() {
-  local failure_reason=""
+  local backend_failures=0
+  local frontend_failures=0
+  local reason=""
 
-  while true; do
-    if ! session_has_live_service "backend" "$SESSION_UUID" "$FINAL_BACKEND_PORT"; then
-      failure_reason="$(recent_log_excerpt "$BACKEND_LOG" 40)"
-      record_service_event "backend" "unexpected-exit" "${failure_reason:-unknown}" "${SERVICE_RUNTIME_PID[backend]:-none}" "$FINAL_BACKEND_PORT"
-      fail "Backend exited unexpectedly. Reason: ${failure_reason:-unknown}. See $BACKEND_LOG"
-    fi
-
-    if ! session_has_live_service "frontend" "$SESSION_UUID" "$FINAL_FRONTEND_PORT"; then
-      failure_reason="$(recent_log_excerpt "$FRONTEND_LOG" 40)"
-      record_service_event "frontend" "unexpected-exit" "${failure_reason:-unknown}" "${SERVICE_RUNTIME_PID[frontend]:-none}" "$FINAL_FRONTEND_PORT"
-      fail "Frontend exited unexpectedly. Reason: ${failure_reason:-unknown}. See $FRONTEND_LOG"
-    fi
-
-    if [ "$SENSOR_DISABLED" -eq 0 ] && ! session_has_live_service "sensor" "$SESSION_UUID" "n/a"; then
-      failure_reason="$(recent_log_excerpt "$SENSOR_LOG" 40)"
-      record_service_event "sensor" "unexpected-exit" "${failure_reason:-unknown}" "${SERVICE_RUNTIME_PID[sensor]:-none}" "n/a" "${SERVICE_RETRY[sensor]}"
-
-      if [ "${SERVICE_RETRY[sensor]}" -lt "$SENSOR_MAX_RETRIES" ]; then
-        SERVICE_RETRY[sensor]=$((SERVICE_RETRY[sensor] + 1))
-        warn "Sensor exited unexpectedly. Restarting once (${SERVICE_RETRY[sensor]}/${SENSOR_MAX_RETRIES}). Reason: ${failure_reason:-unknown}"
-        stop_service_for_session "sensor" "$SESSION_UUID" "sensor restart requested" "n/a"
-        sleep 2
-        if launch_sensor_once; then
-          continue
-        fi
-        failure_reason="$(recent_log_excerpt "$SENSOR_LOG" 40)"
-        record_service_event "sensor" "restart-failed" "${failure_reason:-unknown}" "${SERVICE_RUNTIME_PID[sensor]:-none}" "n/a" "${SERVICE_RETRY[sensor]}"
+  while [ "$SHUTDOWN_REQUESTED" -eq 0 ]; do
+    if backend_healthy; then
+      backend_failures=0
+    else
+      backend_failures=$((backend_failures + 1))
+      warn_throttled "backend-health" "Backend health check failed (${backend_failures}/3)"
+      if [ "$backend_failures" -ge 3 ]; then
+        reason="$(recent_log_excerpt "$BACKEND_LOG" 30)"
+        service_log_event "backend" "health-failed" "$reason"
+        supervisor_fail "Backend became unhealthy. See $BACKEND_LOG"
       fi
-
-      disable_sensor "sensor stopped after retry exhaustion: ${failure_reason:-unknown}"
     fi
 
-    sleep 2
+    if frontend_healthy; then
+      frontend_failures=0
+    else
+      frontend_failures=$((frontend_failures + 1))
+      warn_throttled "frontend-health" "Frontend health check failed (${frontend_failures}/3)"
+      if [ "$frontend_failures" -ge 3 ]; then
+        reason="$(recent_log_excerpt "$FRONTEND_LOG" 30)"
+        service_log_event "frontend" "health-failed" "$reason"
+        supervisor_fail "Frontend became unhealthy. See $FRONTEND_LOG"
+      fi
+    fi
+
+    if [ "$SENSOR_DISABLED" -eq 0 ] && [ -n "${SERVICE_PID[sensor]:-}" ] && ! pid_is_alive "${SERVICE_PID[sensor]}"; then
+      reason="$(recent_log_excerpt "$SENSOR_LOG" 30)"
+      if [ "$SENSOR_RETRY_COUNT" -lt "$SENSOR_MAX_RETRIES" ]; then
+        SENSOR_RETRY_COUNT=$((SENSOR_RETRY_COUNT + 1))
+        warn_throttled "sensor-restart" "Sensor exited; retrying once"
+        sleep 2
+        if ! launch_sensor_once; then
+          reason="$(recent_log_excerpt "$SENSOR_LOG" 30)"
+          disable_sensor "sensor stopped after one retry: ${reason:-unknown error}"
+        fi
+      else
+        disable_sensor "sensor stopped and was left disabled: ${reason:-unknown error}"
+      fi
+    fi
+
+    sleep "$MONITOR_INTERVAL"
   done
 }
 
-main() {
+run_stack() {
   trap on_interrupt INT TERM
   trap on_exit EXIT
 
   load_env_file
+  refresh_config
   ensure_runtime_dirs
   prepare_log_files
-  run_preflight_checks || exit 1
-  reconcile_existing_session
 
   SESSION_UUID="$(generate_uuid)"
   SESSION_STARTED_AT="$(timestamp)"
-  resolve_runtime_ports || exit 1
 
-  if is_dry_run; then
-    dry_run_log "Backend would start on port $FINAL_BACKEND_PORT"
-    dry_run_log "Frontend would start on port $FINAL_FRONTEND_PORT"
-    dry_run_log "Sensor would start only after backend and frontend are healthy"
+  run_preflight_checks || exit 1
+  reconcile_existing_runtime
+
+  allocate_port "backend" "$REQUESTED_BACKEND_PORT" FINAL_BACKEND_PORT || supervisor_fail "No backend port available in ${REQUESTED_BACKEND_PORT}-$((REQUESTED_BACKEND_PORT + PORT_FALLBACK_COUNT - 1))"
+  allocate_port "frontend" "$REQUESTED_FRONTEND_PORT" FINAL_FRONTEND_PORT || supervisor_fail "No frontend port available in ${REQUESTED_FRONTEND_PORT}-$((REQUESTED_FRONTEND_PORT + PORT_FALLBACK_COUNT - 1))"
+  refresh_runtime_environment
+
+  if [ "$DRY_RUN" -eq 1 ]; then
     print_dry_run_summary
     return 0
   fi
 
-  refresh_runtime_environment
   write_lock_file
-  ensure_frontend_dependencies
 
   log "Starting backend on port $FINAL_BACKEND_PORT"
-  launch_backend || fail "backend failed to stay running. See $BACKEND_LOG"
-  wait_for_backend_health || fail "Backend failed health gating. See $BACKEND_LOG"
+  launch_backend || supervisor_fail "backend failed to stay running. See $BACKEND_LOG"
+  wait_for_http "$BACKEND_URL/health" "$BACKEND_HEALTH_TIMEOUT" status healthy || supervisor_fail "backend did not become healthy. See $BACKEND_LOG"
+  service_log_event "backend" "health-passed" "HTTP /health passed"
 
   log "Starting frontend on port $FINAL_FRONTEND_PORT"
-  launch_frontend || fail "frontend failed to stay running. See $FRONTEND_LOG"
-
-  if [ "$SKIP_FRONTEND_HEALTHCHECK" = "1" ]; then
-    record_service_event "frontend" "health-skipped" "frontend health checks skipped by configuration" "${SERVICE_RUNTIME_PID[frontend]:-none}" "$FINAL_FRONTEND_PORT"
-    log "Frontend health gate skipped by configuration"
-  else
-    wait_for_http "http://127.0.0.1:${FINAL_FRONTEND_PORT}" 20 || fail "Frontend failed health check. See $FRONTEND_LOG"
-    record_service_event "frontend" "health-passed" "frontend HTTP gate passed" "${SERVICE_RUNTIME_PID[frontend]:-none}" "$FINAL_FRONTEND_PORT"
-  fi
+  launch_frontend || supervisor_fail "frontend failed to stay running. See $FRONTEND_LOG"
+  wait_for_http "$FRONTEND_URL" "$FRONTEND_HEALTH_TIMEOUT" || supervisor_fail "frontend did not become reachable. See $FRONTEND_LOG"
+  service_log_event "frontend" "health-passed" "HTTP frontend check passed"
 
   log "Starting sensor"
   start_sensor_service
@@ -1328,5 +1102,387 @@ main() {
   monitor_services
 }
 
-parse_args "$@"
-main
+test_assert_contains() {
+  local file="$1"
+  local pattern="$2"
+  grep -Fq "$pattern" "$file"
+}
+
+test_wait_for_pattern() {
+  local file="$1"
+  local pattern="$2"
+  local timeout_seconds="$3"
+  local elapsed=0
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    if [ -f "$file" ] && grep -Fq "$pattern" "$file"; then
+      return 0
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+  return 1
+}
+
+test_make_sudo_stub() {
+  local stub_dir="$1"
+  cat >"$stub_dir/sudo" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+mode="${ZEINAGUARD_TEST_SUDO_MODE:-success}"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n|-E)
+      shift
+      ;;
+    env)
+      shift
+      while [ "$#" -gt 0 ] && printf '%s' "$1" | grep -q '='; do
+        export "$1"
+        shift
+      done
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if [ "$mode" = "fail" ]; then
+  printf 'sudo: a password is required\n' >&2
+  exit 1
+fi
+
+[ "$#" -gt 0 ] || exit 0
+exec "$@"
+EOF
+  chmod +x "$stub_dir/sudo"
+
+  cat >"$stub_dir/python3" <<'EOF'
+#!/usr/bin/env bash
+exec python "$@"
+EOF
+  chmod +x "$stub_dir/python3"
+}
+
+test_make_mock_service() {
+  local file="$1"
+  cat >"$file" <<'EOF'
+#!/usr/bin/env python3
+import json
+import signal
+import socketserver
+import sys
+import time
+from http.server import BaseHTTPRequestHandler
+
+service = sys.argv[1]
+mode = sys.argv[2]
+port = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+
+stop = False
+
+def handle_signal(_signum, _frame):
+    global stop
+    stop = True
+
+signal.signal(signal.SIGTERM, handle_signal)
+signal.signal(signal.SIGINT, handle_signal)
+
+if mode == "crash":
+    time.sleep(1)
+    sys.exit(1)
+
+if service == "sensor":
+    if "--dry-run" in sys.argv:
+        print("[mock-sensor] dry-run ok", flush=True)
+        sys.exit(0)
+    while not stop:
+        time.sleep(1)
+    sys.exit(0)
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if service == "backend" and self.path.startswith("/health"):
+            body = json.dumps({"status": "healthy"}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format, *_args):
+        return
+
+class Server(socketserver.TCPServer):
+    allow_reuse_address = True
+
+with Server(("127.0.0.1", port), Handler) as httpd:
+    httpd.timeout = 1
+    while not stop:
+        httpd.handle_request()
+EOF
+  chmod +x "$file"
+}
+
+test_service_override() {
+  local service="$1"
+  local mode="$2"
+  local mock_file="$3"
+
+  case "$service" in
+    backend)
+      printf "exec -a '%s' python3 '%s' backend %s \"\$BACKEND_PORT\"" "$BACKEND_DIR/app.py" "$mock_file" "$mode"
+      ;;
+    frontend)
+      printf "exec -a '%s' python3 '%s' frontend %s \"\$FRONTEND_PORT\"" "$FRONTEND_NEXT_BIN" "$mock_file" "$mode"
+      ;;
+    sensor)
+      printf "exec -a '%s' python3 '%s' sensor %s" "$SENSOR_DIR/main.py" "$mock_file" "$mode"
+      ;;
+  esac
+}
+
+test_setup_case_env() {
+  local case_root="$1"
+  local stub_dir="$2"
+  local mock_file="$3"
+
+  export ZEINAGUARD_IGNORE_ENV_FILE=1
+  export ZEINAGUARD_RUNTIME_DIR="$case_root/runtime"
+  export ZEINAGUARD_LOG_DIR="$case_root/logs"
+  export ZEINAGUARD_LOCK_FILE="$case_root/zeinaguard.lock"
+  export ZEINAGUARD_SKIP_FRONTEND_INSTALL=1
+  export ZEINAGUARD_BACKEND_CMD_OVERRIDE="$(test_service_override backend stable "$mock_file")"
+  export ZEINAGUARD_FRONTEND_CMD_OVERRIDE="$(test_service_override frontend stable "$mock_file")"
+  export ZEINAGUARD_SENSOR_CMD_OVERRIDE="$(test_service_override sensor stable "$mock_file")"
+  export SENSOR_INTERFACE="lo"
+  export PATH="$stub_dir:$PATH"
+  export ZEINAGUARD_TEST_SUDO_MODE="success"
+}
+
+test_run_background() {
+  local output_file="$1"
+  (
+    cd "$ROOT_DIR" &&
+    ./run.sh
+  ) >"$output_file" 2>&1 &
+  printf '%s\n' "$!"
+}
+
+test_start_external_listener() {
+  local port="$1"
+  local log_file="$2"
+  python3 -m http.server "$port" --bind 127.0.0.1 >"$log_file" 2>&1 &
+  printf '%s\n' "$!"
+}
+
+run_self_tests() {
+  local tmp_root=""
+  local stub_dir=""
+  local mock_file=""
+  local output_file=""
+  local run_pid=""
+  local listener_pid=""
+  local listener_pid2=""
+  local failures=0
+  local passes=0
+  local capture_file=""
+
+  test_print_result() {
+    local name="$1"
+    local status="$2"
+    local details="$3"
+    printf '%s: %s%s\n' "$name" "$status" "$([ -n "$details" ] && printf ' - %s' "$details")"
+  }
+
+  case "$(uname -s)" in
+    Linux*|MINGW*|MSYS*)
+      ;;
+    *)
+      printf 'run.sh --test: FAIL - unsupported runtime for supervisor simulation\n'
+      return 1
+      ;;
+  esac
+
+  tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/zeinaguard-selftest.XXXXXX")"
+  stub_dir="$tmp_root/bin"
+  mock_file="$tmp_root/mock_service.py"
+  mkdir -p "$stub_dir"
+
+  test_make_sudo_stub "$stub_dir"
+  test_make_mock_service "$mock_file"
+
+  cleanup_test_case() {
+    [ -n "${run_pid:-}" ] && kill -INT "$run_pid" >/dev/null 2>&1 || true
+    [ -n "${listener_pid:-}" ] && kill -TERM "$listener_pid" >/dev/null 2>&1 || true
+    [ -n "${listener_pid2:-}" ] && kill -TERM "$listener_pid2" >/dev/null 2>&1 || true
+    run_pid=""
+    listener_pid=""
+    listener_pid2=""
+    unset ZEINAGUARD_IGNORE_ENV_FILE ZEINAGUARD_RUNTIME_DIR ZEINAGUARD_LOG_DIR ZEINAGUARD_LOCK_FILE
+    unset ZEINAGUARD_SKIP_FRONTEND_INSTALL ZEINAGUARD_BACKEND_CMD_OVERRIDE ZEINAGUARD_FRONTEND_CMD_OVERRIDE
+    unset ZEINAGUARD_SENSOR_CMD_OVERRIDE SENSOR_INTERFACE ZEINAGUARD_TEST_SUDO_MODE
+  }
+
+  trap 'cleanup_test_case; rm -rf "$tmp_root"' RETURN
+
+  test_case_sudo_failure() {
+    local case_root="$tmp_root/sudo-failure"
+    mkdir -p "$case_root"
+    test_setup_case_env "$case_root" "$stub_dir" "$mock_file"
+    export ZEINAGUARD_TEST_SUDO_MODE="fail"
+    output_file="$case_root/output.log"
+    run_pid="$(test_run_background "$output_file")"
+    if test_wait_for_pattern "$output_file" "ZeinaGuard is running" 25 && test_assert_contains "$output_file" "Sensor       : disabled"; then
+      kill -INT "$run_pid" >/dev/null 2>&1 || true
+      wait "$run_pid" >/dev/null 2>&1 || true
+      passes=$((passes + 1))
+      test_print_result "sudo failure -> system continues" "PASS" ""
+    else
+      failures=$((failures + 1))
+      test_print_result "sudo failure -> system continues" "FAIL" "$(recent_log_excerpt "$output_file" 40)"
+    fi
+    cleanup_test_case
+  }
+
+  test_case_port_conflict() {
+    local case_root="$tmp_root/port-conflict"
+    mkdir -p "$case_root"
+    test_setup_case_env "$case_root" "$stub_dir" "$mock_file"
+    output_file="$case_root/output.log"
+    listener_pid="$(test_start_external_listener 3000 "$case_root/listener-3000.log")"
+    listener_pid2="$(test_start_external_listener 5000 "$case_root/listener-5000.log")"
+    sleep 1
+    run_pid="$(test_run_background "$output_file")"
+    if test_wait_for_pattern "$output_file" "ZeinaGuard is running" 25 && test_assert_contains "$output_file" "Frontend URL : http://127.0.0.1:3001" && test_assert_contains "$output_file" "Backend URL  : http://127.0.0.1:5001"; then
+      kill -INT "$run_pid" >/dev/null 2>&1 || true
+      wait "$run_pid" >/dev/null 2>&1 || true
+      passes=$((passes + 1))
+      test_print_result "port 3000/5000 busy -> fallback works" "PASS" ""
+    else
+      failures=$((failures + 1))
+      test_print_result "port 3000/5000 busy -> fallback works" "FAIL" "$(recent_log_excerpt "$output_file" 40)"
+    fi
+    cleanup_test_case
+  }
+
+  test_case_sensor_crash() {
+    local case_root="$tmp_root/sensor-crash"
+    mkdir -p "$case_root"
+    test_setup_case_env "$case_root" "$stub_dir" "$mock_file"
+    export ZEINAGUARD_SENSOR_CMD_OVERRIDE="$(test_service_override sensor crash "$mock_file")"
+    output_file="$case_root/output.log"
+    run_pid="$(test_run_background "$output_file")"
+    if test_wait_for_pattern "$output_file" "ZeinaGuard is running" 25 && test_assert_contains "$output_file" "Sensor       : disabled" && kill -0 "$run_pid" >/dev/null 2>&1; then
+      kill -INT "$run_pid" >/dev/null 2>&1 || true
+      wait "$run_pid" >/dev/null 2>&1 || true
+      passes=$((passes + 1))
+      test_print_result "sensor crash -> system continues" "PASS" ""
+    else
+      failures=$((failures + 1))
+      test_print_result "sensor crash -> system continues" "FAIL" "$(recent_log_excerpt "$output_file" 40)"
+    fi
+    cleanup_test_case
+  }
+
+  test_case_stale_pid() {
+    local case_root="$tmp_root/stale-pid"
+    mkdir -p "$case_root/runtime/pids"
+    test_setup_case_env "$case_root" "$stub_dir" "$mock_file"
+    output_file="$case_root/output.log"
+    cat >"$case_root/runtime/pids/backend.pid" <<EOF
+pid=999999
+pgid=999999
+port=5000
+start_time=$(timestamp)
+session_uuid=stale
+EOF
+    run_pid="$(test_run_background "$output_file")"
+    if test_wait_for_pattern "$output_file" "ZeinaGuard is running" 25; then
+      kill -INT "$run_pid" >/dev/null 2>&1 || true
+      wait "$run_pid" >/dev/null 2>&1 || true
+      passes=$((passes + 1))
+      test_print_result "stale PID -> ignored safely" "PASS" ""
+    else
+      failures=$((failures + 1))
+      test_print_result "stale PID -> ignored safely" "FAIL" "$(recent_log_excerpt "$output_file" 40)"
+    fi
+    cleanup_test_case
+  }
+
+  test_case_backend_health_source() {
+    local case_root="$tmp_root/backend-health"
+    mkdir -p "$case_root"
+    test_setup_case_env "$case_root" "$stub_dir" "$mock_file"
+    output_file="$case_root/output.log"
+    run_pid="$(test_run_background "$output_file")"
+    if test_wait_for_pattern "$output_file" "ZeinaGuard is running" 25; then
+      sleep 4
+      if kill -0 "$run_pid" >/dev/null 2>&1 && ! grep -Fq "Backend became unhealthy" "$output_file"; then
+        kill -INT "$run_pid" >/dev/null 2>&1 || true
+        wait "$run_pid" >/dev/null 2>&1 || true
+        passes=$((passes + 1))
+        test_print_result "backend healthy -> not marked invalid" "PASS" ""
+      else
+        failures=$((failures + 1))
+        test_print_result "backend healthy -> not marked invalid" "FAIL" "$(recent_log_excerpt "$output_file" 40)"
+      fi
+    else
+      failures=$((failures + 1))
+      test_print_result "backend healthy -> not marked invalid" "FAIL" "$(recent_log_excerpt "$output_file" 40)"
+    fi
+    cleanup_test_case
+  }
+
+  test_case_warning_suppression() {
+    local case_root="$tmp_root/warn-suppression"
+    mkdir -p "$case_root"
+    capture_file="$case_root/warnings.log"
+    exec 3>&2 2>"$capture_file"
+    warn_throttled "spam-case" "Skipping external process because fingerprint validation failed"
+    warn_throttled "spam-case" "Skipping external process because fingerprint validation failed"
+    warn_throttled "spam-case" "Skipping external process because fingerprint validation failed"
+    warn_throttled "spam-case" "Skipping external process because fingerprint validation failed"
+    warn_throttled "spam-case" "Skipping external process because fingerprint validation failed"
+    exec 2>&3 3>&-
+    if [ "$(grep -c 'Skipping external process because fingerprint validation failed' "$capture_file" 2>/dev/null || true)" -le 4 ] && grep -Fq 'Suppressing repeated warnings for 10s' "$capture_file"; then
+      passes=$((passes + 1))
+      test_print_result "repeated warnings -> suppressed" "PASS" ""
+    else
+      failures=$((failures + 1))
+      test_print_result "repeated warnings -> suppressed" "FAIL" "$(recent_log_excerpt "$capture_file" 20)"
+    fi
+  }
+
+  test_case_sudo_failure
+  test_case_port_conflict
+  test_case_sensor_crash
+  test_case_stale_pid
+  test_case_backend_health_source
+  test_case_warning_suppression
+
+  printf 'Summary: %s PASS, %s FAIL\n' "$passes" "$failures"
+  [ "$failures" -eq 0 ]
+}
+
+main() {
+  parse_args "$@"
+
+  if [ "$RUN_TESTS" -eq 1 ]; then
+    run_self_tests
+    return $?
+  fi
+
+  run_stack
+}
+
+main "$@"

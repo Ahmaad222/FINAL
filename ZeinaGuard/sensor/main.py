@@ -248,6 +248,7 @@ def ensure_virtualenv():
 def parse_args():
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--test", action="store_true", help="Run a lightweight sensor self-test and exit")
+    parser.add_argument("--dry-run", action="store_true", help="Run the supervisor sensor dry-run probe and exit")
     return parser.parse_args()
 
 
@@ -355,7 +356,7 @@ def main():
 
 def run():
     args = parse_args()
-    if args.test:
+    if args.test or args.dry_run:
         return run_self_test()
     main()
     return 0
