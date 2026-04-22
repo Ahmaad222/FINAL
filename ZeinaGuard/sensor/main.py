@@ -344,7 +344,7 @@ def main():
     )
     ws_thread = threading.Thread(target=ws_client.start, daemon=True, name="WSClient")
     ws_thread.start()
-    ws_client.wait_until_ready(timeout_seconds=startup_timeout)
+    # ws_client.wait_until_ready(timeout_seconds=startup_timeout)
 
     threat_manager = ThreatManager()
     threading.Thread(target=threat_manager.start, daemon=True, name="ThreatManager").start()

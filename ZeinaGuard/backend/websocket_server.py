@@ -82,6 +82,7 @@ NETWORKS_SNAPSHOT_EVENT = "networks_snapshot"
 SENSOR_SNAPSHOT_EVENT = "sensor_snapshot"
 NETWORK_REMOVED_EVENT = "network_removed"
 DASHBOARD_ROOM = "dashboards"
+LIVE_SCAN_EVENT = "live_scan"
 
 _sensor_id_cache: dict[str, int] = {}
 _sensor_id_cache_lock = threading.Lock()
@@ -1198,19 +1199,10 @@ def _normalize_live_clients(value: Any) -> list[dict[str, Any]]:
 
 
 def _normalize_last_seen_iso(value: Any) -> str:
-    if isinstance(value, datetime):
-        return value.isoformat()
-
-    if isinstance(value, str):
-        normalized = value.strip()
-        if normalized.endswith("Z"):
-            normalized = normalized[:-1] + "+00:00"
-        try:
-            return datetime.fromisoformat(normalized).replace(tzinfo=None).isoformat()
-        except ValueError:
-            pass
-
-    return datetime.utcnow().isoformat()
+    parsed = _parse_iso_timestamp(value)
+    if parsed:
+        return _utc_iso(parsed)
+    return _utc_iso()
 
 
 def _format_networks_snapshot_item(network: dict[str, Any]) -> dict[str, Any]:
@@ -1667,7 +1659,7 @@ def start_realtime_state_thread(app, socketio: SocketIO) -> None:
         _realtime_state_thread_started = True
 
 
-def _resolve_async_mode() -> str:
+def _resolve_async_mode(mode=None) -> str:
     preferred_mode = os.getenv("SOCKETIO_ASYNC_MODE", "eventlet")
     if preferred_mode == "eventlet":
         try:
@@ -1806,15 +1798,21 @@ def init_socketio(app):
         queued = 0
         dropped = 0
         connected_sensor_id = _safe_int((connected_clients.get(request.sid) or {}).get("sensor_id"), default=0)
+        
+        resolved_sensor_id = _safe_int(payload.get("sensor_id"), default=connected_sensor_id)
+
         for network_data in network_events:
             try:
                 if resolved_sensor_id:
                     network_data["sensor_id"] = resolved_sensor_id
                 elif payload.get("registration_key"):
                     network_data["registration_key"] = payload.get("registration_key")
+                
                 if payload.get("hostname") and not network_data.get("hostname"):
                     network_data["hostname"] = payload.get("hostname")
+                
                 _log_received_from_sensor(NETWORK_SCAN_EVENT, network_data)
+                
                 sensor_id = _strict_sensor_id(network_data.get("sensor_id"))
                 if sensor_id is None:
                     raise ValueError("network_scan missing int sensor_id")

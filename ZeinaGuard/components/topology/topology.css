@@ -1,83 +1,113 @@
-/* Network Topology Visualization Styles */
+/* * Advanced ZeinaGuard Network Topology Styles
+ * Theme: Modern SOC / Glassmorphism
+ */
 
-/* Shared Node Highlighting - Gold Glow */
-.node-shared {
-  filter: drop-shadow(0 0 12px rgba(234, 179, 8, 0.8)) 
-          drop-shadow(0 0 6px rgba(234, 179, 8, 0.6));
-  animation: shared-pulse 2s ease-in-out infinite;
+/* --- Base Background & Grid --- */
+.react-flow__background {
+  background: radial-gradient(circle at 50% 50%, #0f172a 0%, #020617 100%) !important;
 }
 
-/* Threat Pulse Animation - Red Aura */
-.node-threat {
-  animation: threat-pulse 1s ease-in-out infinite;
+.react-flow__background pattern circle {
+  fill: rgba(56, 189, 248, 0.08) !important;
 }
 
-@keyframes shared-pulse {
-  0% {
-    filter: drop-shadow(0 0 8px rgba(234, 179, 8, 0.6)) 
-            drop-shadow(0 0 4px rgba(234, 179, 8, 0.4));
-  }
-  50% {
-    filter: drop-shadow(0 0 16px rgba(234, 179, 8, 1)) 
-            drop-shadow(0 0 10px rgba(234, 179, 8, 0.8));
-  }
-  100% {
-    filter: drop-shadow(0 0 8px rgba(234, 179, 8, 0.6)) 
-            drop-shadow(0 0 4px rgba(234, 179, 8, 0.4));
-  }
-}
-
-@keyframes threat-pulse {
-  0% {
-    filter: drop-shadow(0 0 0px rgba(239, 68, 68, 0));
-  }
-  50% {
-    filter: drop-shadow(0 0 20px rgba(239, 68, 68, 1)) 
-            drop-shadow(0 0 12px rgba(239, 68, 68, 0.8));
-  }
-  100% {
-    filter: drop-shadow(0 0 0px rgba(239, 68, 68, 0));
-  }
-}
-
-/* Smooth transitions for node hover states */
+/* --- Nodes Base Styling (Glassmorphism) --- */
 .react-flow__node {
-  transition: all 0.2s ease;
+  background: rgba(15, 23, 42, 0.6) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 16px !important;
+  color: #f8fafc !important;
+  font-family: 'Inter', system-ui, sans-serif;
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) !important;
 }
 
+/* Interactive Hover State */
 .react-flow__node:hover {
-  transform: scale(1.05);
+  transform: scale(1.08) translateY(-4px);
+  border-color: rgba(56, 189, 248, 0.5) !important;
+  box-shadow: 0 15px 35px -5px rgba(56, 189, 248, 0.3), 
+              inset 0 0 15px rgba(56, 189, 248, 0.2);
+  z-index: 1000 !important;
 }
 
-/* Enhanced edge styling */
+/* --- Security Node Classifications --- */
+
+/* 1. The Sensor (Core Guardian) */
+.node-sensor {
+  border: 1px solid rgba(16, 185, 129, 0.5) !important;
+  background: linear-gradient(145deg, rgba(16, 185, 129, 0.15) 0%, rgba(15, 23, 42, 0.8) 100%) !important;
+  box-shadow: 0 0 20px rgba(16, 185, 129, 0.2), 
+              inset 0 0 10px rgba(16, 185, 129, 0.1);
+}
+
+/* 2. Rogue Node (Critical Threat - Radar Pulse) */
+.node-rogue {
+  border: 1px solid rgba(239, 68, 68, 0.6) !important;
+  background: linear-gradient(145deg, rgba(239, 68, 68, 0.15) 0%, rgba(15, 23, 42, 0.8) 100%) !important;
+  animation: pulse-rogue 2s infinite cubic-bezier(0.66, 0, 0, 1);
+}
+
+@keyframes pulse-rogue {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+  70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+/* 3. Suspicious Node (Warning - Soft Glow) */
+.node-suspicious {
+  border: 1px solid rgba(245, 158, 11, 0.5) !important;
+  background: linear-gradient(145deg, rgba(245, 158, 11, 0.1) 0%, rgba(15, 23, 42, 0.8) 100%) !important;
+  animation: pulse-suspicious 3s infinite ease-in-out;
+}
+
+@keyframes pulse-suspicious {
+  0%, 100% { filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.2)); }
+  50% { filter: drop-shadow(0 0 12px rgba(245, 158, 11, 0.6)); }
+}
+
+/* --- Edges (Data Connections) --- */
 .react-flow__edge-path {
+  stroke-width: 2;
+  stroke: rgba(148, 163, 184, 0.15);
   stroke-linecap: round;
-  stroke-linejoin: round;
+  transition: stroke 0.3s ease;
 }
 
+/* Flowing Packets Animation */
 .react-flow__edge.animated path {
-  animation: dashedAnimation 0.5s linear infinite;
+  stroke: #38bdf8;
+  stroke-width: 2.5;
+  stroke-dasharray: 6 12;
+  filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.8));
+  animation: flow-packets 1s linear infinite;
 }
 
-@keyframes dashedAnimation {
-  to {
-    stroke-dashoffset: -5;
-  }
+@keyframes flow-packets {
+  from { stroke-dashoffset: 18; }
+  to { stroke-dashoffset: 0; }
 }
 
-/* Responsive controls */
+/* --- UI Controls & Navigation --- */
 .react-flow__controls {
-  background: rgba(30, 41, 59, 0.9) !important;
-  border: 1px solid rgba(71, 85, 105, 0.5) !important;
+  background: rgba(15, 23, 42, 0.8) !important;
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+  border-radius: 12px;
+  padding: 4px;
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
 }
 
-.react-flow__controls button {
-  background: rgba(71, 85, 105, 0.3) !important;
-  color: rgba(148, 163, 184, 1) !important;
-  border: 1px solid rgba(71, 85, 105, 0.5) !important;
+.react-flow__controls-button {
+  background: transparent !important;
+  border: none !important;
+  fill: #cbd5e1 !important;
+  transition: fill 0.2s ease, transform 0.2s ease;
 }
 
-.react-flow__controls button:hover {
-  background: rgba(71, 85, 105, 0.5) !important;
-  color: rgba(226, 232, 240, 1) !important;
+.react-flow__controls-button:hover {
+  fill: #38bdf8 !important;
+  transform: scale(1.1);
 }
