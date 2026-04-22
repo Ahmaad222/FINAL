@@ -403,25 +403,23 @@ export const analyticsAPI = {
  */
 export const incidentsAPI = {
   /**
-   * Get list of incidents (from dashboard incident-summary)
+   * Get list of incidents
    */
   async getIncidents() {
-    const response = await apiRequest<{
-      recent?: Array<{
-        id: number;
-        title: string;
-        description?: string;
-        severity: string;
-        status: string;
-        created_at: string;
-        updated_at?: string;
-        assigned_to?: string;
-      }>;
-    }>('/api/dashboard/incident-summary');
+    const response = await apiRequest<Array<{
+      id: number;
+      title: string;
+      description?: string;
+      severity: string;
+      status: string;
+      created_at: string;
+      updated_at?: string;
+      assigned_to?: string;
+    }>>('/api/incidents');
     if (response.error) {
       throw new Error(response.error);
     }
-    const recent = response.data?.recent ?? [];
+    const recent = Array.isArray(response.data) ? response.data : [];
     return recent.map((i) => ({
       ...i,
       description: i.description ?? '',

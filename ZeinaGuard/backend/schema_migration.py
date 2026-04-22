@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 
 from models import db
+from sqlalchemy import inspect
 
 
 LOGGER = logging.getLogger("zeinaguard.schema")
@@ -35,6 +36,7 @@ SCHEMA_STATEMENTS = [
         seen_count INTEGER NOT NULL DEFAULT 1,
         first_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
         last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        is_active BOOLEAN DEFAULT TRUE NOT NULL,
         raw_beacon TEXT,
         raw_data JSON,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -76,6 +78,10 @@ SCHEMA_STATEMENTS = [
     "ALTER TABLE wifi_networks ALTER COLUMN uptime_seconds SET NOT NULL",
     "ALTER TABLE wifi_networks ALTER COLUMN first_seen SET DEFAULT CURRENT_TIMESTAMP",
     "ALTER TABLE wifi_networks ALTER COLUMN last_seen SET DEFAULT CURRENT_TIMESTAMP",
+    "ALTER TABLE wifi_networks ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE",
+    "UPDATE wifi_networks SET is_active = TRUE WHERE is_active IS NULL",
+    "ALTER TABLE wifi_networks ALTER COLUMN is_active SET DEFAULT TRUE",
+    "ALTER TABLE wifi_networks ALTER COLUMN is_active SET NOT NULL",
     "UPDATE wifi_networks SET seen_count = 1 WHERE seen_count IS NULL",
     "UPDATE wifi_networks SET uptime_seconds = 0 WHERE uptime_seconds IS NULL",
     "UPDATE wifi_networks SET first_seen = COALESCE(first_seen, CURRENT_TIMESTAMP)",
@@ -126,6 +132,7 @@ SCHEMA_STATEMENTS = [
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_sensor_last_seen ON wifi_networks(sensor_id, last_seen)",
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_sensor_bssid ON wifi_networks(sensor_id, bssid)",
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_last_seen ON wifi_networks(last_seen)",
+    "CREATE INDEX IF NOT EXISTS idx_wifi_networks_active_last_seen ON wifi_networks(is_active, last_seen)",
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_signal ON wifi_networks(signal_strength)",
     "CREATE INDEX IF NOT EXISTS idx_wifi_networks_bssid ON wifi_networks(bssid)",
     "CREATE INDEX IF NOT EXISTS idx_threats_created_at ON threats(created_at)",
@@ -138,7 +145,32 @@ SCHEMA_STATEMENTS = [
 ]
 
 
+SQLITE_MIGRATIONS = [
+    ("sensors", "last_heartbeat", "ALTER TABLE sensors ADD COLUMN last_heartbeat DATETIME"),
+]
+
+
+def apply_sqlite_runtime_migrations() -> None:
+    inspector = inspect(db.engine)
+    with db.engine.begin() as connection:
+        for table_name, column_name, statement in SQLITE_MIGRATIONS:
+            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if column_name in existing_columns:
+                continue
+            LOGGER.info("[DB] Applying SQLite runtime migration: %s.%s", table_name, column_name)
+            connection.exec_driver_sql(statement)
+    LOGGER.info("[DB] SQLite runtime schema migrations complete")
+
+
 def apply_runtime_migrations() -> None:
+    if db.engine.dialect.name == "sqlite":
+        apply_sqlite_runtime_migrations()
+        return
+
+    if db.engine.dialect.name != "postgresql":
+        LOGGER.info("[DB] Skipping PostgreSQL runtime migrations for dialect=%s", db.engine.dialect.name)
+        return
+
     LOGGER.info("[DB] Applying runtime schema migrations")
     with db.engine.begin() as connection:
         for statement in SCHEMA_STATEMENTS:

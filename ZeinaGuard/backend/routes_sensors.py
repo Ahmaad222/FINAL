@@ -8,14 +8,21 @@ from flask_jwt_extended import jwt_required
 from models import db, Sensor, SensorHealth
 from datetime import datetime
 from sqlalchemy import desc
+from realtime_state import get_sensor_snapshot as get_realtime_sensor_snapshot
 
 sensors_bp = Blueprint('sensors', __name__, url_prefix='/api/sensors')
 
 
+@sensors_bp.route('', methods=['GET'])
 @sensors_bp.route('/', methods=['GET'])
 @jwt_required(optional=True)
 def get_sensors():
     try:
+        realtime_sensors = {
+            int(sensor.get('sensor_id')): sensor
+            for sensor in get_realtime_sensor_snapshot()
+            if sensor.get('sensor_id') is not None
+        }
         sensors = Sensor.query.all()
         result = []
 
@@ -23,11 +30,29 @@ def get_sensors():
             health = SensorHealth.query.filter_by(sensor_id=s.id)\
                 .order_by(desc(SensorHealth.created_at)).first()
 
-            status = health.status if health else ('online' if s.is_active else 'offline')
+            realtime_sensor = realtime_sensors.get(s.id)
+            status = (
+                realtime_sensor.get('status')
+                if realtime_sensor is not None
+                else (health.status if health else ('online' if s.is_active else 'offline'))
+            )
+            last_seen = (
+                realtime_sensor.get('last_seen')
+                if realtime_sensor is not None
+                else (
+                    health.last_heartbeat.isoformat()
+                    if health and health.last_heartbeat
+                    else s.updated_at.isoformat()
+                )
+            )
 
             result.append({
                 'id': s.id,
-                'hostname': s.hostname or s.name,
+                'hostname': (
+                    realtime_sensor.get('hostname')
+                    if realtime_sensor is not None and realtime_sensor.get('hostname')
+                    else (s.hostname or s.name)
+                ),
                 'name': s.name,
                 'location': s.location or 'Unknown',
                 'status': status,
@@ -35,14 +60,27 @@ def get_sensors():
                 'cpu_usage': health.cpu_usage if health else 0,
                 'memory_usage': health.memory_usage if health else 0,
                 'uptime_percent': 100,
-                'last_seen': (
-                    health.last_heartbeat.isoformat()
-                    if health and health.last_heartbeat
-                    else s.updated_at.isoformat()
-                ),
+                'last_seen': last_seen,
                 'packet_count': 0,
                 'coverage_area': 'Standard Room'
             })
+
+        if not result:
+            for sensor_id, realtime_sensor in realtime_sensors.items():
+                result.append({
+                    'id': sensor_id,
+                    'hostname': realtime_sensor.get('hostname') or f'Sensor {sensor_id}',
+                    'name': realtime_sensor.get('hostname') or f'Sensor {sensor_id}',
+                    'location': 'Unknown',
+                    'status': realtime_sensor.get('status') or 'online',
+                    'signal_strength': -100,
+                    'cpu_usage': realtime_sensor.get('cpu', 0),
+                    'memory_usage': realtime_sensor.get('memory', 0),
+                    'uptime_percent': 100,
+                    'last_seen': realtime_sensor.get('last_seen') or datetime.utcnow().isoformat(),
+                    'packet_count': 0,
+                    'coverage_area': 'Standard Room'
+                })
 
         return jsonify(result), 200
 

@@ -64,7 +64,10 @@ class WSClient:
         self._scan_batch_lock = threading.Lock()
         self.last_sent_cache = {}
         self.sio = socketio.Client(
-            reconnection=False,
+            reconnection=True,
+            reconnection_attempts=0,
+            reconnection_delay=3,
+            reconnection_delay_max=10,
             logger=False,
             engineio_logger=False,
         )
@@ -100,10 +103,12 @@ class WSClient:
 
         @self.sio.on("registration_success")
         def registration_success(data):
-            self.sensor_id = self._safe_int(data.get("sensor_id"), default=0) or None
-            self._clear_startup_error()
-            self._registered_event.set()
-            LOGGER.info("[Sensor] Registered with backend as sensor_id=%s", self.sensor_id)
+            sensor_id = data.get("sensor_id")
+            if isinstance(sensor_id, bool) or not isinstance(sensor_id, int) or sensor_id <= 0:
+                update_status(backend_status="degraded", message="Backend returned invalid sensor_id")
+                LOGGER.warning("[DROP] registration_success returned invalid sensor_id=%s", sensor_id)
+                return
+            self.sensor_id = sensor_id
             update_status(
                 backend_status="registered",
                 message=f"Sensor registered as #{self.sensor_id}",
@@ -153,9 +158,9 @@ class WSClient:
                 self.sio.connect(
                     self.backend_url,
                     headers={"Authorization": f"Bearer {self.token}"},
-                    transports=["websocket"],
+                    transports=["websocket", "polling"],
                     wait=True,
-                    wait_timeout=5,
+                    wait_timeout=10,
                 )
                 self.sio.wait()
                 if self.is_running and self.remote_enabled and not self.sio.connected:
@@ -235,7 +240,8 @@ class WSClient:
         update_status(backend_status="offline", message=message)
 
     def _enqueue_event(self, event_name, payload):
-        if not self.remote_enabled:
+        if event_name != "sensor_register" and not self._payload_has_int_sensor_id(payload):
+            LOGGER.warning("[DROP] event=%s invalid sensor_id payload=%s", event_name, self._payload_preview(payload))
             return False
 
         envelope = {
@@ -313,8 +319,13 @@ class WSClient:
             batch = list(scan_batch)
             scan_batch.clear()
 
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            LOGGER.warning("[DROP] event=network_scan invalid sensor_id payload=%s", {"batch_size": len(batch)})
+            return
+
         payload = {
-            "sensor_id": self._sensor_id_value(),
+            "sensor_id": sensor_id,
             "hostname": self.hostname,
             "sent_at": utc_iso(),
             "networks": batch,
@@ -375,6 +386,7 @@ class WSClient:
                 "event",
                 "sensor_id",
                 "status",
+                "bssid",
                 "target_bssid",
                 "action",
                 "channel",
@@ -420,15 +432,17 @@ class WSClient:
                 continue
 
             payload = self._build_scan_payload(scan)
+            if payload is None:
+                continue
             self.local_logger.log_scan(payload)
             self._update_last_sent_cache(payload)
             self._enqueue_event("network_scan", payload)
 
     def _status_publisher(self):
         while self.is_running:
-            if self.remote_enabled and self.sensor_id:
-                payload = self._build_sensor_status_payload()
-                self._enqueue_event("sensor_heartbeat", payload)
+            payload = self._build_sensor_status_payload()
+            if payload is not None:
+                self._enqueue_event("sensor_status", payload)
             time.sleep(SENSOR_STATUS_INTERVAL_SECONDS)
 
     def _should_process_scan(self, scan):
@@ -485,9 +499,16 @@ class WSClient:
         )
 
     def _build_scan_payload(self, scan):
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            LOGGER.warning("[DROP] event=network_scan invalid sensor_id payload=%s", {"bssid": scan.get("bssid")})
+            return None
+
+        clients = self._build_clients_payload(scan.get("bssid"))
+
         return {
-            "sensor_id": self._sensor_id_value(),
-            "timestamp": scan.get("timestamp") or utc_iso(),
+            "sensor_id": sensor_id,
+            "timestamp": scan.get("timestamp") or datetime.utcnow().isoformat(),
             "ssid": scan.get("ssid") or "Hidden",
             "bssid": scan.get("bssid"),
             "channel": scan.get("channel"),
@@ -499,16 +520,41 @@ class WSClient:
             "wps": scan.get("wps"),
             "distance": scan.get("distance"),
             "raw_beacon": scan.get("raw_beacon"),
+            "clients": clients,
+            "clients_count": len(clients),
         }
 
+    def _build_clients_payload(self, bssid):
+        if not bssid:
+            return []
+
+        try:
+            from monitoring.sniffer import clients_map
+
+            client_set = (
+                clients_map.get(bssid)
+                or clients_map.get(str(bssid).upper())
+                or clients_map.get(str(bssid).lower())
+                or set()
+            )
+            client_macs = sorted(str(mac).strip().upper() for mac in client_set if mac)
+            return [{"mac": mac, "type": "device"} for mac in client_macs]
+        except Exception as exc:
+            LOGGER.debug("[SCAN PAYLOAD] failed to build clients for %s: %s", bssid, exc)
+            return []
+
     def _build_sensor_status_payload(self):
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            return None
+
         status_snapshot = get_status_snapshot()
         cpu_percent = psutil.cpu_percent(interval=None)
         memory_percent = psutil.virtual_memory().percent
         uptime_seconds = int(time.time() - self.started_at)
         return {
             "event": "sensor_status",
-            "sensor_id": self._sensor_id_value(),
+            "sensor_id": sensor_id,
             "registration_key": self.sensor_registration_key,
             "hostname": self.hostname,
             "status": "online",
@@ -518,7 +564,8 @@ class WSClient:
             "cpu_usage": cpu_percent,
             "memory_usage": memory_percent,
             "uptime": uptime_seconds,
-            "last_heartbeat": utc_iso(),
+            "last_heartbeat": datetime.utcnow().isoformat(),
+            "timestamp": datetime.utcnow().isoformat(),
             "message": status_snapshot.get("message"),
             "interface": config.get_interface(),
         }
@@ -527,7 +574,7 @@ class WSClient:
         payload = payload or {}
         requested_sensor_id = self._safe_int(payload.get("sensor_id"), default=0)
         actual_sensor_id = self._safe_int(self.sensor_id, default=0)
-        target_bssid = str(payload.get("target_bssid") or "").strip().upper()
+        target_bssid = str(payload.get("bssid") or payload.get("target_bssid") or "").strip().upper()
         channel = payload.get("channel")
 
         if not actual_sensor_id:
@@ -574,18 +621,31 @@ class WSClient:
             self._queue_attack_ack("failed", target_bssid, str(exc))
 
     def _queue_attack_ack(self, status, target_bssid, message=None):
+        sensor_id = self._sensor_id_value()
+        if sensor_id is None:
+            LOGGER.warning("[DROP] event=attack_ack invalid sensor_id payload=%s", {"bssid": target_bssid})
+            return
+
         payload = {
             "event": "attack_ack",
             "status": status,
-            "target_bssid": target_bssid,
-            "sensor_id": self._sensor_id_value(),
+            "bssid": target_bssid,
+            "sensor_id": sensor_id,
             "message": message,
             "timestamp": utc_iso(),
         }
         self._enqueue_event("attack_ack", payload)
 
     def _sensor_id_value(self):
+        if isinstance(self.sensor_id, bool) or not isinstance(self.sensor_id, int) or self.sensor_id <= 0:
+            return None
         return self.sensor_id
+
+    def _payload_has_int_sensor_id(self, payload):
+        if not isinstance(payload, dict):
+            return False
+        sensor_id = payload.get("sensor_id")
+        return isinstance(sensor_id, int) and not isinstance(sensor_id, bool) and sensor_id > 0
 
     def _safe_int(self, value, default=0):
         try:
