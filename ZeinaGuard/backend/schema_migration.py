@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 
 from models import db
+from sqlalchemy import inspect
 
 
 LOGGER = logging.getLogger("zeinaguard.schema")
@@ -144,7 +145,28 @@ SCHEMA_STATEMENTS = [
 ]
 
 
+SQLITE_MIGRATIONS = [
+    ("sensors", "last_heartbeat", "ALTER TABLE sensors ADD COLUMN last_heartbeat DATETIME"),
+]
+
+
+def apply_sqlite_runtime_migrations() -> None:
+    inspector = inspect(db.engine)
+    with db.engine.begin() as connection:
+        for table_name, column_name, statement in SQLITE_MIGRATIONS:
+            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if column_name in existing_columns:
+                continue
+            LOGGER.info("[DB] Applying SQLite runtime migration: %s.%s", table_name, column_name)
+            connection.exec_driver_sql(statement)
+    LOGGER.info("[DB] SQLite runtime schema migrations complete")
+
+
 def apply_runtime_migrations() -> None:
+    if db.engine.dialect.name == "sqlite":
+        apply_sqlite_runtime_migrations()
+        return
+
     if db.engine.dialect.name != "postgresql":
         LOGGER.info("[DB] Skipping PostgreSQL runtime migrations for dialect=%s", db.engine.dialect.name)
         return

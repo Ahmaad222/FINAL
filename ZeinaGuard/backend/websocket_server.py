@@ -74,6 +74,7 @@ SENSOR_STATUS_EVENT = "sensor_status"
 SENSOR_HEARTBEAT_EVENT = "sensor_heartbeat"
 SENSOR_STATUS_UPDATE_EVENT = "sensor_status_update"
 NETWORK_SNAPSHOT_EVENT = "network_snapshot"
+NETWORKS_SNAPSHOT_EVENT = "networks_snapshot"
 SENSOR_SNAPSHOT_EVENT = "sensor_snapshot"
 NETWORK_REMOVED_EVENT = "network_removed"
 DASHBOARD_ROOM = "dashboards"
@@ -1495,7 +1496,7 @@ def init_socketio(app):
     persistence_manager = _get_persistence_manager(app)
 
     @socketio.on("connect")
-    def handle_connect():
+    def handle_connect(auth=None):
         client_id = request.sid
         join_room(DASHBOARD_ROOM)
         connected_clients[client_id] = {

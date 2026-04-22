@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import logging
 import os
+import socket
 import sys
 import time
+from importlib.util import find_spec
+from pathlib import Path
 from datetime import timedelta
 
 from dotenv import load_dotenv
@@ -52,6 +55,21 @@ DB_CONNECT_RETRIES = int(os.getenv("DB_CONNECT_RETRIES", "15"))
 DB_CONNECT_DELAY_SECONDS = float(os.getenv("DB_CONNECT_DELAY_SECONDS", "2"))
 
 
+def sqlite_fallback_url() -> str:
+    instance_dir = Path(__file__).resolve().parent / "instance"
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    database_path = instance_dir / "zeinaguard_runtime.db"
+    return f"sqlite:///{database_path.as_posix()}"
+
+
+def is_tcp_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def build_database_url() -> str:
     explicit_url = os.getenv("DATABASE_URL")
     if explicit_url:
@@ -62,11 +80,21 @@ def build_database_url() -> str:
     host = os.getenv("POSTGRES_HOST", "localhost")
     port = os.getenv("POSTGRES_PORT", "5432")
     database = os.getenv("POSTGRES_DB", "zeinaguard_db")
-    return f"postgresql://{user}:{password}@{host}:{port}/{database}"
+    postgres_url = f"postgresql://{user}:{password}@{host}:{port}/{database}"
+
+    if find_spec("psycopg2") is None:
+        logger.warning("[DB] psycopg2 unavailable; using SQLite fallback at %s", sqlite_fallback_url())
+        return sqlite_fallback_url()
+
+    if not is_tcp_port_open(host, int(port)):
+        logger.warning("[DB] PostgreSQL unavailable at %s:%s; using SQLite fallback at %s", host, port, sqlite_fallback_url())
+        return sqlite_fallback_url()
+
+    return postgres_url
 
 
 def initialize_database():
-    logger.info("[DB] Waiting for PostgreSQL to accept connections")
+    logger.info("[DB] Initializing database at %s", db.engine.url.render_as_string(hide_password=True))
 
     last_error = None
     for attempt in range(1, DB_CONNECT_RETRIES + 1):
@@ -96,8 +124,10 @@ def initialize_database():
             last_error = exc
             db.session.rollback()
             logger.warning("[DB] Connection attempt %s/%s failed: %s", attempt, DB_CONNECT_RETRIES, exc)
-            if attempt < DB_CONNECT_RETRIES:
+            if attempt < DB_CONNECT_RETRIES and not str(db.engine.url).startswith("sqlite"):
                 time.sleep(DB_CONNECT_DELAY_SECONDS)
+            else:
+                break
         except Exception:
             db.session.rollback()
             logger.exception("[DB] Database initialization failed")
