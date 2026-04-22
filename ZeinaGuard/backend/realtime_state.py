@@ -74,7 +74,7 @@ def upsert_network(payload: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if not bssid:
         raise ValueError("network missing bssid")
 
-    seen_at = _parse_timestamp(payload.get("timestamp") or payload.get("last_seen"))
+    seen_at = _utcnow()
     snapshot = {
         "ssid": _normalize_ssid(payload.get("ssid")),
         "classification": _normalize_classification(payload.get("classification")),
@@ -124,11 +124,7 @@ def get_active_network_snapshot(*, max_age_seconds: float | None = None) -> list
 
 
 def upsert_sensor(sensor_id: int, payload: dict[str, Any], *, connected: bool = True) -> tuple[str, dict[str, Any]]:
-    seen_at = _parse_timestamp(
-        payload.get("timestamp")
-        or payload.get("last_seen")
-        or payload.get("last_heartbeat")
-    )
+    seen_at = _utcnow()
     requested_status = str(payload.get("status") or ("online" if connected else "offline")).strip().lower()
     status = "offline" if (not connected or requested_status == "offline") else requested_status
     snapshot = {

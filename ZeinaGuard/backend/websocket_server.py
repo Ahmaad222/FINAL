@@ -52,7 +52,7 @@ CLEANUP_INTERVAL_SECONDS = int(os.getenv("CLEANUP_INTERVAL_SECONDS", "600"))
 LIVE_NETWORK_WINDOW_SECONDS = float(os.getenv("LIVE_NETWORK_TTL_SECONDS", "60"))
 LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS = float(os.getenv("LIVE_NETWORK_DB_CLEANUP_INTERVAL_SECONDS", "60"))
 SENSOR_HEARTBEAT_TIMEOUT_SECONDS = float(os.getenv("LIVE_SENSOR_TTL_SECONDS", "30"))
-LIVE_STATE_SWEEP_INTERVAL_SECONDS = float(os.getenv("LIVE_STATE_SWEEP_INTERVAL_SECONDS", "5"))
+LIVE_STATE_SWEEP_INTERVAL_SECONDS = float(os.getenv("LIVE_STATE_SWEEP_INTERVAL_SECONDS", "15"))
 SNAPSHOT_INTERVAL_SECONDS = float(os.getenv("SNAPSHOT_INTERVAL_SECONDS", "1"))
 SCAN_RETENTION_HOURS = int(os.getenv("NETWORK_SCAN_RETENTION_HOURS", "6"))
 THREAT_RETENTION_HOURS = int(os.getenv("THREAT_RETENTION_HOURS", "24"))
@@ -1378,9 +1378,14 @@ def _persist_sensor_timeout(sensor_id: int, payload: dict[str, Any]) -> None:
 
 
 def _emit_snapshot(socketio: SocketIO) -> None:
+    live_networks = get_realtime_network_snapshot()
     network_snapshot = {
         "event": NETWORK_SNAPSHOT_EVENT,
-        "data": get_realtime_network_snapshot(),
+        "data": live_networks,
+    }
+    networks_snapshot = {
+        "event": NETWORKS_SNAPSHOT_EVENT,
+        "data": live_networks,
     }
     sensor_snapshot = {
         "event": SENSOR_SNAPSHOT_EVENT,
@@ -1388,6 +1393,8 @@ def _emit_snapshot(socketio: SocketIO) -> None:
     }
     LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORK_SNAPSHOT_EVENT, len(network_snapshot["data"]))
     _emit_socket_event(socketio, NETWORK_SNAPSHOT_EVENT, network_snapshot, room=DASHBOARD_ROOM)
+    LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", NETWORKS_SNAPSHOT_EVENT, len(networks_snapshot["data"]))
+    _emit_socket_event(socketio, NETWORKS_SNAPSHOT_EVENT, networks_snapshot, room=DASHBOARD_ROOM)
     LOGGER.info("[SNAPSHOT EMIT] event=%s count=%s", SENSOR_SNAPSHOT_EVENT, len(sensor_snapshot["data"]))
     _emit_socket_event(socketio, SENSOR_SNAPSHOT_EVENT, sensor_snapshot, room=DASHBOARD_ROOM)
 
