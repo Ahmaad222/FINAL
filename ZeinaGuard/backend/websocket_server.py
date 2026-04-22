@@ -1081,6 +1081,7 @@ def _normalize_last_seen_iso(value: Any) -> str:
 
 
 def _format_networks_snapshot_item(network: dict[str, Any]) -> dict[str, Any]:
+    clients = _normalize_live_clients(network.get("clients"))
     return {
         "sensor_id": _safe_int(network.get("sensor_id"), default=0) or None,
         "bssid": _normalize_bssid(network.get("bssid")),
@@ -1088,7 +1089,8 @@ def _format_networks_snapshot_item(network: dict[str, Any]) -> dict[str, Any]:
         "signal": _safe_int(network.get("signal"), default=0),
         "classification": _normalize_classification(network.get("classification")).lower(),
         "last_seen": _normalize_last_seen_iso(network.get("last_seen") or network.get("timestamp")),
-        "clients": _normalize_live_clients(network.get("clients")),
+        "clients": clients,
+        "clients_count": len(clients),
     }
 
 

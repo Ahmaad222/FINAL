@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="$ROOT_DIR/.env"
 LOG_DIR="$ROOT_DIR/logs"
 STATE_DIR="$ROOT_DIR/.zeinaguard-runtime"
-FAST_MODE=0
+ENV_FILE="$ROOT_DIR/.env"
+UPDATE_MODE=0
 
 log_step() {
   printf '[run-all] %s\n' "$*"
@@ -31,8 +31,8 @@ fail() {
 parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      --fast)
-        FAST_MODE=1
+      --update)
+        UPDATE_MODE=1
         ;;
       *)
         fail "Unknown option: $1"
@@ -42,18 +42,8 @@ parse_args() {
   done
 }
 
-run_maybe_sudo() {
-  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
-    "$@"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo "$@"
-  else
-    fail "This action requires sudo: $*"
-  fi
-}
-
-ensure_linux() {
-  [ "$(uname -s)" = "Linux" ] || fail "ZeinaGuard local launcher supports Linux only."
+ensure_runtime_dirs() {
+  mkdir -p "$LOG_DIR" "$STATE_DIR"
 }
 
 ensure_default_env() {
@@ -88,21 +78,185 @@ load_env() {
   set +a
 }
 
-ensure_runtime_dirs() {
-  mkdir -p "$LOG_DIR" "$STATE_DIR"
+resolve_python() {
+  if command -v python3 >/dev/null 2>&1; then
+    command -v python3
+    return
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    command -v python
+    return
+  fi
+
+  fail "Python is required but was not found."
 }
 
-fix_project_permissions() {
-  if [ -z "${USER:-}" ]; then
+PYTHON_BIN="$(resolve_python)"
+
+hash_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
     return
   fi
 
-  if [ -w "$ROOT_DIR" ] && { [ ! -d "$ROOT_DIR/node_modules" ] || [ -w "$ROOT_DIR/node_modules" ]; }; then
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
     return
   fi
 
-  log_step "Fixing project ownership"
-  run_maybe_sudo chown -R "$USER:$USER" "$ROOT_DIR" || true
+  "$PYTHON_BIN" - "$1" <<'PY'
+from pathlib import Path
+import hashlib
+import sys
+
+path = Path(sys.argv[1])
+print(hashlib.sha256(path.read_bytes()).hexdigest())
+PY
+}
+
+venv_python_path() {
+  local venv_dir="$1"
+  if [ -x "$venv_dir/bin/python" ]; then
+    printf '%s\n' "$venv_dir/bin/python"
+    return
+  fi
+
+  if [ -x "$venv_dir/Scripts/python.exe" ]; then
+    printf '%s\n' "$venv_dir/Scripts/python.exe"
+    return
+  fi
+
+  printf '%s\n' "$venv_dir/bin/python"
+}
+
+ensure_venv() {
+  local venv_dir="$1"
+
+  if [ ! -d "$venv_dir" ]; then
+    log_step "Creating virtual environment: $venv_dir"
+    "$PYTHON_BIN" -m venv "$venv_dir"
+  else
+    log_skip "Reusing virtual environment: $venv_dir"
+  fi
+}
+
+ensure_nvm_loaded() {
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  if [ -s "$NVM_DIR/nvm.sh" ]; then
+    # shellcheck source=/dev/null
+    . "$NVM_DIR/nvm.sh"
+    return
+  fi
+
+  if ! command -v curl >/dev/null 2>&1; then
+    fail "curl is required to install nvm automatically."
+  fi
+
+  log_step "Installing nvm..."
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+  # shellcheck source=/dev/null
+  . "$NVM_DIR/nvm.sh"
+}
+
+ensure_node_toolchain() {
+  local requested_node="20"
+
+  if [ -f "$ROOT_DIR/.nvmrc" ]; then
+    requested_node="$(tr -d '[:space:]' < "$ROOT_DIR/.nvmrc")"
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    ensure_nvm_loaded
+    log_step "Installing Node.js $requested_node via nvm..."
+    nvm install "$requested_node"
+  else
+    ensure_nvm_loaded
+    nvm install "$requested_node" >/dev/null 2>&1 || true
+  fi
+
+  nvm use "$requested_node" >/dev/null
+  hash -r
+
+  if command -v corepack >/dev/null 2>&1; then
+    corepack enable >/dev/null 2>&1 || true
+    corepack prepare pnpm@latest --activate >/dev/null 2>&1 || true
+  fi
+
+  command -v node >/dev/null 2>&1 || fail "Node.js setup failed."
+  command -v pnpm >/dev/null 2>&1 || fail "pnpm is required but was not found."
+}
+
+install_frontend_dependencies() {
+  local lock_file="$ROOT_DIR/pnpm-lock.yaml"
+  local marker_file="$ROOT_DIR/node_modules/.lock-hash"
+  local desired_hash=""
+  local current_hash=""
+
+  if [ -f "$lock_file" ]; then
+    desired_hash="$(hash_file "$lock_file")"
+  fi
+
+  if [ -f "$marker_file" ]; then
+    current_hash="$(tr -d '[:space:]' < "$marker_file")"
+  fi
+
+  if [ "$UPDATE_MODE" -eq 1 ]; then
+    log_step "Updating frontend dependencies..."
+    (cd "$ROOT_DIR" && pnpm install)
+  elif [ ! -d "$ROOT_DIR/node_modules" ]; then
+    log_step "Installing frontend dependencies..."
+    (cd "$ROOT_DIR" && pnpm install)
+  elif [ -n "$desired_hash" ] && [ "$desired_hash" != "$current_hash" ]; then
+    log_step "Lockfile changed. Syncing frontend dependencies..."
+    (cd "$ROOT_DIR" && pnpm install)
+  else
+    log_skip "Frontend dependencies already available"
+  fi
+
+  mkdir -p "$ROOT_DIR/node_modules"
+  if [ -n "$desired_hash" ]; then
+    printf '%s\n' "$desired_hash" > "$marker_file"
+  fi
+}
+
+install_python_dependencies() {
+  local service_name="$1"
+  local venv_dir="$2"
+  local requirements_file="$3"
+  local marker_file="$venv_dir/.requirements-hash"
+  local venv_python
+  local desired_hash=""
+  local current_hash=""
+
+  ensure_venv "$venv_dir"
+  venv_python="$(venv_python_path "$venv_dir")"
+
+  if [ ! -f "$requirements_file" ]; then
+    fail "Missing requirements file: $requirements_file"
+  fi
+
+  desired_hash="$(hash_file "$requirements_file")"
+  if [ -f "$marker_file" ]; then
+    current_hash="$(tr -d '[:space:]' < "$marker_file")"
+  fi
+
+  if [ "$UPDATE_MODE" -eq 1 ]; then
+    log_step "Updating $service_name dependencies..."
+    "$venv_python" -m pip install --upgrade pip
+    "$venv_python" -m pip install -r "$requirements_file"
+  elif [ ! -f "$marker_file" ]; then
+    log_step "Installing $service_name dependencies..."
+    "$venv_python" -m pip install --upgrade pip
+    "$venv_python" -m pip install -r "$requirements_file"
+  elif [ "$desired_hash" != "$current_hash" ]; then
+    log_step "$service_name requirements changed. Syncing dependencies..."
+    "$venv_python" -m pip install -r "$requirements_file"
+  else
+    log_skip "$service_name dependencies already available"
+  fi
+
+  printf '%s\n' "$desired_hash" > "$marker_file"
 }
 
 pid_file_for() {
@@ -149,21 +303,18 @@ stop_pid_file() {
 }
 
 port_is_open() {
-  local host="$1"
-  local port="$2"
+  local port="$1"
 
-  python3 - "$host" "$port" <<'PY'
+  "$PYTHON_BIN" - "$port" <<'PY'
 import socket
 import sys
 
-host = sys.argv[1]
-port = int(sys.argv[2])
-
+port = int(sys.argv[1])
 sock = socket.socket()
-sock.settimeout(1)
+sock.settimeout(0.5)
 
 try:
-    sock.connect((host, port))
+    sock.connect(("127.0.0.1", port))
 except OSError:
     raise SystemExit(1)
 finally:
@@ -176,7 +327,7 @@ ensure_port_available() {
   local port="$2"
 
   stop_pid_file "$service_name"
-  if port_is_open "127.0.0.1" "$port"; then
+  if port_is_open "$port"; then
     fail "Port $port is already in use. Free it before starting $service_name."
   fi
 }
@@ -202,7 +353,7 @@ start_command() {
   sleep 1
   pid="$(cat "$pid_file" 2>/dev/null || true)"
   if [ -z "$pid" ] || ! process_running "$pid"; then
-    tail -n 40 "$log_file" >&2 || true
+    tail -n 50 "$log_file" >&2 || true
     fail "$service_name failed to stay running. See $log_file"
   fi
 }
@@ -213,14 +364,26 @@ wait_for_http() {
   local timeout_seconds="$3"
   local expected_fragment="${4:-}"
   local deadline=$((SECONDS + timeout_seconds))
-  local response=""
 
   while [ "$SECONDS" -lt "$deadline" ]; do
-    response="$(curl -fsS --max-time 3 "$url" 2>/dev/null || true)"
-    if [ -n "$response" ]; then
-      if [ -z "$expected_fragment" ] || printf '%s' "$response" | grep -qi "$expected_fragment"; then
-        return 0
-      fi
+    if "$PYTHON_BIN" - "$url" "$expected_fragment" <<'PY'
+from urllib.request import urlopen
+import sys
+
+url = sys.argv[1]
+expected = sys.argv[2]
+
+try:
+    with urlopen(url, timeout=3) as response:
+        body = response.read().decode("utf-8", errors="ignore")
+except Exception:
+    raise SystemExit(1)
+
+if expected and expected not in body:
+    raise SystemExit(1)
+PY
+    then
+      return 0
     fi
     sleep 2
   done
@@ -229,82 +392,18 @@ wait_for_http() {
   fail "$name health check failed for $url"
 }
 
-sha256_file() {
-  sha256sum "$1" | awk '{print $1}'
-}
-
-prepare_frontend() {
-  local lock_file="$ROOT_DIR/pnpm-lock.yaml"
-  local lock_hash_file="$ROOT_DIR/node_modules/.pnpm-lock.sha256"
-  local current_lock_hash=""
-  local saved_lock_hash=""
-
-  log_step "Preparing frontend toolchain"
-  # shellcheck source=/dev/null
-  source "$ROOT_DIR/fix-node.sh"
-
-  if [ "$FAST_MODE" = "1" ]; then
-    if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
-      fix_node_load_nvm
-      nvm use "$(fix_node_requested_version)" >/dev/null 2>&1 || true
-      hash -r
-    fi
-    command -v pnpm >/dev/null 2>&1 || fail "Fast mode requires pnpm to already be installed."
-    [ -d "$ROOT_DIR/node_modules" ] || fail "Fast mode requires existing node_modules."
-    log_skip "Frontend dependency install skipped (--fast)"
-    return
-  fi
-
-  ensure_zeinaguard_node_toolchain
-
-  fix_project_permissions
-
-  if [ -f "$lock_file" ]; then
-    current_lock_hash="$(sha256_file "$lock_file")"
-  fi
-  if [ -f "$lock_hash_file" ]; then
-    saved_lock_hash="$(tr -d '[:space:]' < "$lock_hash_file")"
-  fi
-
-  if [ -d "$ROOT_DIR/node_modules" ] && [ -n "$current_lock_hash" ] && [ "$current_lock_hash" = "$saved_lock_hash" ]; then
-    log_skip "Frontend dependencies already installed"
-    return
-  fi
-
-  log_step "Installing frontend dependencies with pnpm"
-  (
-    cd "$ROOT_DIR"
-    pnpm install
-  )
-  mkdir -p "$ROOT_DIR/node_modules"
-  if [ -n "$current_lock_hash" ]; then
-    printf '%s\n' "$current_lock_hash" > "$lock_hash_file"
-  fi
-  log_ok "Frontend dependencies ready"
-}
-
-prepare_python_envs() {
-  if [ "$FAST_MODE" = "1" ]; then
-    ZEINAGUARD_FAST=1 bash "$ROOT_DIR/fix-python.sh" backend --fast
-    ZEINAGUARD_FAST=1 bash "$ROOT_DIR/fix-python.sh" sensor --fast
-    return
-  fi
-
-  bash "$ROOT_DIR/fix-python.sh" backend
-  bash "$ROOT_DIR/fix-python.sh" sensor
-}
-
 start_backend() {
+  local backend_python
+
+  backend_python="$(venv_python_path "$ROOT_DIR/backend/.venv")"
   log_step "Starting backend"
   ensure_port_available "backend" "5000"
   start_command \
     "backend" \
     "$ROOT_DIR/backend" \
-    "$ROOT_DIR/backend/.venv/bin/gunicorn" \
-    --worker-class eventlet \
-    --bind 0.0.0.0:5000 \
-    app:app
-  wait_for_http "backend" "http://localhost:5000/health" 90 '"status":"healthy"'
+    "$backend_python" \
+    app.py
+  wait_for_http "backend" "http://localhost:5000/health" 90 '"status": "healthy"'
   log_ok "Backend ready"
 }
 
@@ -321,30 +420,38 @@ start_frontend() {
 }
 
 start_sensor() {
-  local sensor_python="$ROOT_DIR/sensor/.venv/bin/python"
+  local sensor_python
 
+  sensor_python="$(venv_python_path "$ROOT_DIR/sensor/.venv")"
   log_step "Starting sensor"
   stop_pid_file "sensor"
 
-  if command -v sudo >/dev/null 2>&1; then
-    sudo -v
-    start_command \
-      "sensor" \
-      "$ROOT_DIR/sensor" \
-      sudo \
-      -E \
-      env \
-      "ZEINAGUARD_NONINTERACTIVE=1" \
-      "BACKEND_URL=${BACKEND_URL:-http://localhost:5000}" \
-      "$sensor_python" \
-      "$ROOT_DIR/sensor/main.py"
+  if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
+    if sudo -n true >/dev/null 2>&1; then
+      start_command \
+        "sensor" \
+        "$ROOT_DIR/sensor" \
+        sudo \
+        -E \
+        env \
+        "BACKEND_URL=${BACKEND_URL:-http://localhost:5000}" \
+        "$sensor_python" \
+        "$ROOT_DIR/sensor/main.py"
+    else
+      warn "sudo requires a password. Starting sensor without elevation."
+      start_command \
+        "sensor" \
+        "$ROOT_DIR/sensor" \
+        env \
+        "BACKEND_URL=${BACKEND_URL:-http://localhost:5000}" \
+        "$sensor_python" \
+        "$ROOT_DIR/sensor/main.py"
+    fi
   else
-    warn "sudo is unavailable. Starting sensor without elevated privileges."
     start_command \
       "sensor" \
       "$ROOT_DIR/sensor" \
       env \
-      "ZEINAGUARD_NONINTERACTIVE=1" \
       "BACKEND_URL=${BACKEND_URL:-http://localhost:5000}" \
       "$sensor_python" \
       "$ROOT_DIR/sensor/main.py"
@@ -367,20 +474,13 @@ EOF
 
 main() {
   parse_args "$@"
-  ensure_linux
+  ensure_runtime_dirs
   ensure_default_env
   load_env
-  ensure_runtime_dirs
-
-  if [ "$FAST_MODE" = "1" ]; then
-    log_skip "Skipping setup checks (--fast)"
-  else
-    bash "$ROOT_DIR/setup-check.sh"
-    load_env
-  fi
-
-  prepare_frontend
-  prepare_python_envs
+  ensure_node_toolchain
+  install_frontend_dependencies
+  install_python_dependencies "backend" "$ROOT_DIR/backend/.venv" "$ROOT_DIR/requirements.txt"
+  install_python_dependencies "sensor" "$ROOT_DIR/sensor/.venv" "$ROOT_DIR/sensor/requirements.txt"
   start_backend
   start_frontend
   start_sensor

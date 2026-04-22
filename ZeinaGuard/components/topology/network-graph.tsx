@@ -5,7 +5,6 @@ import ReactFlow, {
   Background,
   Controls,
   Edge,
-  MarkerType,
   MiniMap,
   Node,
   Position,
@@ -14,8 +13,7 @@ import ReactFlow, {
   useNodesState,
 } from 'reactflow';
 import { io, Socket } from 'socket.io-client';
-import { AlertTriangle, Shield, Wifi, WifiOff, Zap } from 'lucide-react';
-import { toast } from 'sonner';
+import { Activity, Router, Shield, Smartphone, Wifi, WifiOff } from 'lucide-react';
 import 'reactflow/dist/style.css';
 import './topology.css';
 
@@ -50,20 +48,7 @@ interface GraphNodeData {
   sensor_id?: number | null;
   clients?: ClientSnapshot[];
   deviceType?: string;
-}
-
-interface AttackCommandAckEvent {
-  status?: 'ok' | 'error' | string;
-  sensor_id?: number | null;
-  bssid?: string | null;
-  message?: string | null;
-}
-
-interface AttackAckEvent {
-  status?: 'executed' | 'failed' | string;
-  sensor_id?: number | null;
-  bssid?: string | null;
-  message?: string | null;
+  clientCount?: number;
 }
 
 
@@ -73,6 +58,8 @@ const SOCKET_URL = (
   process.env.NEXT_PUBLIC_BACKEND_URL ||
   'http://localhost:5000'
 ).replace(/\/$/, '');
+
+const UI_REFRESH_INTERVAL_MS = 60_000;
 
 
 function normalizeClassification(value: unknown): Classification {
@@ -148,6 +135,7 @@ function normalizeSnapshot(payload: unknown): NetworkSnapshotItem[] {
         ? network.clients
             .map((client) => normalizeClient(client as ClientSnapshot))
             .filter((client): client is ClientSnapshot => Boolean(client))
+            .sort((left, right) => left.mac.localeCompare(right.mac))
         : [];
 
       return {
@@ -156,34 +144,68 @@ function normalizeSnapshot(payload: unknown): NetworkSnapshotItem[] {
         ssid: String(network.ssid || 'Hidden').trim() || 'Hidden',
         signal: network.signal == null ? null : Number(network.signal),
         classification: normalizeClassification(network.classification),
-        last_seen: normalizeLastSeen(network.last_seen),
+        last_seen: normalizeLastSeen(network.last_seen ?? network.timestamp),
         clients,
       };
     })
-    .filter((network): network is NetworkSnapshotItem => Boolean(network));
+    .filter((network): network is NetworkSnapshotItem => Boolean(network))
+    .sort((left, right) => left.bssid.localeCompare(right.bssid));
 }
 
 
 function getNodeStyle(classification: Classification) {
   switch (classification) {
     case 'rogue':
-      return { border: '2px solid #ef4444', boxShadow: '0 0 10px rgba(239, 68, 68, 0.9)' };
+      return {
+        border: '1.5px solid rgba(239, 68, 68, 0.95)',
+        boxShadow: '0 0 18px rgba(239, 68, 68, 0.30)',
+      };
     case 'suspicious':
-      return { border: '2px solid #f59e0b', boxShadow: '0 0 10px rgba(245, 158, 11, 0.35)' };
+      return {
+        border: '1.5px solid rgba(249, 115, 22, 0.95)',
+        boxShadow: '0 0 18px rgba(249, 115, 22, 0.24)',
+      };
     default:
-      return { border: '2px solid #22c55e', boxShadow: '0 0 10px rgba(34, 197, 94, 0.25)' };
+      return {
+        border: '1.5px solid rgba(34, 197, 94, 0.90)',
+        boxShadow: '0 0 18px rgba(34, 197, 94, 0.18)',
+      };
   }
 }
 
 
-function getEdgeStyle(classification: Classification) {
+function getClassificationTextColor(classification: Classification) {
   switch (classification) {
     case 'rogue':
-      return '#ef4444';
+      return 'text-red-300';
     case 'suspicious':
-      return '#f59e0b';
+      return 'text-orange-300';
     default:
-      return '#22c55e';
+      return 'text-emerald-300';
+  }
+}
+
+
+function getClassificationChip(classification: Classification) {
+  switch (classification) {
+    case 'rogue':
+      return 'bg-red-950/80 text-red-200 border border-red-700/60';
+    case 'suspicious':
+      return 'bg-orange-950/80 text-orange-200 border border-orange-700/60';
+    default:
+      return 'bg-emerald-950/80 text-emerald-200 border border-emerald-700/60';
+  }
+}
+
+
+function getEdgeColor(classification: Classification) {
+  switch (classification) {
+    case 'rogue':
+      return 'rgba(239, 68, 68, 0.65)';
+    case 'suspicious':
+      return 'rgba(249, 115, 22, 0.58)';
+    default:
+      return 'rgba(34, 197, 94, 0.45)';
   }
 }
 
@@ -207,23 +229,85 @@ function relativeLastSeen(lastSeen?: string) {
 }
 
 
+function buildSnapshotSignature(snapshot: NetworkSnapshotItem[]) {
+  return snapshot
+    .map((network) => [
+      network.bssid,
+      network.ssid,
+      network.signal ?? 'na',
+      network.classification,
+      network.last_seen,
+      network.clients.map((client) => `${client.mac}:${client.type || 'device'}`).join(','),
+    ].join('|'))
+    .join('||');
+}
+
+
+function buildNetworkLabel(network: NetworkSnapshotItem): ReactNode {
+  const clientCount = network.clients.length;
+  const classification = normalizeClassification(network.classification);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-slate-50">{network.ssid || 'Hidden'}</div>
+          <div className="truncate font-mono text-[10px] text-slate-400">{network.bssid}</div>
+        </div>
+        <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] ${getClassificationChip(classification)}`}>
+          {classification}
+        </span>
+      </div>
+      <div className="grid grid-cols-3 gap-2 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+        <div className="rounded-xl bg-slate-900/70 px-2 py-2">
+          <div>Signal</div>
+          <div className="mt-1 text-xs font-semibold text-slate-100">{network.signal ?? 'N/A'} dBm</div>
+        </div>
+        <div className="rounded-xl bg-slate-900/70 px-2 py-2">
+          <div>Class</div>
+          <div className={`mt-1 text-xs font-semibold uppercase ${getClassificationTextColor(classification)}`}>{classification}</div>
+        </div>
+        <div className="rounded-xl bg-slate-900/70 px-2 py-2">
+          <div>Clients</div>
+          <div className="mt-1 text-xs font-semibold text-slate-100">{clientCount}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function buildDeviceLabel(client: ClientSnapshot): ReactNode {
+  return (
+    <div className="space-y-2">
+      <div className="truncate font-mono text-[11px] font-medium text-slate-100">{client.mac}</div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="rounded-full border border-slate-700 bg-slate-800/90 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-300">
+          Device
+        </span>
+        <span className="truncate text-[10px] uppercase tracking-[0.18em] text-slate-500">{client.type || 'device'}</span>
+      </div>
+    </div>
+  );
+}
+
+
 function buildGraph(snapshot: NetworkSnapshotItem[]): { nodes: Node<GraphNodeData>[]; edges: Edge[] } {
   const nodes: Node<GraphNodeData>[] = [];
   const edges: Edge[] = [];
-  const deviceNodes = new Map<string, Node<GraphNodeData>>();
 
-  const columnCount = Math.max(1, Math.ceil(Math.sqrt(Math.max(snapshot.length, 1))));
-  const cellWidth = 320;
-  const cellHeight = 250;
-  const startX = 120;
-  const startY = 110;
+  const networksPerRow = 3;
+  const networkSpacingX = 320;
+  const networkSpacingY = 320;
+  const networkStartX = 80;
+  const networkStartY = 60;
 
   snapshot.forEach((network, index) => {
     const classification = normalizeClassification(network.classification);
-    const column = index % columnCount;
-    const row = Math.floor(index / columnCount);
-    const networkX = startX + (column * cellWidth);
-    const networkY = startY + (row * cellHeight);
+    const column = index % networksPerRow;
+    const row = Math.floor(index / networksPerRow);
+    const networkX = networkStartX + (column * networkSpacingX);
+    const networkY = networkStartY + (row * networkSpacingY);
 
     nodes.push({
       id: network.bssid,
@@ -231,106 +315,85 @@ function buildGraph(snapshot: NetworkSnapshotItem[]): { nodes: Node<GraphNodeDat
       sourcePosition: Position.Bottom,
       targetPosition: Position.Top,
       draggable: false,
+      selectable: true,
       data: {
         kind: 'network',
-        label: (
-          <div className="space-y-1">
-            <div className="truncate text-sm font-semibold text-slate-50">{network.ssid || 'Hidden'}</div>
-            <div className="truncate font-mono text-[10px] text-slate-400">{network.bssid}</div>
-            <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.2em] text-slate-300">
-              <span>{classification}</span>
-              <span>{network.signal ?? 'N/A'} dBm</span>
-            </div>
-          </div>
-        ),
+        label: buildNetworkLabel(network),
         displayLabel: network.ssid || 'Hidden',
         bssid: network.bssid,
         ssid: network.ssid || 'Hidden',
-        signal: network.signal ?? null,
+        signal: network.signal,
         classification,
-        last_seen: typeof network.last_seen === 'string' ? network.last_seen : normalizeLastSeen(network.last_seen),
-        sensor_id: network.sensor_id ?? null,
-        clients: network.clients || [],
+        last_seen: network.last_seen,
+        sensor_id: network.sensor_id,
+        clients: network.clients,
+        clientCount: network.clients.length,
       },
       style: {
-        width: 184,
-        minHeight: 74,
-        background: '#020617',
+        width: 240,
+        minHeight: 122,
+        background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(2, 6, 23, 0.98) 100%)',
         color: '#f8fafc',
-        borderRadius: 18,
-        padding: '14px 16px',
+        borderRadius: 22,
+        padding: '14px',
         fontSize: 12,
-        fontWeight: 600,
         textAlign: 'left',
         ...getNodeStyle(classification),
       },
     });
 
-    const clients = network.clients || [];
+    const clients = [...network.clients].sort((left, right) => left.mac.localeCompare(right.mac));
+    const radius = clients.length > 3 ? 165 : 145;
+    const centerX = networkX + 120;
+    const centerY = networkY + 61;
     const angleStep = clients.length > 0 ? (Math.PI * 2) / clients.length : 0;
 
     clients.forEach((client, clientIndex) => {
-      if (!client.mac) {
-        return;
-      }
+      const angle = (angleStep * clientIndex) - (Math.PI / 2);
+      const clientX = centerX + (Math.cos(angle) * radius) - 95;
+      const clientY = centerY + (Math.sin(angle) * radius) - 32;
+      const clientNodeId = `${network.bssid}::${client.mac}`;
 
-      if (!deviceNodes.has(client.mac)) {
-        const angle = (angleStep * clientIndex) - (Math.PI / 2);
-        const deviceX = networkX + (Math.cos(angle) * 150);
-        const deviceY = networkY + 110 + (Math.sin(angle) * 95);
-
-        deviceNodes.set(client.mac, {
-          id: client.mac,
-          position: { x: deviceX, y: deviceY },
-          draggable: false,
-          data: {
-            kind: 'device',
-            label: (
-              <div className="space-y-1">
-                <div className="truncate font-mono text-[11px] text-slate-100">{client.mac}</div>
-                <div className="text-[10px] uppercase tracking-[0.2em] text-slate-400">{client.type || 'device'}</div>
-              </div>
-            ),
-            displayLabel: client.mac,
-            mac: client.mac,
-            deviceType: client.type || 'device',
-          },
-          style: {
-            width: 176,
-            minHeight: 58,
-            background: '#0f172a',
-            color: '#cbd5e1',
-            border: '1px solid #334155',
-            borderRadius: 14,
-            padding: '10px 12px',
-            fontSize: 11,
-            fontWeight: 500,
-            textAlign: 'left',
-            boxShadow: '0 0 12px rgba(15, 23, 42, 0.35)',
-          },
-        });
-      }
+      nodes.push({
+        id: clientNodeId,
+        position: { x: clientX, y: clientY },
+        draggable: false,
+        selectable: true,
+        data: {
+          kind: 'device',
+          label: buildDeviceLabel(client),
+          displayLabel: client.mac,
+          mac: client.mac,
+          deviceType: client.type || 'device',
+        },
+        style: {
+          width: 190,
+          minHeight: 64,
+          background: 'rgba(15, 23, 42, 0.96)',
+          color: '#cbd5e1',
+          border: '1px solid rgba(51, 65, 85, 0.92)',
+          borderRadius: 18,
+          padding: '10px 12px',
+          fontSize: 11,
+          textAlign: 'left',
+          boxShadow: '0 10px 30px rgba(2, 6, 23, 0.30)',
+        },
+      });
 
       edges.push({
         id: `${network.bssid}-${client.mac}`,
         source: network.bssid,
-        target: client.mac,
-        animated: classification === 'rogue',
-        markerEnd: {
-          type: MarkerType.ArrowClosed,
-          width: 18,
-          height: 18,
-          color: getEdgeStyle(classification),
-        },
+        target: clientNodeId,
+        type: 'smoothstep',
+        animated: false,
         style: {
-          stroke: getEdgeStyle(classification),
-          strokeWidth: classification === 'rogue' ? 2.4 : 1.8,
+          stroke: getEdgeColor(classification),
+          strokeWidth: 1.15,
         },
       });
     });
   });
 
-  nodes.push(...deviceNodes.values());
   return { nodes, edges };
 }
 
@@ -342,9 +405,36 @@ export function NetworkGraph() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedNode, setSelectedNode] = useState<GraphNodeData | null>(null);
+  const [lastUiRefresh, setLastUiRefresh] = useState<string | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
+  const latestSnapshotRef = useRef<NetworkSnapshotItem[] | null>(null);
+  const hasAppliedInitialSnapshotRef = useRef(false);
+  const appliedSignatureRef = useRef('');
   const flowRef = useRef<ReactFlowInstance | null>(null);
+  const hasFitInitialViewRef = useRef(false);
+
+  const applySnapshotToGraph = (snapshot: NetworkSnapshotItem[]) => {
+    const signature = buildSnapshotSignature(snapshot);
+    if (signature === appliedSignatureRef.current) {
+      return;
+    }
+
+    const nextGraph = buildGraph(snapshot);
+    setNodes(nextGraph.nodes);
+    setEdges(nextGraph.edges);
+    setLoading(false);
+    setError(null);
+    appliedSignatureRef.current = signature;
+    setLastUiRefresh(new Date().toISOString());
+
+    if (!hasFitInitialViewRef.current) {
+      window.requestAnimationFrame(() => {
+        flowRef.current?.fitView({ padding: 0.18, duration: 300 });
+      });
+      hasFitInitialViewRef.current = true;
+    }
+  };
 
   useEffect(() => {
     const socket = io(SOCKET_URL, {
@@ -375,42 +465,12 @@ export function NetworkGraph() {
 
     socket.on('networks_snapshot', (payload: unknown) => {
       const snapshot = normalizeSnapshot(payload);
-      const nextGraph = buildGraph(snapshot);
+      latestSnapshotRef.current = snapshot;
 
-      setNodes(nextGraph.nodes);
-      setEdges(nextGraph.edges);
-      setLoading(false);
-      setError(null);
-
-      window.requestAnimationFrame(() => {
-        flowRef.current?.fitView({ padding: 0.2, duration: 350 });
-      });
-    });
-
-    socket.on('attack_command_ack', (event: AttackCommandAckEvent) => {
-      if (event.status === 'ok') {
-        toast.success('Attack dispatched', {
-          description: event.bssid || 'Containment request accepted',
-        });
-        return;
+      if (!hasAppliedInitialSnapshotRef.current) {
+        applySnapshotToGraph(snapshot);
+        hasAppliedInitialSnapshotRef.current = true;
       }
-
-      toast.error('Attack rejected', {
-        description: event.message || event.bssid || 'Backend rejected the attack command',
-      });
-    });
-
-    socket.on('attack_ack', (event: AttackAckEvent) => {
-      if (event.status === 'executed') {
-        toast.success('Attack executed', {
-          description: event.bssid || 'Sensor confirmed containment',
-        });
-        return;
-      }
-
-      toast.error('Attack failed', {
-        description: event.message || event.bssid || 'Sensor reported a containment failure',
-      });
     });
 
     return () => {
@@ -419,36 +479,22 @@ export function NetworkGraph() {
     };
   }, [setEdges, setNodes]);
 
-  const handleNodeClick = async (_event: ReactMouseEvent, node: Node<GraphNodeData>) => {
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      if (!latestSnapshotRef.current) {
+        return;
+      }
+
+      applySnapshotToGraph(latestSnapshotRef.current);
+    }, UI_REFRESH_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [setEdges, setNodes]);
+
+  const handleNodeClick = (_event: ReactMouseEvent, node: Node<GraphNodeData>) => {
     setSelectedNode(node.data);
-
-    if (node.data.kind !== 'network') {
-      return;
-    }
-
-    const sensorId = node.data.sensor_id;
-    if (!sensorId) {
-      toast.error('Attack unavailable', {
-        description: 'This network is missing its sensor mapping',
-      });
-      return;
-    }
-
-    if (!socketRef.current?.connected) {
-      toast.error('Realtime backend offline', {
-        description: 'Reconnect to dispatch an attack command',
-      });
-      return;
-    }
-
-    socketRef.current.emit('attack_command', {
-      sensor_id: sensorId,
-      bssid: node.id,
-    });
-
-    toast.message('Attack requested', {
-      description: `${node.data.ssid || node.data.label} (${node.id})`,
-    });
   };
 
   if (loading) {
@@ -456,7 +502,7 @@ export function NetworkGraph() {
       <div className="flex h-full w-full items-center justify-center bg-slate-950">
         <div className="text-center">
           <div className="mx-auto mb-4 h-12 w-12 rounded-full border-4 border-cyan-500 border-t-transparent animate-spin" />
-          <p className="text-slate-300">Waiting for live network snapshots...</p>
+          <p className="text-slate-300">Waiting for buffered network snapshots...</p>
         </div>
       </div>
     );
@@ -477,6 +523,9 @@ export function NetworkGraph() {
     );
   }
 
+  const networkNodesCount = nodes.filter((node) => node.data.kind === 'network').length;
+  const deviceNodesCount = nodes.filter((node) => node.data.kind === 'device').length;
+
   return (
     <div className="flex h-full w-full bg-slate-950">
       <div className="relative flex-1">
@@ -495,19 +544,23 @@ export function NetworkGraph() {
           elementsSelectable
           panOnDrag
           zoomOnScroll
+          defaultEdgeOptions={{
+            type: 'smoothstep',
+            animated: false,
+          }}
           proOptions={{ hideAttribution: true }}
         >
-          <Background color="#1e293b" gap={20} />
+          <Background color="#1e293b" gap={22} />
           <MiniMap
             pannable
             zoomable
             nodeColor={(node) => {
               if (node.data?.kind === 'device') {
-                return '#64748b';
+                return '#475569';
               }
-              return getEdgeStyle((node.data?.classification || 'legit') as Classification);
+              return getEdgeColor((node.data?.classification || 'legit') as Classification);
             }}
-            maskColor="rgba(2, 6, 23, 0.55)"
+            maskColor="rgba(2, 6, 23, 0.48)"
             style={{ backgroundColor: '#020617', border: '1px solid #1e293b' }}
           />
           <Controls />
@@ -515,29 +568,34 @@ export function NetworkGraph() {
 
         <div className="absolute left-4 top-4 flex items-center gap-3 rounded-full border border-slate-700 bg-slate-950/90 px-4 py-2 text-sm text-slate-200 shadow-lg backdrop-blur">
           {connected ? <Wifi className="h-4 w-4 text-emerald-400" /> : <WifiOff className="h-4 w-4 text-red-400" />}
-          <span>{connected ? 'Live Socket Connected' : 'Socket Reconnecting'}</span>
+          <span>{connected ? 'Socket Connected' : 'Socket Reconnecting'}</span>
           <span className="text-slate-500">|</span>
-          <span>{nodes.filter((node) => node.data.kind === 'network').length} networks</span>
-          <span>{nodes.filter((node) => node.data.kind === 'device').length} devices</span>
+          <span>{networkNodesCount} networks</span>
+          <span>{deviceNodesCount} devices</span>
+          <span className="text-slate-500">|</span>
+          <span>UI refresh: 60s</span>
         </div>
 
         <div className="absolute bottom-4 left-4 rounded-2xl border border-slate-800 bg-slate-950/90 px-4 py-3 text-xs text-slate-300 shadow-lg backdrop-blur">
           <div className="flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4 text-red-400" />
-            <span>Click any network node to launch attack</span>
+            <Activity className="h-4 w-4 text-cyan-400" />
+            <span>Stable buffered rendering from live Socket.IO snapshots</span>
           </div>
+          {lastUiRefresh && (
+            <div className="mt-2 text-slate-500">Last UI refresh: {relativeLastSeen(lastUiRefresh)}</div>
+          )}
         </div>
       </div>
 
-      <aside className="h-full w-[340px] border-l border-slate-800 bg-slate-900/90 p-6">
+      <aside className="h-full w-[360px] border-l border-slate-800 bg-slate-900/90 p-6">
         {selectedNode ? (
           <div className="space-y-5">
             <div>
               <div className="mb-2 flex items-center gap-2">
                 {selectedNode.kind === 'network' ? (
-                  <Zap className="h-5 w-5 text-cyan-400" />
+                  <Router className="h-5 w-5 text-cyan-400" />
                 ) : (
-                  <Shield className="h-5 w-5 text-slate-400" />
+                  <Smartphone className="h-5 w-5 text-slate-400" />
                 )}
                 <h3 className="text-lg font-semibold text-white">
                   {selectedNode.kind === 'network' ? 'Network Details' : 'Device Details'}
@@ -545,8 +603,8 @@ export function NetworkGraph() {
               </div>
               <p className="text-sm text-slate-400">
                 {selectedNode.kind === 'network'
-                  ? 'Live backend snapshot data'
-                  : 'Client observed in the current snapshot'}
+                  ? 'Live snapshot metadata from the backend'
+                  : 'Observed client device in the current buffered graph'}
               </p>
             </div>
 
@@ -559,37 +617,50 @@ export function NetworkGraph() {
               <>
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">BSSID</div>
-                    <div className="mt-2 break-all font-mono text-sm text-slate-200">{selectedNode.bssid}</div>
+                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">SSID</div>
+                    <div className="mt-2 text-sm text-slate-200">{selectedNode.ssid || 'Hidden'}</div>
                   </div>
                   <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Signal</div>
-                    <div className="mt-2 text-sm text-slate-200">{selectedNode.signal ?? 'N/A'} dBm</div>
+                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">BSSID</div>
+                    <div className="mt-2 break-all font-mono text-sm text-slate-200">{selectedNode.bssid}</div>
                   </div>
                 </div>
 
                 <div className="grid gap-3 sm:grid-cols-2">
                   <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Classification</div>
-                    <div className="mt-2 text-sm text-slate-200">{selectedNode.classification}</div>
+                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Signal</div>
+                    <div className="mt-2 text-sm text-slate-200">{selectedNode.signal ?? 'N/A'} dBm</div>
                   </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Classification</div>
+                    <div className={`mt-2 text-sm font-semibold uppercase ${getClassificationTextColor(selectedNode.classification || 'legit')}`}>
+                      {selectedNode.classification}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-2">
                   <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
                     <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Last Seen</div>
                     <div className="mt-2 text-sm text-slate-200">{relativeLastSeen(selectedNode.last_seen)}</div>
+                  </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Clients Count</div>
+                    <div className="mt-2 text-sm text-slate-200">{selectedNode.clientCount || selectedNode.clients?.length || 0}</div>
                   </div>
                 </div>
 
                 <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
                   <div className="mb-3 flex items-center justify-between">
-                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Connected Clients</div>
-                    <div className="text-xs text-slate-400">{selectedNode.clients?.length || 0}</div>
+                    <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Clients</div>
+                    <div className="text-xs text-slate-400">{selectedNode.clients?.length || 0} total</div>
                   </div>
                   <div className="space-y-2">
                     {(selectedNode.clients || []).length > 0 ? (
                       (selectedNode.clients || []).map((client) => (
                         <div key={client.mac} className="rounded-xl border border-slate-800 bg-slate-900 px-3 py-2">
                           <div className="font-mono text-xs text-slate-200">{client.mac}</div>
-                          <div className="mt-1 text-xs text-slate-500">{client.type || 'device'}</div>
+                          <div className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">{client.type || 'device'}</div>
                         </div>
                       ))
                     ) : (
@@ -605,7 +676,7 @@ export function NetworkGraph() {
                   <div className="mt-2 break-all font-mono text-sm text-slate-200">{selectedNode.mac}</div>
                 </div>
                 <div className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Device Type</div>
+                  <div className="text-xs uppercase tracking-[0.2em] text-slate-500">Type</div>
                   <div className="mt-2 text-sm text-slate-200">{selectedNode.deviceType || 'device'}</div>
                 </div>
               </>
@@ -613,7 +684,7 @@ export function NetworkGraph() {
           </div>
         ) : (
           <div className="flex h-full items-center justify-center rounded-3xl border border-dashed border-slate-800 bg-slate-950 p-6 text-center text-sm text-slate-500">
-            Select a node to inspect its live details.
+            Click a node to inspect its details.
           </div>
         )}
       </aside>
