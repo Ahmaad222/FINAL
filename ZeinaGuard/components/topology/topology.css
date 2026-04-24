@@ -1,113 +1,102 @@
-/* * Advanced ZeinaGuard Network Topology Styles
- * Theme: Modern SOC / Glassmorphism
+/*
+ * Enterprise ZeinaGuard Topology Theme
+ * Style: Clean, Tactical, High-Contrast
  */
 
-/* --- Base Background & Grid --- */
+/* --- Base Environment --- */
 .react-flow__background {
-  background: radial-gradient(circle at 50% 50%, #0f172a 0%, #020617 100%) !important;
+  background-color: #090c10 !important;
 }
 
 .react-flow__background pattern circle {
-  fill: rgba(56, 189, 248, 0.08) !important;
+  fill: #1e293b !important;
 }
 
-/* --- Nodes Base Styling (Glassmorphism) --- */
+/* --- Universal Node Architecture --- */
 .react-flow__node {
-  background: rgba(15, 23, 42, 0.6) !important;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.08) !important;
-  border-radius: 16px !important;
-  color: #f8fafc !important;
+  background: #111827 !important;
+  border: 1px solid #374151 !important;
+  border-radius: 6px !important;
+  padding: 14px 24px !important;
+  color: #e2e8f0 !important;
   font-family: 'Inter', system-ui, sans-serif;
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
-  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) !important;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.4);
+  transition: transform 0.2s ease, border-color 0.2s ease !important;
 }
 
 /* Interactive Hover State */
 .react-flow__node:hover {
-  transform: scale(1.08) translateY(-4px);
-  border-color: rgba(56, 189, 248, 0.5) !important;
-  box-shadow: 0 15px 35px -5px rgba(56, 189, 248, 0.3), 
-              inset 0 0 15px rgba(56, 189, 248, 0.2);
+  transform: translateY(-2px);
+  border-color: #60a5fa !important;
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5), 0 0 0 2px rgba(96, 165, 250, 0.15) !important;
   z-index: 1000 !important;
 }
 
-/* --- Security Node Classifications --- */
+/* --- Tactical Threat Classifications --- */
 
-/* 1. The Sensor (Core Guardian) */
+/* Core Sensor (Active / Secure) */
 .node-sensor {
-  border: 1px solid rgba(16, 185, 129, 0.5) !important;
-  background: linear-gradient(145deg, rgba(16, 185, 129, 0.15) 0%, rgba(15, 23, 42, 0.8) 100%) !important;
-  box-shadow: 0 0 20px rgba(16, 185, 129, 0.2), 
-              inset 0 0 10px rgba(16, 185, 129, 0.1);
+  border-left: 4px solid #10b981 !important;
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.08) 0%, #111827 80%) !important;
 }
 
-/* 2. Rogue Node (Critical Threat - Radar Pulse) */
+/* Rogue AP (Critical Alert) */
 .node-rogue {
-  border: 1px solid rgba(239, 68, 68, 0.6) !important;
-  background: linear-gradient(145deg, rgba(239, 68, 68, 0.15) 0%, rgba(15, 23, 42, 0.8) 100%) !important;
-  animation: pulse-rogue 2s infinite cubic-bezier(0.66, 0, 0, 1);
+  border-left: 4px solid #e11d48 !important;
+  background: linear-gradient(90deg, rgba(225, 29, 72, 0.12) 0%, #111827 80%) !important;
+  animation: alert-border-pulse 2s infinite ease-out;
 }
 
-@keyframes pulse-rogue {
-  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
-  70% { box-shadow: 0 0 0 15px rgba(239, 68, 68, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+@keyframes alert-border-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(225, 29, 72, 0.3); }
+  70% { box-shadow: 0 0 0 8px rgba(225, 29, 72, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(225, 29, 72, 0); }
 }
 
-/* 3. Suspicious Node (Warning - Soft Glow) */
+/* Suspicious Client (Warning) */
 .node-suspicious {
-  border: 1px solid rgba(245, 158, 11, 0.5) !important;
-  background: linear-gradient(145deg, rgba(245, 158, 11, 0.1) 0%, rgba(15, 23, 42, 0.8) 100%) !important;
-  animation: pulse-suspicious 3s infinite ease-in-out;
+  border-left: 4px solid #f59e0b !important;
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.08) 0%, #111827 80%) !important;
 }
 
-@keyframes pulse-suspicious {
-  0%, 100% { filter: drop-shadow(0 0 4px rgba(245, 158, 11, 0.2)); }
-  50% { filter: drop-shadow(0 0 12px rgba(245, 158, 11, 0.6)); }
-}
-
-/* --- Edges (Data Connections) --- */
+/* --- Secure Data Links (Edges) --- */
 .react-flow__edge-path {
-  stroke-width: 2;
-  stroke: rgba(148, 163, 184, 0.15);
-  stroke-linecap: round;
-  transition: stroke 0.3s ease;
+  stroke-width: 1.5;
+  stroke: #475569;
 }
 
-/* Flowing Packets Animation */
+/* Active Packet Flow */
 .react-flow__edge.animated path {
   stroke: #38bdf8;
-  stroke-width: 2.5;
-  stroke-dasharray: 6 12;
-  filter: drop-shadow(0 0 6px rgba(56, 189, 248, 0.8));
-  animation: flow-packets 1s linear infinite;
+  stroke-width: 2;
+  stroke-dasharray: 4 8;
+  filter: drop-shadow(0 0 2px rgba(56, 189, 248, 0.5));
+  animation: tactical-flow 1.2s linear infinite;
 }
 
-@keyframes flow-packets {
-  from { stroke-dashoffset: 18; }
+@keyframes tactical-flow {
+  from { stroke-dashoffset: 24; }
   to { stroke-dashoffset: 0; }
 }
 
-/* --- UI Controls & Navigation --- */
+/* --- Command Controls --- */
 .react-flow__controls {
-  background: rgba(15, 23, 42, 0.8) !important;
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.1) !important;
-  border-radius: 12px;
-  padding: 4px;
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  background: #111827 !important;
+  border: 1px solid #374151 !important;
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .react-flow__controls-button {
   background: transparent !important;
-  border: none !important;
-  fill: #cbd5e1 !important;
-  transition: fill 0.2s ease, transform 0.2s ease;
+  border-bottom: 1px solid #1f2937 !important;
+  fill: #9ca3af !important;
 }
 
 .react-flow__controls-button:hover {
-  fill: #38bdf8 !important;
-  transform: scale(1.1);
+  background: #1f2937 !important;
+  fill: #f8fafc !important;
 }
